@@ -1,0 +1,31 @@
+// Package agentpolicy decides what an agent may do: a rule grammar over
+// tool calls, an engine that becomes the loop's BeforeToolCall hook, a
+// journal of every verdict, and an answer source for the calls the
+// engine defers. Guards over content live in the guard package and
+// become the loop's BeforeModelCall and ShouldStopAfterTurn hooks; a
+// guard and a reviewer backed by a model live in classify.
+//
+// A policy is three lists of rules and a default:
+//
+//	rules, _ := agentpolicy.ParseRules("bash(git status:*) bash(npm test:*)")
+//	eng, err := agentpolicy.Build(agentpolicy.Policy{
+//		Allow:   rules,
+//		Deny:    must(agentpolicy.ParseRules("bash(rm:*)")),
+//		Default: agentpolicy.Ask(),
+//	}, map[string]agentpolicy.ToolMatcher{
+//		"bash": {Match: agentpolicy.PrefixMatcher("command")},
+//	})
+//	cfg.BeforeToolCall = eng.BeforeToolCall()
+//
+// Precedence is deny, then ask, then allow, then the default, always. A
+// deny blocks the call with a reason that names the rule; an ask defers
+// it to the caller, who answers through the loop's Resume. When a
+// tool's matcher splits a call into several subjects, a shell command
+// into its subcommands say, the call is denied if any subject is, asked
+// about if any subject is, and allowed only when every subject is.
+//
+// The engine never calls a model or opens a socket: the same policy and
+// the same call always give the same verdict. Every verdict, every
+// grant and every reviewer's answer reaches the observer exactly once,
+// so a product can record it beside the session.
+package agentpolicy
