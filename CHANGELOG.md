@@ -5,7 +5,7 @@ All user-visible changes to this library. The format follows
 uses [Semantic Versioning](https://semver.org/); before v1.0.0 minor
 versions may break the API.
 
-## Unreleased
+## v0.0.1 - 2026-09-20
 
 - The rule grammar: `Rule` is a tool name or a name with a specifier,
   `Bash(git status:*)`, with a `Source` naming where it came from.
