@@ -54,6 +54,13 @@ type Verdict struct {
 	// Reason is the stable text behind the action, the same text the
 	// model reads when the action blocks a call.
 	Reason string
+	// By names who decided, in the session format's words: [ByPolicy]
+	// for a rule the engine evaluated on its own, [ByAgent] for a
+	// reviewer that is a model, [ByHuman] for a person a front asked.
+	// It is what a product writes as the decision's decider when it
+	// records the verdict, and it is empty for a guard's verdict,
+	// whose decider is the guard that Guard names.
+	By string
 	// Held is set on a Defer for a call the policy allowed but holds
 	// because another call of its batch asks, and on the verdict that
 	// releases or refuses it once the ask is answered.
@@ -148,9 +155,18 @@ type deferredCall struct {
 	allowed string
 }
 
-// byPolicy is what the engine's decisions name as their decider, the
-// session format's word for a rule the harness evaluated on its own.
-const byPolicy = "policy"
+// Who a decision names as its decider, in the session format's words.
+const (
+	// ByPolicy is a rule the harness evaluated on its own, which is
+	// every decision the engine makes.
+	ByPolicy = "policy"
+	// ByAgent is another model: a [Reviewer] backed by one, as the
+	// classify package's is.
+	ByAgent = "agent"
+	// ByHuman is a person the front asked, which is what a [Reviewer]
+	// that prompts one sets on its [Review].
+	ByHuman = "human"
+)
 
 // Build validates the policy against the matchers and returns the
 // runtime form. It fails with [ErrNoDefault] when the default is unset,
@@ -474,7 +490,7 @@ func (e *Engine) Decide(ctx context.Context, info agentturn.ToolCallInfo) (*agen
 	if info.Call != nil {
 		name, callID = info.Call.Name, info.Call.CallID
 	}
-	v := Verdict{RunID: info.RunID, Turn: info.Turn, CallID: callID, Tool: name}
+	v := Verdict{RunID: info.RunID, Turn: info.Turn, CallID: callID, Tool: name, By: ByPolicy}
 
 	a := e.active()
 
@@ -489,7 +505,7 @@ func (e *Engine) Decide(ctx context.Context, info agentturn.ToolCallInfo) (*agen
 		e.remember(info.RunID, callID, d)
 	}
 	e.observe(ctx, v)
-	return &agentturn.ToolDecision{Action: v.Action, Reason: v.Reason, By: byPolicy}, nil
+	return &agentturn.ToolDecision{Action: v.Action, Reason: v.Reason, By: v.By}, nil
 }
 
 // decide evaluates one call as Decide does, without recording it.
@@ -738,7 +754,7 @@ func (e *Engine) Grant(ctx context.Context, r Rule) error {
 	e.mu.Unlock()
 	for i := range granted {
 		g := granted[i]
-		e.observe(ctx, Verdict{Tool: g.Tool, Action: agentturn.Allow, Rule: &g, Reason: "granted " + g.String()})
+		e.observe(ctx, Verdict{Tool: g.Tool, Action: agentturn.Allow, Rule: &g, Reason: "granted " + g.String(), By: ByPolicy})
 	}
 	return nil
 }
@@ -786,7 +802,7 @@ func (e *Engine) GrantOver(ctx context.Context, v Verdict, r Rule) (granted bool
 		reason = "granted " + r.String()
 		for i := range rules {
 			g := rules[i]
-			e.observe(ctx, Verdict{Tool: g.Tool, Action: agentturn.Allow, Rule: &g, Reason: "granted " + g.String()})
+			e.observe(ctx, Verdict{Tool: g.Tool, Action: agentturn.Allow, Rule: &g, Reason: "granted " + g.String(), By: ByPolicy})
 		}
 		return true, reason
 	}
@@ -827,7 +843,7 @@ func (e *Engine) GrantOver(ctx context.Context, v Verdict, r Rule) (granted bool
 	reason = "granted " + r.String() + " over " + ask.String()
 	for i := range rules {
 		g := rules[i]
-		e.observe(ctx, Verdict{Tool: g.Tool, Action: agentturn.Allow, Rule: &g, Reason: reason})
+		e.observe(ctx, Verdict{Tool: g.Tool, Action: agentturn.Allow, Rule: &g, Reason: reason, By: ByPolicy})
 	}
 	return true, reason
 }

@@ -249,6 +249,11 @@ type Verdict struct {
     // so a prompt says which half of a compound command it is asking
     // about. (Round 2, issue 6.)
     Subject string
+    // By names who decided, in the session format's words: ByPolicy,
+    // ByAgent for a model-backed reviewer, ByHuman for a person, which
+    // a Reviewer says through Review.By. It is what the answer itself
+    // will carry when agentturn's Answer names a decider. (Round 2.)
+    By string
 }
 
 func WithObserver(fn func(context.Context, Verdict)) Option
@@ -262,8 +267,11 @@ approval on `Resume` is `proceed`, which the format has a writer
 record only when it answers a hold or rewrote the arguments, since
 the call's `dispatch` is otherwise the record. `by` is what the
 decision names, and the engine names `policy`; an answer through
-`Resume` names nobody, so a product that records a reviewer as
-`agent` does so from the observer. What the entry cannot carry, the
+`Resume` names nobody, since `agentturn.Answer` carries no decider, so
+a product that records a reviewer as `agent` does so from the
+observer, where `Verdict.By` says who answered. When the loop's
+`Answer` names a decider, `Release` and `Answers` will set it from
+there and the entry will carry it. What the entry cannot carry, the
 rule that fired, a hold and its release, a guard's verdict on content,
 a grant, reaches the session through the observer, and a product
 writes it beside the decision as a `custom` entry under `agentpolicy`,

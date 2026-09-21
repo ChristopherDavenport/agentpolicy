@@ -119,11 +119,11 @@ func (e *Engine) GrantSet(ctx context.Context, set RuleSet) (granted []Rule, ref
 
 	for i := range granted {
 		g := granted[i]
-		e.observe(ctx, Verdict{Tool: g.Tool, Action: agentturn.Allow, Rule: &g, Reason: "granted " + g.String() + " by " + sourceName(set.Source)})
+		e.observe(ctx, Verdict{Tool: g.Tool, Action: agentturn.Allow, Rule: &g, Reason: "granted " + g.String() + " by " + sourceName(set.Source), By: ByPolicy})
 	}
 	for i := range refused {
 		r := refused[i].Rule
-		e.observe(ctx, Verdict{Tool: r.Tool, Action: agentturn.Block, Rule: &r, Reason: "not granted " + r.String() + ": " + refused[i].Reason})
+		e.observe(ctx, Verdict{Tool: r.Tool, Action: agentturn.Block, Rule: &r, Reason: "not granted " + r.String() + ": " + refused[i].Reason, By: ByPolicy})
 	}
 	return granted, refused
 }
@@ -193,7 +193,7 @@ func (e *Engine) Revoke(ctx context.Context, source string) int {
 	e.gen++
 	e.mu.Unlock()
 	if n > 0 {
-		e.observe(ctx, Verdict{Action: agentturn.Block, Reason: "revoked the rules granted by " + source})
+		e.observe(ctx, Verdict{Action: agentturn.Block, Reason: "revoked the rules granted by " + source, By: ByPolicy})
 	}
 	return n
 }

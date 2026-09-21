@@ -161,6 +161,17 @@ versions may break the API.
   every mode with a sandbox policy and a network policy and this
   module decides without confining.
 
+- `Verdict.By` names who decided, in the session format's words, with
+  the new `ByPolicy`, `ByAgent` and `ByHuman` constants: the engine's
+  own decisions are the policy's, a reviewer's answer is the
+  reviewer's through the new `Review.By`, which the `classify`
+  reviewer sets to `agent`, and the fail-closed answers the engine
+  makes when a review times out or fails are the policy's. It is what
+  an answer will carry once `agentturn.Answer` names a decider; until
+  then the README says plainly that an approval on resume names
+  nobody, where it used to claim the recorder writes `proceed` with
+  `by` naming the policy.
+
 ## v0.0.2 - 2026-09-20
 
 - Depends on `agentturn` v0.0.6 and, through it, `agenttool` v0.0.5.

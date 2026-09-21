@@ -278,14 +278,22 @@ model with a rubric.
 
 Every decision, hold, release, grant, guard verdict and reviewer
 answer is a `Verdict` through the observer: the run, the turn, the
-call, the action, the rule that fired and the reason. The decision the
-hook returns is what the loop's recorder writes as the session
-format's `decision` entry on the call, Block as `reject` with the
-reason, Defer as `hold`, an approval on resume as `proceed`, with `by`
-naming the policy. What that entry cannot carry, the rule that fired,
-a guard's verdict, a grant, reaches the session through the observer,
-which a product writes beside the decision as a `custom` entry under
-`agentpolicy`.
+call, the action, the rule that fired, the subject it fired on, who
+decided and the reason. The decision the hook returns is what the
+loop's recorder writes as the session format's `decision` entry on the
+call, Block as `reject` with the reason and Defer as `hold`, and the
+engine names itself there, so those entries read `by: policy`.
+
+An answer on resume names nobody: `agentturn.Answer` carries no
+decider, so the `proceed` entry a recorder writes for an approval has
+no `by` of its own. Who answered is on the verdict instead:
+`Verdict.By` is `policy` for a rule the engine evaluated, `agent` for
+a model-backed reviewer and `human` for a person, which a `Reviewer`
+says through `Review.By`. A product records it beside the decision.
+
+What the decision entry cannot carry, the rule that fired, a guard's
+verdict, a grant, reaches the session the same way, as a `custom`
+entry under `agentpolicy`.
 
 ## Development
 

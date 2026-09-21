@@ -138,7 +138,7 @@ func (e *Engine) Release(ctx context.Context, end *agentturn.RunEnd, answers ...
 			missed = append(missed, id+" ("+p.Call.Name+")")
 			continue
 		}
-		v := Verdict{RunID: d.info.RunID, Turn: d.info.Turn, CallID: id, Tool: p.Call.Name, Action: agentturn.Allow, Held: true}
+		v := Verdict{RunID: d.info.RunID, Turn: d.info.Turn, CallID: id, Tool: p.Call.Name, Action: agentturn.Allow, Held: true, By: ByPolicy}
 		if stopped {
 			v.Action, v.Reason = agentturn.Block, "not released: the turn was stopped"
 			out = append(out, agentturn.Output(openresponses.NewFunctionCallOutput(id, heldStoppedText)))

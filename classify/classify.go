@@ -241,14 +241,14 @@ func (r *Reviewer) Review(ctx context.Context, info agentturn.ToolCallInfo, v ag
 	a, err := ask(ctx, r.model, r.modelName, r.rubric, renderCall(info, v), r.o)
 	if err != nil {
 		if parent.Err() == nil && errors.Is(ctx.Err(), context.DeadlineExceeded) {
-			return agentpolicy.Review{Outcome: agentpolicy.TimedOut, Reason: "no answer within " + r.o.timeout.String()}, nil
+			return agentpolicy.Review{Outcome: agentpolicy.TimedOut, Reason: "no answer within " + r.o.timeout.String(), By: agentpolicy.ByAgent}, nil
 		}
 		return agentpolicy.Review{}, err
 	}
 	if *a.Allow {
-		return agentpolicy.Review{Outcome: agentpolicy.Approved, Reason: a.Reason}, nil
+		return agentpolicy.Review{Outcome: agentpolicy.Approved, Reason: a.Reason, By: agentpolicy.ByAgent}, nil
 	}
-	return agentpolicy.Review{Outcome: agentpolicy.Refused, Reason: a.Reason}, nil
+	return agentpolicy.Review{Outcome: agentpolicy.Refused, Reason: a.Reason, By: agentpolicy.ByAgent}, nil
 }
 
 // renderCall writes a deferred call as the model reads it.
