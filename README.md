@@ -143,6 +143,12 @@ source, so a repository's `read(!.env.example)` cannot open a
 sources, with their paths and hashes, so a session can name the policy
 in force.
 
+A withheld rule is kept rather than dropped: `Policy.Withheld` and
+`Engine.Withheld` hold the allow rules of the untrusted sources, so a
+front asking whether to trust a folder can show what trusting it would
+allow. Nothing evaluates that list; trusting a source is a merge again
+with `Trusted` set.
+
 ## Always allow
 
 ```go

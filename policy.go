@@ -55,6 +55,13 @@ type Policy struct {
 	// so the session can name the policy in force. A policy built by
 	// hand may leave it nil.
 	Sources []Source
+	// Withheld are the allow rules of the untrusted sources, stamped
+	// with their source, in the order [Merge] saw them. They are not
+	// evaluated: nothing in the engine reads this list, and a rebuild
+	// of the policy with the source trusted is what applies them. A
+	// front reads them to tell the user what trusting a folder would
+	// allow, which is the reference's whole workflow around trust.
+	Withheld []Rule
 }
 
 // RuleSet is the lists of one source, the input to [Merge].
@@ -76,6 +83,10 @@ type RuleSet struct {
 // source. Default is left unset for the product to choose, and every
 // source is listed on the policy, trusted or not.
 //
+// A withheld allow rule is kept on Policy.Withheld rather than
+// dropped, so a front can tell the user what trusting a folder would
+// allow. Nothing evaluates that list.
+//
 // Each source must be named, and no two may share a name.
 func Merge(sets ...RuleSet) (Policy, error) {
 	ordered := append([]RuleSet(nil), sets...)
@@ -95,6 +106,8 @@ func Merge(sets ...RuleSet) (Policy, error) {
 		p.Ask = append(p.Ask, stamp(set.Ask, set.Source)...)
 		if set.Source.Trusted {
 			p.Allow = append(p.Allow, stamp(set.Allow, set.Source)...)
+		} else {
+			p.Withheld = append(p.Withheld, stamp(set.Allow, set.Source)...)
 		}
 	}
 	return p, nil

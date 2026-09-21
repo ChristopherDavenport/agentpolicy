@@ -157,6 +157,10 @@ type Policy struct {
     Default Default
     // Sources lists where the rules came from, as Merge fills it.
     Sources []Source
+    // Withheld are the allow rules of the untrusted sources, which
+    // Merge keeps rather than drops so a front can show what trusting
+    // a source would allow. Nothing evaluates them. (Round 2, issue 5.)
+    Withheld []Rule
 }
 
 // RuleSet is one source's lists. Merge unions the lists of several

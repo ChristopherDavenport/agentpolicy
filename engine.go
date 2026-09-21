@@ -295,11 +295,12 @@ func checkGrant(r Rule, matchers map[string]ToolMatcher) error {
 
 func clonePolicy(p Policy) Policy {
 	return Policy{
-		Allow:   append([]Rule(nil), p.Allow...),
-		Deny:    append([]Rule(nil), p.Deny...),
-		Ask:     append([]Rule(nil), p.Ask...),
-		Default: p.Default,
-		Sources: append([]Source(nil), p.Sources...),
+		Allow:    append([]Rule(nil), p.Allow...),
+		Deny:     append([]Rule(nil), p.Deny...),
+		Ask:      append([]Rule(nil), p.Ask...),
+		Default:  p.Default,
+		Sources:  append([]Source(nil), p.Sources...),
+		Withheld: append([]Rule(nil), p.Withheld...),
 	}
 }
 
@@ -319,6 +320,18 @@ func (e *Engine) Sources() []Source {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	return append([]Source(nil), e.policy.Sources...)
+}
+
+// Withheld returns the allow rules the merge withheld, the rules of
+// the sources the user has not trusted. The engine never consults
+// them: they are what a front shows when it asks whether to trust a
+// folder or a skill, so the user reads what trusting it would allow
+// rather than agreeing blind. Trusting a source means merging again
+// with Source.Trusted set and rebuilding.
+func (e *Engine) Withheld() []Rule {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return append([]Rule(nil), e.policy.Withheld...)
 }
 
 // BeforeToolCall returns the hook value for agentturn.Config.

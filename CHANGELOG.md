@@ -64,6 +64,13 @@ versions may break the API.
   closed. An alias table that names no tool, or that names one with a
   glob, does not build. (#4)
 
+- `Merge` keeps an untrusted source's allow rules on the new
+  `Policy.Withheld` rather than dropping them, and `Engine.Withheld`
+  reports them, so a front asking whether to trust a folder or a skill
+  can show the user what trusting it would allow rather than only that
+  something was withheld. Nothing evaluates the list: `Decide` walks
+  the allow, deny and ask lists as before. (#5)
+
 ## v0.0.2 - 2026-09-20
 
 - Depends on `agentturn` v0.0.6 and, through it, `agenttool` v0.0.5.

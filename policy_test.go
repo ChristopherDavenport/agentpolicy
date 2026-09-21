@@ -51,13 +51,34 @@ func TestMerge(t *testing.T) {
 	// source, and the untrusted project's allow rules withheld while
 	// its deny and ask rules apply.
 	want := Policy{
-		Allow:   stamped(user, "read"),
-		Deny:    append(stamped(managed, "read(.env:*)"), stamped(project, "bash(rm:*)")...),
-		Ask:     append(stamped(project, "bash"), stamped(user, "edit")...),
-		Sources: []Source{managed, project, user},
+		Allow:    stamped(user, "read"),
+		Deny:     append(stamped(managed, "read(.env:*)"), stamped(project, "bash(rm:*)")...),
+		Ask:      append(stamped(project, "bash"), stamped(user, "edit")...),
+		Sources:  []Source{managed, project, user},
+		Withheld: stamped(project, "bash(npm test:*)"),
 	}
 	if !reflect.DeepEqual(p, want) {
 		t.Errorf("Merge = %+v\nwant %+v", p, want)
+	}
+	// A withheld rule is kept for a front to show and is never
+	// evaluated: the engine reports it and decides without it.
+	built := p
+	built.Default = Ask()
+	e, err := Build(built, testMatchers)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := ruleText(e.Withheld()); got != "bash(npm test:*)" {
+		t.Errorf("Withheld = %q", got)
+	}
+	if d, _ := e.Decide(t.Context(), call("call_1", "bash", `{"command":"npm test --watch"}`)); d.Action != agentturn.Defer || d.Reason != "approval required by bash" {
+		t.Errorf("a withheld rule decided: %+v", d)
+	}
+	// Trusting the source is a merge again, and then it applies.
+	project.Trusted = true
+	p2, err := Merge(RuleSet{Source: project, Allow: rules(t, "bash(npm test:*)"), Deny: rules(t, "bash(rm:*)"), Ask: rules(t, "bash")})
+	if err != nil || len(p2.Withheld) != 0 || !reflect.DeepEqual(p2.Allow, stamped(project, "bash(npm test:*)")) {
+		t.Errorf("trusted merge = %+v, %v", p2, err)
 	}
 	// The default is the product's to choose.
 	if _, set := p.Default.Action(); set {
