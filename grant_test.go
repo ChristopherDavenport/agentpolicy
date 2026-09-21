@@ -2,8 +2,10 @@ package agentpolicy
 
 import (
 	"context"
+	"fmt"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/ChristopherDavenport/agentturn"
@@ -307,4 +309,46 @@ func TestGrantSetJournal(t *testing.T) {
 	if strings.Join(got, "|") != strings.Join(want, "|") {
 		t.Errorf("verdicts = %q\nwant %q", got, want)
 	}
+}
+
+// One engine serves every agent of a product, so its rules change
+// under decisions being made in another agent's run. Under -race this
+// fails if a mutator writes through a list a decision snapshotted.
+func TestEngineIsSafeForConcurrentUse(t *testing.T) {
+	ctx := context.Background()
+	e, err := Build(Policy{Ask: rules(t, "bash"), Allow: rules(t, "read"), Default: Ask()}, testMatchers)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wg sync.WaitGroup
+	for i := range 4 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			run := fmt.Sprintf("run_%d", i)
+			for n := range 50 {
+				info := call(fmt.Sprintf("call_%d_%d", i, n), "bash", `{"command":"git status"}`)
+				info.RunID = run
+				if _, err := e.Decide(ctx, info); err != nil {
+					t.Error(err)
+					return
+				}
+			}
+			e.Forget(run)
+		}()
+	}
+	for i := range 4 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			src := Source{Name: fmt.Sprintf("skill_%d", i), Trusted: true}
+			for range 50 {
+				e.GrantSet(ctx, RuleSet{Source: src, Allow: rules(t, "bash(git status:*)")})
+				e.Grants()
+				e.Withheld()
+				e.Revoke(ctx, src.Name)
+			}
+		}()
+	}
+	wg.Wait()
 }

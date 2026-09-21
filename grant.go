@@ -102,17 +102,22 @@ func (e *Engine) GrantSet(ctx context.Context, set RuleSet) (granted []Rule, ref
 	if !set.Source.Trusted {
 		kept.Allow = nil
 	}
+	// The list is replaced rather than written through: a decision in
+	// another agent's run may be reading the one it snapshotted.
 	e.mu.Lock()
+	grants := make([]RuleSet, 0, len(e.grants)+1)
 	replaced := false
-	for i, g := range e.grants {
+	for _, g := range e.grants {
 		if g.Source.Name == set.Source.Name {
-			e.grants[i], replaced = kept, true
-			break
+			grants, replaced = append(grants, kept), true
+			continue
 		}
+		grants = append(grants, g)
 	}
 	if !replaced {
-		e.grants = append(e.grants, kept)
+		grants = append(grants, kept)
 	}
+	e.grants = grants
 	e.withheld[set.Source.Name] = withheldOf(set)
 	e.gen++
 	e.mu.Unlock()
@@ -177,7 +182,8 @@ func blocks(p Policy, r Rule, src Source) (bool, string) {
 // always-allow journal and outlive a turn.
 func (e *Engine) Revoke(ctx context.Context, source string) int {
 	e.mu.Lock()
-	n, kept := 0, e.grants[:0]
+	n := 0
+	kept := make([]RuleSet, 0, len(e.grants))
 	for _, g := range e.grants {
 		if g.Source.Name != source {
 			kept = append(kept, g)
@@ -185,12 +191,13 @@ func (e *Engine) Revoke(ctx context.Context, source string) int {
 		}
 		n += len(g.Allow) + len(g.Deny) + len(g.Ask)
 	}
-	for i := len(kept); i < len(e.grants); i++ {
-		e.grants[i] = RuleSet{}
+	if len(kept) != len(e.grants) {
+		// Replaced rather than filtered in place, since a decision in
+		// another agent's run may be reading the list it snapshotted.
+		e.grants = kept
+		delete(e.withheld, source)
+		e.gen++
 	}
-	e.grants = kept
-	delete(e.withheld, source)
-	e.gen++
 	e.mu.Unlock()
 	if n > 0 {
 		e.observe(ctx, Verdict{Action: agentturn.Block, Reason: "revoked the rules granted by " + source, By: ByPolicy})
