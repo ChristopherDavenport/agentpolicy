@@ -13,8 +13,8 @@
 //	cfg.ShouldStopAfterTurn = chain.ShouldStopAfterTurn()
 //
 // A guard returns the loop's own vocabulary: Allow passes the content,
-// with a rewrite when it sets Items, of the input before the call or
-// of a message before the transcript keeps it; Block fails the model
+// with a rewrite when it sets Items or Instructions, of the input
+// before the call or of a message before the transcript keeps it; Block fails the model
 // call when the subject is the input, withholds a message behind a
 // placeholder when the subject is one, and stops the run as a guard
 // stop, agentturn.ErrGuard on the run's end, when the subject is a
@@ -37,9 +37,19 @@ import (
 )
 
 // Input is the subject of a check before a model call: the request's
-// input as the loop built it, filtered and transformed.
+// input as the loop built it, filtered and transformed, and the
+// request's instructions.
 type Input struct {
 	Items openresponses.Items
+	// Instructions is the request's instructions field, the text the
+	// model reads before the input. Most of what enters an agent's
+	// window is here and not in the items: an AGENTS.md chain read out
+	// of a checkout, a skill catalogue read out of a directory, a
+	// memory block the model itself wrote. None of it is typed by the
+	// person running the agent, so a guard that reads only the items
+	// blocks an injection in a user message and passes the same
+	// sentence in a repository's AGENTS.md.
+	Instructions string
 }
 
 // Output is the subject of a check after a turn: the response the
@@ -68,6 +78,11 @@ type Verdict struct {
 	// nil keeps the subject. It is ignored for an Output and on a
 	// Block.
 	Items openresponses.Items
+	// Instructions, for an Input, replaces the request's instructions
+	// for this call, so a guard rewrites the text nobody typed as it
+	// rewrites the items. nil keeps them, and "" sends none. It is
+	// ignored for a Message, an Output and on a Block.
+	Instructions *string
 }
 
 // Guard checks one subject, an [Input], a [Message] or an [Output]. A
@@ -127,14 +142,15 @@ type Chain struct {
 
 // BeforeModelCall returns the hook value for agentturn.Config. A Block
 // fails the call with a [BlockedError]; a rewrite replaces the
-// request's input, which the loop documents affects session
-// verification as a Transform does; a guard that errs or defers fails
-// the call with its error.
+// request's input, and its instructions when the verdict carries
+// them, which the loop documents affects session verification as a
+// Transform does; a guard that errs or defers fails the call with its
+// error.
 func (c Chain) BeforeModelCall() func(context.Context, *openresponses.Request) error {
 	return func(ctx context.Context, req *openresponses.Request) error {
 		runID := agentturn.RunIDFromContext(ctx)
 		for _, g := range c.Guards {
-			v, err := g.Check(ctx, Input{Items: req.Input})
+			v, err := g.Check(ctx, Input{Items: req.Input, Instructions: req.Instructions})
 			if err != nil {
 				return fmt.Errorf("agentpolicy/guard: %s: %w", g.Name(), err)
 			}
@@ -143,6 +159,9 @@ func (c Chain) BeforeModelCall() func(context.Context, *openresponses.Request) e
 			case agentturn.Allow:
 				if v.Items != nil {
 					req.Input = v.Items
+				}
+				if v.Instructions != nil {
+					req.Instructions = *v.Instructions
 				}
 			case agentturn.Block:
 				return &BlockedError{Guard: g.Name(), Subject: "input", Reason: v.Reason}
@@ -299,6 +318,16 @@ func message(items openresponses.Items) (*openresponses.Message, bool) {
 	}
 	m, ok := items[0].(*openresponses.Message)
 	return m, ok && m != nil
+}
+
+// instructions returns the instructions a subject carries: an Input's
+// own, and none for a message or a finished turn, which are the
+// model's words and not what was sent to it.
+func instructions(subject any) string {
+	if in, ok := subject.(Input); ok {
+		return in.Instructions
+	}
+	return ""
 }
 
 // noun names the subject in a reason.

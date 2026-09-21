@@ -247,8 +247,12 @@ cfg.OutputGuard = chain.OutputGuard()
 cfg.ShouldStopAfterTurn = chain.ShouldStopAfterTurn()
 ```
 
-An input guard may block, which fails the model call, or rewrite,
-which replaces the request's input for that call. An output guard sees
+An input guard sees the request's instructions beside its items, which
+is where most of what enters an agent's window is: an AGENTS.md chain
+read out of a checkout, a skill catalogue, a memory block the model
+wrote. It may block, which fails the model call, or rewrite, which
+replaces the request's input for that call, and its instructions when
+the verdict carries them. An output guard sees
 each assistant message as the stream completes it, before the
 transcript, the record or the front's `item_end` keeps it: it may
 rewrite the message or withhold it behind a placeholder, `Withheld by

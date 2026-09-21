@@ -137,15 +137,16 @@ func New(model openresponses.Streamer, modelName, rubric string, opts ...Option)
 // Name returns the guard's name.
 func (g *Guard) Name() string { return g.o.name }
 
-// Check renders the subject as text, one line per item, sends it under
-// the rubric and returns Allow or Block with the model's reason. An
-// empty subject passes without a model call.
+// Check renders the subject as text, an input's instructions and then
+// one line per item, sends it under the rubric and returns Allow or
+// Block with the model's reason. An empty subject passes without a
+// model call.
 func (g *Guard) Check(ctx context.Context, subject any) (guard.Verdict, error) {
 	var items openresponses.Items
-	kind := ""
+	kind, instructions := "", ""
 	switch s := subject.(type) {
 	case guard.Input:
-		items, kind = s.Items, "input"
+		items, kind, instructions = s.Items, "input", s.Instructions
 	case guard.Message:
 		kind = "output"
 		if s.Message != nil {
@@ -159,7 +160,7 @@ func (g *Guard) Check(ctx context.Context, subject any) (guard.Verdict, error) {
 	default:
 		return guard.Verdict{Action: agentturn.Allow}, nil
 	}
-	if len(items) == 0 {
+	if len(items) == 0 && instructions == "" {
 		// Nothing to classify, and nothing to spend a model call on.
 		return guard.Verdict{Action: agentturn.Allow}, nil
 	}
@@ -168,7 +169,11 @@ func (g *Guard) Check(ctx context.Context, subject any) (guard.Verdict, error) {
 		ctx, cancel = context.WithTimeout(ctx, g.o.timeout)
 		defer cancel()
 	}
-	a, err := ask(ctx, g.model, g.modelName, g.rubric, kind+":\n"+render(items), g.o)
+	text := kind + ":\n" + render(items)
+	if instructions != "" {
+		text = "instructions:\n" + instructions + "\n" + text
+	}
+	a, err := ask(ctx, g.model, g.modelName, g.rubric, text, g.o)
 	if err != nil {
 		return guard.Verdict{}, err
 	}

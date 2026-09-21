@@ -120,6 +120,21 @@ versions may break the API.
   merged file's rules; doing so copied the managed and project files
   into the local one. (#7)
 
+- `guard`: `Input` carries the request's instructions beside its
+  items, and a `Verdict` may replace them. The instructions are where
+  most of what enters an agent's window is, an AGENTS.md chain read
+  out of a checkout, a skill catalogue, a memory block the model
+  itself wrote, and no guard could see any of it: the same injection
+  was blocked in a user message and passed in a repository's
+  AGENTS.md, and `Limit(256)` passed a request carrying a hundred
+  kilobytes of instructions. `Limit` now counts them in an input's
+  size, so its reason reports a larger number for the same items;
+  `Deny` and `Secrets` scan them, with the reasons unchanged; `Redact`
+  rewrites them through the new `Verdict.Instructions`, which
+  `Chain.BeforeModelCall` writes back to the request; and the
+  `classify` guard sends them to the model with the items. A guard
+  that reads only the items is unaffected. (#8)
+
 ## v0.0.2 - 2026-09-20
 
 - Depends on `agentturn` v0.0.6 and, through it, `agenttool` v0.0.5.

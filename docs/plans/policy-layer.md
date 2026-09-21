@@ -428,8 +428,15 @@ in the package so two products do not diverge. Each sets `Default` to
 ### `guard`
 
 ```go
-// Subject is what a guard looks at.
-type Input struct{ Items openresponses.Items }        // the request's input before a model call
+// Subject is what a guard looks at. An Input carries the request's
+// instructions as well as its items, because that is where most of
+// what enters the window is: an AGENTS.md chain, a skill catalogue, a
+// memory block the model itself wrote, none of it typed by the person
+// running the agent. (Round 2, issue 8.)
+type Input struct {
+    Items        openresponses.Items
+    Instructions string
+}
 type Message struct{ Message *openresponses.Message } // an assistant message before the transcript keeps it
 type Output struct{ Response *openresponses.Response } // a finished turn
 
@@ -437,6 +444,9 @@ type Verdict struct {
     Action agentturn.ToolAction // Allow passes; Block stops; Defer is not valid for content
     Reason string
     Items  openresponses.Items  // for Input or Message, a rewrite; nil keeps the subject
+    // Instructions, for an Input, replaces the request's instructions,
+    // so Redact rewrites the text nobody typed as it rewrites items.
+    Instructions *string
 }
 
 type Guard interface {
@@ -462,9 +472,11 @@ func ShouldStopAfterTurn(guards ...Guard) func(context.Context, agentturn.TurnIn
 ```
 
 An input guard may block, which fails the model call with the reason,
-or rewrite, which replaces the request's input for that call; the loop
-already documents that a changed input affects session verification
-like a `Transform` does. A guard on a message sees each assistant
+or rewrite, which replaces the request's input for that call and its
+instructions when the verdict carries them; the loop already documents
+that a changed input affects session verification like a `Transform`
+does. `Limit` counts the instructions in an input's size, and `Deny`,
+`Secrets` and `Redact` read them as they read the items. A guard on a message sees each assistant
 message as the stream completes it, before the transcript, the record
 or the front's `item_end` keeps it, so it may rewrite the message or
 withhold it behind a placeholder; the deltas have already been
