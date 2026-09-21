@@ -57,6 +57,14 @@ type Verdict struct {
 	// because another call of its batch asks, and on the verdict that
 	// releases or refuses it once the ask is answered.
 	Held bool
+	// Subject is the Text of the subject whose verdict the fold kept,
+	// the half of a compound command that raised the question, as the
+	// tool's Subjects splitter wrote it: a prompt says which part of a
+	// command line it is asking about with it, and the reason names
+	// the rule, the two read together. It is empty for a call no
+	// splitter split, since the splitter is what writes the text, and
+	// for a splitter that writes none.
+	Subject string
 }
 
 // Option configures an [Engine].
@@ -389,7 +397,7 @@ func (e *Engine) Decide(ctx context.Context, info agentturn.ToolCallInfo) (*agen
 
 	a := e.active()
 
-	v.Action, v.Rule, v.Reason = e.decide(a, name, info.Args)
+	v.Action, v.Rule, v.Reason, v.Subject = e.decide(a, name, info.Args)
 	d := deferredCall{info: info}
 	if v.Action == agentturn.Allow && e.batchAsks(a, info) {
 		d.allowed = v.Reason
@@ -404,10 +412,10 @@ func (e *Engine) Decide(ctx context.Context, info agentturn.ToolCallInfo) (*agen
 }
 
 // decide evaluates one call as Decide does, without recording it.
-func (e *Engine) decide(a active, name string, args json.RawMessage) (agentturn.ToolAction, *Rule, string) {
+func (e *Engine) decide(a active, name string, args json.RawMessage) (agentturn.ToolAction, *Rule, string, string) {
 	subjects, err := e.split(name, args)
 	if err != nil {
-		return agentturn.Block, nil, name + " call could not be evaluated: " + err.Error()
+		return agentturn.Block, nil, name + " call could not be evaluated: " + err.Error(), ""
 	}
 	return e.fold(a, name, subjects)
 }
@@ -420,7 +428,7 @@ func (e *Engine) batchAsks(a active, info agentturn.ToolCallInfo) bool {
 		if c == nil || c == info.Call {
 			continue
 		}
-		if action, _, _ := e.decide(a, c.Name, callArgs(c)); action == agentturn.Defer {
+		if action, _, _, _ := e.decide(a, c.Name, callArgs(c)); action == agentturn.Defer {
 			return true
 		}
 	}
@@ -456,11 +464,12 @@ func (e *Engine) split(name string, args json.RawMessage) ([]Subject, error) {
 
 // fold decides every subject and keeps the most restrictive verdict,
 // the first of equals.
-func (e *Engine) fold(a active, name string, subjects []Subject) (agentturn.ToolAction, *Rule, string) {
+func (e *Engine) fold(a active, name string, subjects []Subject) (agentturn.ToolAction, *Rule, string, string) {
 	var (
-		action agentturn.ToolAction
-		rule   *Rule
-		reason string
+		action  agentturn.ToolAction
+		rule    *Rule
+		reason  string
+		subject string
 	)
 	for i, s := range subjects {
 		tool := s.Tool
@@ -469,10 +478,10 @@ func (e *Engine) fold(a active, name string, subjects []Subject) (agentturn.Tool
 		}
 		act, r, why := e.decideSubject(a, tool, s.Args)
 		if i == 0 || restrictiveness(act) > restrictiveness(action) {
-			action, rule, reason = act, r, why
+			action, rule, reason, subject = act, r, why, s.Text
 		}
 	}
-	return action, rule, reason
+	return action, rule, reason, subject
 }
 
 func restrictiveness(a agentturn.ToolAction) int {

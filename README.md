@@ -120,7 +120,10 @@ call is denied if any subject is, asked about if any is, and allowed
 only when every subject is. `git status && rm -rf /` is denied. A
 subject may name another tool, so a redirect target is checked against
 the file tool's rules. The splitter is the product's; there is no
-shell parser here.
+shell parser here. `Verdict.Subject` is the text of the subject the
+verdict was made on, so a prompt about
+`npm run build && ./scripts/deploy.sh --prod` says that the deploy
+script is what it is asking about.
 
 ## Where rules come from
 

@@ -233,6 +233,10 @@ type Verdict struct {
     Rule   *Rule  // the rule that fired, nil for the default
     Reason string
     Held   bool   // a call held for an ask in its batch, and its release
+    // Subject is the Text of the subject whose verdict the fold kept,
+    // so a prompt says which half of a compound command it is asking
+    // about. (Round 2, issue 6.)
+    Subject string
 }
 
 func WithObserver(fn func(context.Context, Verdict)) Option

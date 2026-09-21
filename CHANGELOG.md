@@ -96,6 +96,14 @@ versions may break the API.
 - `Engine.Withheld` also reports the allow rules of a grant set from a
   source the user has not trusted. (#9)
 
+- `Verdict.Subject` carries the text of the subject whose verdict the
+  fold kept, which `Subject.Text` was written for and nothing read: a
+  prompt about `npm run build && ./scripts/deploy.sh --prod` can now
+  say that the deploy script is what raised the question, rather than
+  naming the rule and leaving the user to guess which half of the
+  command line they are approving. The reason strings are unchanged.
+  (#6)
+
 ## v0.0.2 - 2026-09-20
 
 - Depends on `agentturn` v0.0.6 and, through it, `agenttool` v0.0.5.
