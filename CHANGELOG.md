@@ -27,7 +27,6 @@ versions may break the API.
   loop's own error and nothing said which call was missed.
   `Engine.Answers` completes with `Release` and returns its error,
   joined with `ErrDenialBound` when both hold. (#1)
-
 - A rule's tool name may be a glob, `mcp__*`, and the deny and ask
   lists honour it, where before `Build` accepted such a rule and
   `Engine.match` compared tool names with `==`, so a managed
@@ -63,14 +62,12 @@ versions may break the API.
   A name with no entry is still a tool's own name and still fails
   closed. An alias table that names no tool, or that names one with a
   glob, does not build. (#4)
-
 - `Merge` keeps an untrusted source's allow rules on the new
   `Policy.Withheld` rather than dropping them, and `Engine.Withheld`
   reports them, so a front asking whether to trust a folder or a skill
   can show the user what trusting it would allow rather than only that
   something was withheld. Nothing evaluates the list: `Decide` walks
   the allow, deny and ask lists as before. (#5)
-
 - `Engine.GrantSet` activates a rule set under its source, which is
   what a skill's `allowed-tools` needs and neither `Merge` nor
   `GrantOver` could give: there is no prompt behind a skill's rules,
@@ -95,7 +92,6 @@ versions may break the API.
   from it decides as this one does once they are revoked. (#2, #9)
 - `Engine.Withheld` also reports the allow rules of a grant set from a
   source the user has not trusted. (#9)
-
 - `Verdict.Subject` carries the text of the subject whose verdict the
   fold kept, which `Subject.Text` was written for and nothing read: a
   prompt about `npm run build && ./scripts/deploy.sh --prod` can now
@@ -103,7 +99,6 @@ versions may break the API.
   naming the rule and leaving the user to guess which half of the
   command line they are approving. The reason strings are unchanged.
   (#6)
-
 - **Breaking**: `GrantOver` stamps the carve-out it writes with the
   grant's source rather than the ask rule's, and a carve-out now
   cancels a rule of any source it does not rank below rather than only
@@ -119,7 +114,6 @@ versions may break the API.
   file. The README said to persist `Engine.Policy`, which holds every
   merged file's rules; doing so copied the managed and project files
   into the local one. (#7)
-
 - `guard`: `Input` carries the request's instructions beside its
   items, and a `Verdict` may replace them. The instructions are where
   most of what enters an agent's window is, an AGENTS.md chain read
@@ -134,7 +128,6 @@ versions may break the API.
   `Chain.BeforeModelCall` writes back to the request; and the
   `classify` guard sends them to the model with the items. A guard
   that reads only the items is unaffected. (#8)
-
 - `Engine.SetPolicy` replaces the rules without rebuilding the
   matchers, which are the expensive half and do not change, and
   without replacing the config the loop holds, which
@@ -146,7 +139,6 @@ versions may break the API.
   review log are untouched. A policy that cannot be re-derived covers
   the tools it has not seen with a bare name or a tool-name glob in
   the deny or ask list. (#10)
-
 - The hold decides a batch once rather than once per call of it: the
   engine kept a per-pair pass, so the product's splitter ran ninety
   extra times on a batch of ten. The count of asking calls is cached
@@ -160,7 +152,6 @@ versions may break the API.
   approval modes, not the modes themselves, since the reference pairs
   every mode with a sandbox policy and a network policy and this
   module decides without confining.
-
 - `Verdict.By` names who decided, in the session format's words, with
   the new `ByPolicy`, `ByAgent` and `ByHuman` constants: the engine's
   own decisions are the policy's, a reviewer's answer is the
