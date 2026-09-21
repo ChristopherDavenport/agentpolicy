@@ -593,6 +593,12 @@ the model's order and `Refuse` ends the turn with nothing run.
 7. The loop's seams from that study, agentturn v0.0.6: the batch hold
    and `Release`, `Refuse` at the denial bound, `By` on decisions and
    `Note` on answers, `ErrGuard` and `OutputGuard`.
+8. The round 2 studies' ten issues: the deferred calls keyed by run
+   with `Forget`, `Release` reporting a call it cannot answer,
+   tool-name globs with `Filter` and `ToolProvider`, `WithAliases`,
+   `GrantSet` and `Revoke`, `Policy.Withheld`, `Verdict.Subject`, the
+   carve-out under the grant's source with `PolicyOf`, the
+   instructions on `guard.Input`, and `SetPolicy`.
 
 ## Open questions
 
