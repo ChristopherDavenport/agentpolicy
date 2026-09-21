@@ -539,23 +539,16 @@ func TestGrantOver(t *testing.T) {
 			t.Errorf("%s: refused grant was journaled", tc.name)
 		}
 	}
-	// An equal rank may answer. Two ask rules matched this call; the
-	// grant carves out the one behind the verdict, the project's bare ask
-	// then fires with its own verdict, and a grant over that one, at
-	// the project's rank, allows the call. A front walks the same
-	// chain, one prompt per rule.
+	// An equal rank may answer. Two ask rules matched this call, the
+	// managed one behind the verdict and the project's bare one; the
+	// carve-out is filed under the grant's source, managed, and cancels
+	// every matching ask rule that source does not rank below, so both
+	// stop firing for these calls and one prompt answers the call.
 	if granted, reason := e.GrantOver(ctx, v, Rule{Tool: "bash", Spec: "git push:*", Source: managed}); !granted || reason != "granted bash(git push:*) over bash(git push:*)" {
 		t.Errorf("equal rank: GrantOver = %v, %q", granted, reason)
 	}
-	v, d = decide("c7", "bash", `{"command":"git push"}`)
-	if d.Action != agentturn.Defer || d.Reason != "approval required by bash" {
-		t.Fatalf("after equal-rank GrantOver: %+v", d)
-	}
-	if granted, reason := e.GrantOver(ctx, v, Rule{Tool: "bash", Spec: "git push:*", Source: project}); !granted || reason != "granted bash(git push:*) over bash" {
-		t.Errorf("second GrantOver = %v, %q", granted, reason)
-	}
 	if _, d := decide("c7b", "bash", `{"command":"git push"}`); d.Action != agentturn.Allow || d.Reason != "allowed by bash(git push:*)" {
-		t.Errorf("after both grants: %+v", d)
+		t.Errorf("after the grant: %+v", d)
 	}
 	// The deny from the same source is untouched by either.
 	if _, d := decide("c7c", "bash", `{"command":"rm -rf /"}`); d.Action != agentturn.Block {
@@ -792,4 +785,75 @@ func ruleText(list []Rule) string {
 		out[i] = r.String()
 	}
 	return strings.Join(out, " ")
+}
+
+// A grant's carve-out is filed under the grant's own source, so a
+// developer choosing "always allow" writes it into their own settings
+// and not into the file the team shares, and PolicyOf is what a
+// product persists.
+func TestGrantOverCarveOutSourceAndPolicyOf(t *testing.T) {
+	ctx := context.Background()
+	managed := Source{Name: "managed", Path: "/etc/dex/managed.json", Rank: 3, Trusted: true}
+	project := Source{Name: "project", Path: ".dex/settings.json", Rank: 2, Trusted: true}
+	local := Source{Name: "local", Path: ".dex/settings.local.json", Rank: 2, Trusted: true}
+	policy, err := Merge(
+		RuleSet{Source: managed, Deny: rules(t, "bash(rm:*)")},
+		RuleSet{Source: project, Ask: rules(t, "bash(git push:*)")},
+		RuleSet{Source: local, Allow: rules(t, "read")},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy.Default = Ask()
+	j := &journal{}
+	e, err := Build(policy, testMatchers, WithObserver(j.observe))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.Decide(ctx, call("c1", "bash", `{"command":"git push origin feature/x"}`)); err != nil {
+		t.Fatal(err)
+	}
+	v := j.all()[0]
+	if granted, reason := e.GrantOver(ctx, v, Rule{Tool: "bash", Spec: "git push:*", Source: local}); !granted || reason != "granted bash(git push:*) over bash(git push:*)" {
+		t.Fatalf("GrantOver = %v, %q", granted, reason)
+	}
+	// The carve-out is the local file's, and it still cancels the
+	// project's rule, which is what the grant was for.
+	for _, r := range e.Policy().Ask {
+		if _, carve := r.CarveOut(); carve && r.Source.Name != "local" {
+			t.Errorf("the carve-out is filed under %q", r.Source.Name)
+		}
+	}
+	if d, _ := e.Decide(ctx, call("c2", "bash", `{"command":"git push origin feature/y"}`)); d.Action != agentturn.Allow {
+		t.Errorf("the next push: %+v", d)
+	}
+
+	// What the product persists is one source's rules, not the merged
+	// policy.
+	got := e.PolicyOf("local")
+	if !reflect.DeepEqual(got.Source, local) {
+		t.Errorf("PolicyOf(local).Source = %+v", got.Source)
+	}
+	if ruleText(got.Allow) != "read bash(git push:*)" || ruleText(got.Ask) != "bash(!git push:*)" || len(got.Deny) != 0 {
+		t.Errorf("PolicyOf(local) = %+v", got)
+	}
+	if got := e.PolicyOf("managed"); ruleText(got.Deny) != "bash(rm:*)" || len(got.Allow) != 0 {
+		t.Errorf("PolicyOf(managed) = %+v", got)
+	}
+	if got := e.PolicyOf("nobody"); len(got.Allow)+len(got.Deny)+len(got.Ask) != 0 || got.Source.Name != "nobody" {
+		t.Errorf("PolicyOf(nobody) = %+v", got)
+	}
+
+	// A lower-ranked source's carve-out still cannot open a rule an
+	// administrator wrote, which is what the source scoping exists for.
+	e, err = Build(Policy{
+		Deny:    []Rule{{Tool: "read", Spec: ".env:*", Source: managed}, {Tool: "read", Spec: "!.env.example", Source: project}},
+		Default: Allow(),
+	}, testMatchers)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d, _ := e.Decide(ctx, call("c3", "read", `{"path":".env.example"}`)); d.Action != agentturn.Block {
+		t.Errorf("a repository carve-out opened a managed deny: %+v", d)
+	}
 }

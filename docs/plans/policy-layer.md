@@ -210,12 +210,14 @@ could not read. (Finding 1.)
 
 A specifier that begins with `!` is a carve-out: it never matches on
 its own, and a match of another rule in the same list, for the same
-tool, from the same source, is cancelled when the carve-out's pattern
-matches the subject. The pattern after the `!` is the tool's, as any
-spec is. The carve-out reaches only its own source's rules, so a
-`Read(!.env.example)` in a repository's settings cannot open a
-`Read(.env*)` an administrator denied. That is the whole reason a
-rule carries a source. (Finding 3.)
+tool, from a source it does not rank below, is cancelled when the
+carve-out's pattern matches the subject. The pattern after the `!` is
+the tool's, as any spec is. A `Read(!.env.example)` in a repository's
+settings cannot open a `Read(.env*)` an administrator denied, because
+the repository ranks below the administrator. That is the whole reason
+a rule carries a source. Rank rather than source identity is the test,
+so a grant's carve-out can be filed under the grant's own source and
+still reach the rule it answers. (Finding 3; round 2, issue 7.)
 
 ### Verdict observer
 
@@ -340,12 +342,16 @@ func (e *Engine) Grants() []RuleSet
 
 The way an ask rule is kept from firing is written into the policy,
 not held in the engine: a grant with a specifier appends the
-carve-out `<tool>(!<spec>)` beside the ask rule, under the ask rule's
+carve-out `<tool>(!<spec>)` beside the ask rule, under the grant's
 own source, and a bare grant removes the ask rule. `Engine.Policy`
 therefore holds the whole policy in force, an engine rebuilt from it
 decides the same, and a persisted grant is the product's: it writes
-what the policy now holds into its settings and rebuilds the engine
-at the next start. A grant never beats a deny rule, and a grant from
+what `Engine.PolicyOf` reports for its own source into that source's
+settings and rebuilds the engine at the next start. The carve-out is
+the grant's because the grant is, and a carve-out cancels a rule of
+any source it does not rank below, which is what lets it reach the
+rule it answers while a lower-ranked file still cannot carve out a
+higher-ranked one. (Round 2, issue 7.) A grant never beats a deny rule, and a grant from
 a lower-ranked source never touches an ask rule from a higher-ranked
 one.
 
@@ -512,7 +518,7 @@ this package's. The reviewer takes a timeout and reports it as
 - A rule with a spec and no matcher never builds, and is never
   granted.
 - A policy whose default is unset never builds.
-- A carve-out reaches only rules from its own source.
+- A carve-out reaches only rules of a source it does not rank below.
 - A grant never beats a deny rule, and never touches an ask rule from
   a source that outranks it.
 - The policy in force is a value: `Engine.Policy` holds every grant a

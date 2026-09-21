@@ -104,6 +104,22 @@ versions may break the API.
   command line they are approving. The reason strings are unchanged.
   (#6)
 
+- **Breaking**: `GrantOver` stamps the carve-out it writes with the
+  grant's source rather than the ask rule's, and a carve-out now
+  cancels a rule of any source it does not rank below rather than only
+  its own source's. A developer choosing "always allow" therefore
+  writes `bash(!git push:*)` into their own settings instead of into
+  the file the team shares and commits. The security property is
+  unchanged, since rank is the test: a repository's
+  `read(!.env.example)` still cannot open a `read(.env:*)` an
+  administrator denied. A carve-out from a source that outranks a rule
+  now cancels it, where before it did not. (#7)
+- `Engine.PolicyOf(source)` returns one source's rules as a `RuleSet`,
+  which is what a product writes back into that source's settings
+  file. The README said to persist `Engine.Policy`, which holds every
+  merged file's rules; doing so copied the managed and project files
+  into the local one. (#7)
+
 ## v0.0.2 - 2026-09-20
 
 - Depends on `agentturn` v0.0.6 and, through it, `agenttool` v0.0.5.

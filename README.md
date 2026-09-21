@@ -140,8 +140,8 @@ policy.Default = agentpolicy.Ask()
 
 Every rule carries its `Source`. An untrusted source's allow rules are
 withheld while its deny and ask rules apply. A specifier beginning
-with `!` is a carve-out, and it reaches only rules from its own
-source, so a repository's `read(!.env.example)` cannot open a
+with `!` is a carve-out, and it reaches only rules of a source it does
+not rank below, so a repository's `read(!.env.example)` cannot open a
 `read(.env:*)` an administrator denied. `Engine.Sources` reports the
 sources, with their paths and hashes, so a session can name the policy
 in force.
@@ -162,12 +162,22 @@ A grant that answers a prompt the default raised is a plain allow
 rule. A grant that answers a prompt an ask rule raised must also keep
 that rule from firing, since precedence alone would let it ask again:
 `GrantOver` writes the carve-out `bash(!git push:*)` beside the ask
-rule, under the rule's own source, or removes the rule when the grant
+rule, under the grant's own source, or removes the rule when the grant
 is bare. It may only when the grant's source ranks at or above the
 rule's, and it says when it cannot, so a front drops the "always"
-option and offers a one-time approval instead. `Engine.Policy` holds
-everything a grant changed, so a product persists it by writing what
-the policy now holds. A grant never beats a deny.
+option and offers a one-time approval instead. A carve-out cancels a
+rule of any source it does not rank below, so a repository's
+`read(!.env.example)` still cannot open a `read(.env:*)` an
+administrator denied. A grant never beats a deny.
+
+What a product persists is one source's rules:
+
+```go
+set := eng.PolicyOf("local") // the local settings file's rules, grants and all
+```
+
+not `Engine.Policy`, which holds every merged file's rules and would
+copy the managed and project files into the local one.
 
 ## A skill's rules
 

@@ -335,6 +335,42 @@ func (e *Engine) Policy() Policy {
 	return clonePolicy(e.policy)
 }
 
+// PolicyOf returns the rules of one source, as a [RuleSet] carrying
+// that source, which is what a product writes back into that source's
+// settings file. The whole policy is not: it holds the rules of every
+// file that was merged, so a product that persisted it would copy the
+// managed and project files into its own local settings and freeze a
+// snapshot of somebody else's.
+//
+// The rules are the ones in force, so a grant this source made is
+// here, carve-out and all, and a rule another source contributed is
+// not. A source with no rules gives an empty set whose Source is
+// named from [Engine.Sources] when the merge listed it. The scoped
+// sets [Engine.GrantSet] activated are not here: they are not a
+// product's to persist.
+func (e *Engine) PolicyOf(source string) RuleSet {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	set := RuleSet{Source: Source{Name: source}}
+	for _, s := range e.policy.Sources {
+		if s.Name == source {
+			set.Source = s
+			break
+		}
+	}
+	for _, from := range []struct {
+		rules []Rule
+		into  *[]Rule
+	}{{e.policy.Allow, &set.Allow}, {e.policy.Deny, &set.Deny}, {e.policy.Ask, &set.Ask}} {
+		for _, r := range from.rules {
+			if r.Source.Name == source {
+				*from.into = append(*from.into, r)
+			}
+		}
+	}
+	return set
+}
+
 // Sources returns the sources the policy was merged from, as
 // [Merge] listed them, so the session can name the policy in force.
 func (e *Engine) Sources() []Source {
@@ -568,10 +604,14 @@ func (e *Engine) matches(tool, spec string, args json.RawMessage) bool {
 }
 
 // carvedOut reports whether a carve-out in list, for the same tool and
-// from the same source as r, matches the subject.
+// from a source that does not rank below r's, matches the subject.
+// Rank rather than identity is the test, so a grant's carve-out lands
+// in the file the grant came from and still cancels the rule it
+// answers, while a repository's read(!.env.example) cannot open a
+// read(.env:*) an administrator denied from a higher-ranked file.
 func (e *Engine) carvedOut(list []Rule, r Rule, args json.RawMessage) bool {
 	for _, c := range list {
-		if c.Tool != r.Tool || c.Source != r.Source {
+		if c.Tool != r.Tool || c.Source.Rank < r.Source.Rank {
 			continue
 		}
 		if pattern, ok := c.CarveOut(); ok && e.matches(c.Tool, pattern, args) {
@@ -619,11 +659,14 @@ func (e *Engine) Grant(ctx context.Context, r Rule) error {
 // as an allow rule and, when an ask rule produced v, keeps that rule
 // from firing for the calls r matches, since precedence alone would
 // let it ask again: a grant with a specifier appends the carve-out
-// "<tool>(!<spec>)" beside the ask rule, under the ask rule's own
-// source, and a bare grant removes the ask rule. Both changes are in
-// [Engine.Policy], so a product persists a grant by writing what the
-// policy now holds. The grant is journaled as [Engine.Grant] journals
-// one.
+// "<tool>(!<spec>)" beside the ask rule, under the grant's own source,
+// and a bare grant removes the ask rule. The carve-out is the grant's
+// because the grant is, so a product that persists its own source's
+// rules writes a personal "always allow" into its own settings and not
+// into the file the team shares; a carve-out cancels a rule of any
+// source that does not outrank it, which is what makes it reach the
+// rule it answers. [Engine.PolicyOf] is what a product persists. The
+// grant is journaled as [Engine.Grant] journals one.
 //
 // It reports why it cannot, so a front drops the "always" option and
 // offers a one-time approval instead: v did not defer the call, a deny
@@ -687,7 +730,7 @@ func (e *Engine) GrantOver(ctx context.Context, v Verdict, r Rule) (granted bool
 	if g := rules[over]; g.Bare() {
 		e.policy.Ask = slices.Delete(slices.Clone(e.policy.Ask), at, at+1)
 	} else {
-		e.policy.Ask = append(e.policy.Ask, Rule{Tool: ask.Tool, Spec: "!" + g.Spec, Source: ask.Source})
+		e.policy.Ask = append(e.policy.Ask, Rule{Tool: ask.Tool, Spec: "!" + g.Spec, Source: g.Source})
 	}
 	e.policy.Allow = append(e.policy.Allow, rules...)
 	e.mu.Unlock()

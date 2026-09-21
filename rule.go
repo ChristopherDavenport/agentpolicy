@@ -21,15 +21,18 @@ type Rule struct {
 }
 
 // Source is where a set of rules came from: a settings file, a skill,
-// the session. Name identifies the source and scopes a carve-out to
-// the rules of the same source. Path and Hash let a session name the
-// policy in force. Trusted false withholds the source's allow rules in
-// [Merge], as a repository's settings wait for the user to trust the
-// folder while its deny and ask rules apply at once; a Source built by
-// hand is untrusted until it says otherwise. Rank orders sources by
-// authority, higher first: a grant may answer an ask rule only from a
-// source of equal or lower rank. Rank never affects precedence between
-// lists; deny before ask before allow holds whatever the sources.
+// the session. Name identifies the source, keys a scoped grant and
+// names the file a product persists its own rules into. Path and Hash
+// let a session name the policy in force. Trusted false withholds the
+// source's allow rules in [Merge], as a repository's settings wait for
+// the user to trust the folder while its deny and ask rules apply at
+// once; a Source built by hand is untrusted until it says otherwise.
+// Rank orders sources by authority, higher first: a grant may answer
+// an ask rule only from a source of equal or lower rank, a carve-out
+// cancels a rule only of a source it does not rank below, and a grant
+// set's allow rules shadow only the ask rules it does not rank below.
+// Rank never affects precedence between lists; deny before ask before
+// allow holds whatever the sources.
 type Source struct {
 	Name    string
 	Path    string
@@ -97,9 +100,9 @@ func globMatch(pattern, value string) bool {
 // CarveOut returns the pattern of a carve-out, a specifier beginning
 // with "!", and whether the rule is one. A carve-out never matches on
 // its own; it cancels a match of another rule in the same list, for
-// the same tool, from the same source, when its pattern matches the
-// subject. The pattern is the tool's to interpret, as any specifier
-// is.
+// the same tool, from a source it does not rank below, when its
+// pattern matches the subject. The pattern is the tool's to
+// interpret, as any specifier is.
 func (r Rule) CarveOut() (pattern string, ok bool) {
 	if strings.HasPrefix(r.Spec, "!") {
 		return r.Spec[1:], true
