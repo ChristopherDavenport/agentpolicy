@@ -71,12 +71,21 @@ does, because it produces the loop's hook values.
 // Rule is one token of the grammar: a tool name, or a name with a
 // specifier, "Bash(git:*)". The same grammar as a skill's
 // allowed-tools, so agentskill.ToolRule maps onto it field for field
-// without either module importing the other.
+// without either module importing the other. The tool name may be a
+// glob, "mcp__*", which the deny and ask lists honour as both
+// references do; Build refuses one in the allow list and one with a
+// specifier, since a glob names no matcher. (Round 2, issue 3.)
 type Rule struct {
     Tool   string
     Spec   string // "" for a bare name
     Source Source // where the rule came from; zero for the product's own
 }
+
+// MatchesTool is the engine's own tool-name test, exported so a
+// product that filters a tool list does not write a second one that
+// can disagree with the one decisions are made with.
+func (r Rule) MatchesTool(tool string) bool
+func (r Rule) Glob() bool
 
 // Source is where a set of rules came from. Name scopes a carve-out
 // and identifies the source in the merge; Path and Hash let a session
@@ -160,6 +169,15 @@ func (e *Engine) Decide(ctx context.Context, info agentturn.ToolCallInfo) (*agen
 func (e *Engine) BeforeToolCall() func(context.Context, agentturn.ToolCallInfo) (*agentturn.ToolDecision, error)
 func (e *Engine) Policy() Policy
 func (e *Engine) Sources() []Source
+
+// A deny rule with no specifier denies every call of its tool, so the
+// tool is not offered at all: the model never sees it, as in the
+// reference. Removes reports the rule, Filter drops the tools it
+// names and ToolProvider is the hook value over a changing list.
+// (Round 2, issue 3.)
+func (e *Engine) Removes(tool string) (Rule, bool)
+func (e *Engine) Filter(tools []agenttool.Tool) []agenttool.Tool
+func (e *Engine) ToolProvider(base func(context.Context) []agenttool.Tool) func(context.Context) []agenttool.Tool
 ```
 
 Precedence is fixed: deny, then ask, then allow, then the default.
@@ -504,14 +522,18 @@ the model's order and `Refuse` ends the turn with nothing run.
   `allowed-tools` grants for one turn, and Claude Code's permission
   updates carry `removeRules`. A product rebuilds the engine today;
   `Revoke` and a scope on `Rule` wait for the second product.
-- Whether a bare-name deny should also remove the tool from the
-  request, as Claude Code does, through `Config.ToolProvider`. That
-  is an `Engine.Offer` beside `Decide`; the study says whether dex
-  needs it before dex's tool list exists.
+- Answered in round 2: a bare-name deny removes the tool from the
+  request, as Claude Code does. It is `Engine.Filter` beside `Decide`,
+  with `Engine.ToolProvider` as the hook value and `Engine.Removes`
+  for the front, and the engine's own tool-name test is exported as
+  `Rule.MatchesTool` so the two cannot disagree. (Issue 3.)
 - Whether the observer should be replaced by an app-only item the
   product appends after the batch, so verdicts sit in the transcript
   next to the call. The hook cannot append; a product could. Reopen
   when replay needs verdicts in context order rather than by call ID.
 - Whether a spec grammar beyond `prefix:*` and exact match is worth
   defining here. Claude Code's has globs; the study says whether dex
-  needs them.
+  needs them. Round 2 answered the tool-name half only: a `*` in
+  `Rule.Tool` is the module's, because the deny and ask lists must
+  honour `mcp__*` and nothing else can match a tool that has no
+  matcher. What a specifier means is still the tool's.

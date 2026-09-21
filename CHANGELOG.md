@@ -28,6 +28,30 @@ versions may break the API.
   `Engine.Answers` completes with `Release` and returns its error,
   joined with `ErrDenialBound` when both hold. (#1)
 
+- A rule's tool name may be a glob, `mcp__*`, and the deny and ask
+  lists honour it, where before `Build` accepted such a rule and
+  `Engine.match` compared tool names with `==`, so a managed
+  `deny: ["mcp__*"]` was listed by every front and fired on nothing.
+  A `*` matches any run of characters at any position and nothing
+  folds case. **Breaking**: `Build` now refuses a glob in the allow
+  list and a glob with a specifier with the new `ErrToolGlob`, since
+  neither can be honoured: `agentpolicy: tool-name glob: mcp__* is not
+  honoured in the allow list`. `Rule.MatchesTool` and `Rule.Glob` are
+  the engine's own tool-name test, exported so a product does not
+  write a second one that disagrees. (#3)
+- A deny rule with no specifier removes the tool from the request
+  rather than refusing its calls one at a time, which is the most
+  common deny form in the reference: `Engine.Filter` returns the tools
+  a list still offers, `Engine.ToolProvider` is the hook value for
+  `agentturn.Config.ToolProvider` over a base provider, consulted once
+  per turn so a late tool and a changed policy are both picked up, and
+  `Engine.Removes` reports the rule that withheld a tool. This is the
+  `Offer` the round 1 study asked for. (#3)
+- `ErrNoMatcher` names a near miss: a rule whose tool differs from a
+  registered matcher only in case, as a rule copied out of the
+  reference's documentation does, now reads `agentpolicy: no matcher
+  for the rule's tool: Bash(git status:*); did you mean bash?`. (#4)
+
 ## v0.0.2 - 2026-09-20
 
 - Depends on `agentturn` v0.0.6 and, through it, `agenttool` v0.0.5.

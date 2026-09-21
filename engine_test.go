@@ -131,6 +131,15 @@ func TestBuildValidates(t *testing.T) {
 		{name: "empty tool", policy: Policy{Ask: []Rule{{Spec: "x"}}, Default: Ask()}, errText: `agentpolicy: rule "(x)": missing tool name`},
 		{name: "bare rules need no matcher", policy: Policy{Allow: rules(t, "read"), Deny: rules(t, "bash"), Default: Deny()}},
 		{name: "specs with matchers", policy: Policy{Allow: rules(t, "bash(git:*)"), Ask: rules(t, "edit(/etc:*)"), Default: Allow()}, matchers: testMatchers},
+		// A tool-name glob is honoured in the deny and ask lists and
+		// refused where it would not be.
+		{name: "glob denies", policy: Policy{Deny: rules(t, "mcp__*"), Default: Allow()}},
+		{name: "glob asks", policy: Policy{Ask: rules(t, "mcp__*"), Default: Allow()}},
+		{name: "glob allows nothing", policy: Policy{Allow: rules(t, "mcp__*"), Default: Ask()}, err: ErrToolGlob, errText: "agentpolicy: tool-name glob: mcp__* is not honoured in the allow list"},
+		{name: "glob with a specifier", policy: Policy{Deny: rules(t, "mcp__*(rm:*)"), Default: Ask()}, matchers: testMatchers, err: ErrToolGlob, errText: "agentpolicy: tool-name glob: mcp__*(rm:*) takes no specifier"},
+		// The reference's own tool names are a case away from a
+		// product's, so the error says so.
+		{name: "near miss", policy: Policy{Allow: rules(t, "Bash(git status:*)"), Default: Ask()}, matchers: testMatchers, err: ErrNoMatcher, errText: "agentpolicy: no matcher for the rule's tool: Bash(git status:*); did you mean bash?"},
 	}
 	for _, tc := range tests {
 		_, err := Build(tc.policy, tc.matchers)

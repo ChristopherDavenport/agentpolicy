@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 	"sync"
 
 	"github.com/ChristopherDavenport/agentturn"
@@ -21,6 +22,11 @@ var (
 	// has no matcher, so the rule could never match. The error names
 	// the rule.
 	ErrNoMatcher = errors.New("agentpolicy: no matcher for the rule's tool")
+	// ErrToolGlob is returned for a rule whose tool name is a glob that
+	// the engine will not honour: one in the allow list, where the
+	// reference refuses it too, and one with a specifier, which names
+	// no matcher. The error names the rule.
+	ErrToolGlob = errors.New("agentpolicy: tool-name glob")
 )
 
 // Verdict is what was decided and why, for recording: the engine's
@@ -98,21 +104,18 @@ type deferredCall struct {
 const byPolicy = "policy"
 
 // Build validates the policy against the matchers and returns the
-// runtime form. It fails with [ErrNoDefault] when the default is unset
-// and with [ErrNoMatcher] when a rule has a specifier and its tool has
-// no matcher, so a rule that could never match is refused here rather
-// than ignored at the first call. The lists are copied; the caller's
-// slices are not retained.
+// runtime form. It fails with [ErrNoDefault] when the default is unset,
+// with [ErrNoMatcher] when a rule has a specifier and its tool has no
+// matcher, and with [ErrToolGlob] when a rule's tool name is a glob
+// the engine will not honour, so a rule that could never match is
+// refused here rather than ignored at the first call. The lists are
+// copied; the caller's slices are not retained.
 func Build(p Policy, matchers map[string]ToolMatcher, opts ...Option) (*Engine, error) {
 	if _, ok := p.Default.Action(); !ok {
 		return nil, ErrNoDefault
 	}
-	for _, list := range [][]Rule{p.Deny, p.Ask, p.Allow} {
-		for _, r := range list {
-			if err := checkRule(r, matchers); err != nil {
-				return nil, err
-			}
-		}
+	if err := checkPolicy(p, matchers); err != nil {
+		return nil, err
 	}
 	e := &Engine{
 		matchers: matchers,
@@ -126,25 +129,72 @@ func Build(p Policy, matchers map[string]ToolMatcher, opts ...Option) (*Engine, 
 	return e, nil
 }
 
-// checkRule refuses a rule with no tool, and one with a specifier for
-// a tool that has no matcher.
-func checkRule(r Rule, matchers map[string]ToolMatcher) error {
+// checkPolicy refuses every rule of a policy that could never fire.
+func checkPolicy(p Policy, matchers map[string]ToolMatcher) error {
+	for _, list := range []struct {
+		name  string
+		rules []Rule
+	}{{"deny", p.Deny}, {"ask", p.Ask}, {"allow", p.Allow}} {
+		for _, r := range list.rules {
+			if err := checkRule(r, matchers, list.name); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// checkRule refuses a rule with no tool, one with a specifier for a
+// tool that has no matcher, and a tool-name glob the engine will not
+// honour: one in the allow list, and one with a specifier, since the
+// glob names no matcher to read the specifier with. A rule that cannot
+// work fails where every other unusable rule fails, at Build, rather
+// than building and never firing.
+func checkRule(r Rule, matchers map[string]ToolMatcher, list string) error {
 	if r.Tool == "" {
 		return fmt.Errorf("agentpolicy: rule %q: missing tool name", r.String())
+	}
+	if r.Glob() {
+		switch {
+		case list == "allow":
+			return fmt.Errorf("%w: %s is not honoured in the allow list", ErrToolGlob, r)
+		case r.Spec != "":
+			return fmt.Errorf("%w: %s takes no specifier", ErrToolGlob, r)
+		}
+		return nil
 	}
 	if r.Spec == "" {
 		return nil
 	}
 	if matchers[r.Tool].Match == nil {
-		return fmt.Errorf("%w: %s", ErrNoMatcher, r)
+		return fmt.Errorf("%w: %s%s", ErrNoMatcher, r, nearMiss(r.Tool, matchers))
 	}
 	return nil
 }
 
-// checkGrant refuses what checkRule refuses, and a carve-out, which
-// grants nothing.
+// nearMiss names a matcher whose tool differs from the rule's only in
+// case, since a rule copied out of the reference's documentation is
+// spelled with the reference's tool names.
+func nearMiss(tool string, matchers map[string]ToolMatcher) string {
+	near := ""
+	for name := range matchers {
+		if name == tool || !strings.EqualFold(name, tool) {
+			continue
+		}
+		if near == "" || name < near {
+			near = name
+		}
+	}
+	if near == "" {
+		return ""
+	}
+	return "; did you mean " + near + "?"
+}
+
+// checkGrant refuses what checkRule refuses of an allow rule, and a
+// carve-out, which grants nothing.
 func checkGrant(r Rule, matchers map[string]ToolMatcher) error {
-	if err := checkRule(r, matchers); err != nil {
+	if err := checkRule(r, matchers, "allow"); err != nil {
 		return err
 	}
 	if _, carve := r.CarveOut(); carve {
@@ -338,11 +388,12 @@ func (e *Engine) decideSubject(p Policy, tool string, args json.RawMessage) (age
 }
 
 // match returns the first rule of list that matches the subject: the
-// rule names the tool, is not a carve-out, is bare or its specifier
-// matches, and no carve-out from the same source cancels it.
+// rule names the tool, itself or through a glob, is not a carve-out,
+// is bare or its specifier matches, and no carve-out from the same
+// source cancels it.
 func (e *Engine) match(list []Rule, tool string, args json.RawMessage) (Rule, bool) {
 	for _, r := range list {
-		if r.Tool != tool {
+		if !r.MatchesTool(tool) {
 			continue
 		}
 		if _, carve := r.CarveOut(); carve {

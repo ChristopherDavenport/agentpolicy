@@ -31,6 +31,11 @@ matcher per tool that takes specifiers; `PrefixMatcher` covers the
 common case, `<prefix>:*` or an exact value over one string argument.
 A rule with a specifier for a tool without a matcher does not build.
 
+A rule's tool name may be a glob, `mcp__*`, which the deny and ask
+lists honour: a `*` stands for any run of characters, and nothing
+folds case. A glob in the allow list does not build, since a glob
+names no matcher and the reference refuses one too.
+
 ## A policy
 
 ```go
@@ -53,6 +58,17 @@ deny blocks the call with `denied by bash(rm:*)` as its error output;
 an ask defers it, the run ends with the call pending, and the front
 answers through `Agent.Resume`. The default must be set: a deny list
 on its own never allows everything else by accident.
+
+A deny with no specifier denies every call of its tool, so the tool is
+not offered at all: the model never sees it and plans nothing around
+it, as in the reference. `Engine.Filter` drops those tools from a
+list, `Engine.ToolProvider` is the hook value over a list that
+changes, and `Engine.Removes` names the rule for a front that shows
+what a policy withheld.
+
+```go
+cfg.ToolProvider = eng.ToolProvider(mcp.Tools)
+```
 
 An ask holds its batch. When the model asks for `git add -A`,
 `git commit -m wip` and `git push --force` in one turn and the policy
