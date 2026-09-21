@@ -70,11 +70,41 @@ func WithObserver(fn func(context.Context, Verdict)) Option {
 	return func(e *Engine) { e.observer = fn }
 }
 
+// WithAliases names the tools a rule name governs, for the rules a
+// product does not write itself: a settings file copied out of the
+// reference's documentation, and a skill's allowed-tools, are spelled
+// with the reference's tool names, "Bash", "Read", "Edit", and a
+// product's tools are named whatever the product named them. The
+// reference also has one rule name govern several tools, Read reaching
+// its search tools as well as its file one, which nothing else here
+// can express.
+//
+//	agentpolicy.WithAliases(map[string][]string{
+//		"Bash": {"bash"},
+//		"Read": {"read", "grep", "glob"},
+//		"Edit": {"edit", "write"},
+//	})
+//
+// [Build] expands a rule whose name has an entry into one rule per
+// tool it names, keeping the specifier and the source, so the
+// expansion happens once, where the matchers already are, and
+// [Engine.Policy] reports the rules as they are evaluated. A name with
+// no entry is a tool's own name and still fails closed: a rule with a
+// specifier for a tool with no matcher does not build. Expansion is
+// one level: a tool an alias names is not itself expanded. Nothing
+// folds case, and an entry that names no tool does not build.
+func WithAliases(aliases map[string][]string) Option {
+	return func(e *Engine) { e.aliases = aliases }
+}
+
 // Engine is the runtime form of a [Policy]: the policy in force, the
 // matchers it is evaluated with, the grants made since it was built
 // and the calls it has deferred. It is safe for concurrent use.
 type Engine struct {
 	matchers map[string]ToolMatcher
+	// aliases names the tools a rule name governs. It is set at Build
+	// and never written after, so it is read without the lock.
+	aliases  map[string][]string
 	observer func(context.Context, Verdict)
 	bound    DenialBound
 
@@ -114,19 +144,79 @@ func Build(p Policy, matchers map[string]ToolMatcher, opts ...Option) (*Engine, 
 	if _, ok := p.Default.Action(); !ok {
 		return nil, ErrNoDefault
 	}
-	if err := checkPolicy(p, matchers); err != nil {
-		return nil, err
-	}
 	e := &Engine{
 		matchers: matchers,
 		bound:    DefaultDenialBound,
-		policy:   clonePolicy(p),
 		deferred: make(map[string]map[string]deferredCall),
 	}
 	for _, opt := range opts {
 		opt(e)
 	}
+	if err := checkAliases(e.aliases); err != nil {
+		return nil, err
+	}
+	p = e.expandPolicy(p)
+	if err := checkPolicy(p, matchers); err != nil {
+		return nil, err
+	}
+	e.policy = clonePolicy(p)
 	return e, nil
+}
+
+// checkAliases refuses an alias table that would drop a rule or name a
+// tool no call can have.
+func checkAliases(aliases map[string][]string) error {
+	for name, tools := range aliases {
+		switch {
+		case name == "":
+			return fmt.Errorf("agentpolicy: alias: an entry has no rule name")
+		case strings.Contains(name, "*"):
+			return fmt.Errorf("agentpolicy: alias %q: a rule name with a glob names no tool", name)
+		case len(tools) == 0:
+			return fmt.Errorf("agentpolicy: alias %q: names no tool", name)
+		}
+		for _, tool := range tools {
+			if tool == "" || strings.Contains(tool, "*") {
+				return fmt.Errorf("agentpolicy: alias %q: %q is not a tool name", name, tool)
+			}
+		}
+	}
+	return nil
+}
+
+// expand returns the rules r stands for: one per tool its name is an
+// alias for, keeping the specifier and the source, or r itself.
+func (e *Engine) expand(r Rule) []Rule {
+	tools, ok := e.aliases[r.Tool]
+	if !ok {
+		return []Rule{r}
+	}
+	out := make([]Rule, len(tools))
+	for i, tool := range tools {
+		out[i] = Rule{Tool: tool, Spec: r.Spec, Source: r.Source}
+	}
+	return out
+}
+
+// expandList expands every rule of a list, in order.
+func (e *Engine) expandList(list []Rule) []Rule {
+	if len(e.aliases) == 0 || len(list) == 0 {
+		return list
+	}
+	out := make([]Rule, 0, len(list))
+	for _, r := range list {
+		out = append(out, e.expand(r)...)
+	}
+	return out
+}
+
+// expandPolicy expands every list of a policy.
+func (e *Engine) expandPolicy(p Policy) Policy {
+	if len(e.aliases) == 0 {
+		return p
+	}
+	p.Allow, p.Deny, p.Ask = e.expandList(p.Allow), e.expandList(p.Deny), e.expandList(p.Ask)
+	return p
 }
 
 // checkPolicy refuses every rule of a policy that could never fire.
@@ -440,19 +530,27 @@ func (e *Engine) observe(ctx context.Context, v Verdict) {
 // allow" does in an approval prompt that the default raised. The grant
 // is journaled through the observer with a Verdict whose Action is
 // Allow and whose Rule is the new rule. A rule with a specifier and no
-// matcher is refused with [ErrNoMatcher]. A grant never beats a deny
-// rule, and never outranks an ask rule; use [Engine.GrantOver] to
+// matcher is refused with [ErrNoMatcher]. A rule whose name is an
+// alias is expanded as [Build] expands one, so the grant adds a rule
+// per tool the name governs and journals each. A grant never beats a
+// deny rule, and never outranks an ask rule; use [Engine.GrantOver] to
 // answer a prompt an ask rule raised. A persisted grant is the
 // product's: it writes the rule into its settings and rebuilds the
 // engine at the next start.
 func (e *Engine) Grant(ctx context.Context, r Rule) error {
-	if err := checkGrant(r, e.matchers); err != nil {
-		return err
+	granted := e.expand(r)
+	for _, g := range granted {
+		if err := checkGrant(g, e.matchers); err != nil {
+			return err
+		}
 	}
 	e.mu.Lock()
-	e.policy.Allow = append(e.policy.Allow, r)
+	e.policy.Allow = append(e.policy.Allow, granted...)
 	e.mu.Unlock()
-	e.observe(ctx, Verdict{Tool: r.Tool, Action: agentturn.Allow, Rule: &r, Reason: "granted " + r.String()})
+	for i := range granted {
+		g := granted[i]
+		e.observe(ctx, Verdict{Tool: g.Tool, Action: agentturn.Allow, Rule: &g, Reason: "granted " + g.String()})
+	}
 	return nil
 }
 
@@ -473,8 +571,11 @@ func (e *Engine) Grant(ctx context.Context, r Rule) error {
 // rule's tool, r is a carve-out, or r has a specifier and no matcher.
 // The reason is stable text a front can show.
 func (e *Engine) GrantOver(ctx context.Context, v Verdict, r Rule) (granted bool, reason string) {
-	if err := checkGrant(r, e.matchers); err != nil {
-		return false, err.Error()
+	rules := e.expand(r)
+	for _, g := range rules {
+		if err := checkGrant(g, e.matchers); err != nil {
+			return false, err.Error()
+		}
 	}
 	if v.Action != agentturn.Defer {
 		if v.Action == agentturn.Block && v.Rule != nil {
@@ -487,14 +588,26 @@ func (e *Engine) GrantOver(ctx context.Context, v Verdict, r Rule) (granted bool
 	}
 	if v.Rule == nil {
 		e.mu.Lock()
-		e.policy.Allow = append(e.policy.Allow, r)
+		e.policy.Allow = append(e.policy.Allow, rules...)
 		e.mu.Unlock()
 		reason = "granted " + r.String()
-		e.observe(ctx, Verdict{Tool: r.Tool, Action: agentturn.Allow, Rule: &r, Reason: reason})
+		for i := range rules {
+			g := rules[i]
+			e.observe(ctx, Verdict{Tool: g.Tool, Action: agentturn.Allow, Rule: &g, Reason: "granted " + g.String()})
+		}
 		return true, reason
 	}
 	ask := *v.Rule
-	if r.Tool != ask.Tool {
+	// The rule that answers the ask is the expansion naming its tool;
+	// the others are granted beside it.
+	over := -1
+	for i, g := range rules {
+		if g.Tool == ask.Tool {
+			over = i
+			break
+		}
+	}
+	if over < 0 {
 		return false, "grant " + r.String() + " does not name the tool of " + ask.String()
 	}
 	if r.Source.Rank < ask.Source.Rank {
@@ -510,14 +623,17 @@ func (e *Engine) GrantOver(ctx context.Context, v Verdict, r Rule) (granted bool
 		e.mu.Unlock()
 		return false, ask.String() + " is no longer in the ask list"
 	}
-	if r.Bare() {
+	if g := rules[over]; g.Bare() {
 		e.policy.Ask = slices.Delete(slices.Clone(e.policy.Ask), at, at+1)
 	} else {
-		e.policy.Ask = append(e.policy.Ask, Rule{Tool: ask.Tool, Spec: "!" + r.Spec, Source: ask.Source})
+		e.policy.Ask = append(e.policy.Ask, Rule{Tool: ask.Tool, Spec: "!" + g.Spec, Source: ask.Source})
 	}
-	e.policy.Allow = append(e.policy.Allow, r)
+	e.policy.Allow = append(e.policy.Allow, rules...)
 	e.mu.Unlock()
 	reason = "granted " + r.String() + " over " + ask.String()
-	e.observe(ctx, Verdict{Tool: r.Tool, Action: agentturn.Allow, Rule: &r, Reason: reason})
+	for i := range rules {
+		g := rules[i]
+		e.observe(ctx, Verdict{Tool: g.Tool, Action: agentturn.Allow, Rule: &g, Reason: reason})
+	}
 	return true, reason
 }

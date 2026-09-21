@@ -684,3 +684,97 @@ func TestGrantOverIsInThePolicy(t *testing.T) {
 		t.Errorf("Grant carve-out: %v", err)
 	}
 }
+
+// A rule's name and a product's tool name meet through the alias
+// table: the reference's own documented allowed-tools line, which
+// agentskill parses into three Bash rules, builds against a product
+// whose tool is named bash.
+func TestAliasesExpandRuleNames(t *testing.T) {
+	ctx := context.Background()
+	line := "Bash(git add *) Bash(git commit *) Bash(git status *)"
+	if _, err := Build(Policy{Allow: rules(t, line), Default: Ask()}, testMatchers); !errors.Is(err, ErrNoMatcher) {
+		t.Fatalf("without aliases: %v", err)
+	}
+	aliases := WithAliases(map[string][]string{
+		"Bash": {"bash"},
+		"Read": {"read", "grep"},
+	})
+	e, err := Build(Policy{Allow: rules(t, line), Default: Ask()}, testMatchers, aliases)
+	if err != nil {
+		t.Fatalf("with aliases: %v", err)
+	}
+	if got := ruleText(e.Policy().Allow); got != "bash(git add *) bash(git commit *) bash(git status *)" {
+		t.Errorf("Policy().Allow = %q", got)
+	}
+
+	// One rule name governs several tools, as Read reaches a search
+	// tool in the reference, and the expansion decides.
+	e, err = Build(Policy{
+		Allow:   rules(t, "Read(/src:*)"),
+		Ask:     rules(t, "Bash"),
+		Default: Deny(),
+	}, map[string]ToolMatcher{
+		"bash": {Match: PrefixMatcher("command")},
+		"read": {Match: PrefixMatcher("path")},
+		"grep": {Match: PrefixMatcher("path")},
+	}, aliases)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := ruleText(e.Policy().Allow); got != "read(/src:*) grep(/src:*)" {
+		t.Errorf("Policy().Allow = %q", got)
+	}
+	for _, tc := range []struct {
+		tool, args string
+		want       agentturn.ToolAction
+		reason     string
+	}{
+		{"read", `{"path":"/src/main.go"}`, agentturn.Allow, "allowed by read(/src:*)"},
+		{"grep", `{"path":"/src/main.go"}`, agentturn.Allow, "allowed by grep(/src:*)"},
+		{"grep", `{"path":"/etc/passwd"}`, agentturn.Block, "no rule allows grep: denied by default"},
+		{"bash", `{"command":"ls"}`, agentturn.Defer, "approval required by bash"},
+	} {
+		d, err := e.Decide(ctx, call("call_1", tc.tool, tc.args))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if d.Action != tc.want || d.Reason != tc.reason {
+			t.Errorf("%s %s: decision = %+v, want %v %q", tc.tool, tc.args, d, tc.want, tc.reason)
+		}
+	}
+
+	// A grant of an aliased name grants every tool the name governs.
+	if err := e.Grant(ctx, Rule{Tool: "Read", Spec: "/docs:*"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := ruleText(e.Policy().Allow); got != "read(/src:*) grep(/src:*) read(/docs:*) grep(/docs:*)" {
+		t.Errorf("after a grant, Allow = %q", got)
+	}
+
+	// An alias table that would drop a rule or name no tool does not
+	// build.
+	for _, tc := range []struct {
+		name    string
+		aliases map[string][]string
+		errText string
+	}{
+		{name: "no tools", aliases: map[string][]string{"Read": nil}, errText: `agentpolicy: alias "Read": names no tool`},
+		{name: "a glob rule name", aliases: map[string][]string{"mcp__*": {"bash"}}, errText: `agentpolicy: alias "mcp__*": a rule name with a glob names no tool`},
+		{name: "a glob tool", aliases: map[string][]string{"Read": {"read*"}}, errText: `agentpolicy: alias "Read": "read*" is not a tool name`},
+		{name: "no rule name", aliases: map[string][]string{"": {"read"}}, errText: "agentpolicy: alias: an entry has no rule name"},
+	} {
+		_, err := Build(Policy{Default: Ask()}, testMatchers, WithAliases(tc.aliases))
+		if err == nil || err.Error() != tc.errText {
+			t.Errorf("%s: err = %v, want %q", tc.name, err, tc.errText)
+		}
+	}
+}
+
+// ruleText renders a rule list as the tokens it is written with.
+func ruleText(list []Rule) string {
+	out := make([]string, len(list))
+	for i, r := range list {
+		out[i] = r.String()
+	}
+	return strings.Join(out, " ")
+}

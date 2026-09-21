@@ -132,6 +132,15 @@ type ToolMatcher struct {
     Subjects Subjects // nil means one subject, the call
 }
 
+// WithAliases names the tools a rule name governs, for the rules a
+// product does not write: a skill's allowed-tools and a settings file
+// copied out of the reference's documentation are spelled with the
+// reference's tool names, and one of those names may govern several
+// of a product's tools. Build expands a rule whose name has an entry
+// into one rule per tool and still fails closed on a name with
+// neither an entry nor a matcher. (Round 2, issue 4.)
+func WithAliases(aliases map[string][]string) Option
+
 // Default is what applies when no rule matches. It cannot be left
 // unset: Build refuses a Policy whose Default is the zero value, so a
 // deny list alone never allows everything by accident. (Finding 5.)

@@ -51,6 +51,18 @@ versions may break the API.
   registered matcher only in case, as a rule copied out of the
   reference's documentation does, now reads `agentpolicy: no matcher
   for the rule's tool: Bash(git status:*); did you mean bash?`. (#4)
+- `WithAliases` names the tools a rule name governs, so the rules a
+  product does not write itself reach its tools: a skill's
+  `allowed-tools` and a settings file spelled with the reference's
+  `Bash`, `Read` and `Edit` now build against tools named `bash`,
+  `read` and `edit`, and one rule name may govern several tools, as
+  the reference's `Read` reaches its search tools. `Build` expands a
+  rule whose name has an entry into one rule per tool, keeping the
+  specifier and the source, and `Engine.Policy` reports the rules as
+  they are evaluated; `Grant` and `GrantOver` expand one the same way.
+  A name with no entry is still a tool's own name and still fails
+  closed. An alias table that names no tool, or that names one with a
+  glob, does not build. (#4)
 
 ## v0.0.2 - 2026-09-20
 

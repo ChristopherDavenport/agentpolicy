@@ -36,6 +36,24 @@ lists honour: a `*` stands for any run of characters, and nothing
 folds case. A glob in the allow list does not build, since a glob
 names no matcher and the reference refuses one too.
 
+Rules a product did not write are spelled with the reference's tool
+names, `Bash`, `Read`, `Edit`, and one of those names may govern
+several of a product's tools. An alias table says which:
+
+```go
+agentpolicy.WithAliases(map[string][]string{
+	"Bash": {"bash"},
+	"Read": {"read", "grep", "glob"},
+	"Edit": {"edit", "write"},
+})
+```
+
+`Build` expands a rule whose name has an entry into one rule per tool,
+so a skill's `allowed-tools` line and a settings file copied out of
+the reference's documentation build against a product's own tools, and
+`Engine.Policy` reports the rules as they are evaluated. A name with
+no entry is a tool's own name and still fails closed.
+
 ## A policy
 
 ```go
