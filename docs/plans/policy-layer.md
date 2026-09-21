@@ -188,6 +188,16 @@ func (e *Engine) Sources() []Source
 // reference. Removes reports the rule, Filter drops the tools it
 // names and ToolProvider is the hook value over a changing list.
 // (Round 2, issue 3.)
+// SetPolicy replaces the rules without rebuilding the matchers, which
+// are the expensive half and do not change, so a product re-derives
+// its policy when its tool list changes without replacing the config
+// the loop holds. (Round 2, issue 10.)
+func (e *Engine) SetPolicy(p Policy) error
+
+// PolicyOf returns one source's rules, which is what a product
+// persists into that source's file. (Round 2, issue 7.)
+func (e *Engine) PolicyOf(source string) RuleSet
+
 func (e *Engine) Removes(tool string) (Rule, bool)
 func (e *Engine) Filter(tools []agenttool.Tool) []agenttool.Tool
 func (e *Engine) ToolProvider(base func(context.Context) []agenttool.Tool) func(context.Context) []agenttool.Tool

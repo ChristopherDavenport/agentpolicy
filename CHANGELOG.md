@@ -135,6 +135,18 @@ versions may break the API.
   `classify` guard sends them to the model with the items. A guard
   that reads only the items is unaffected. (#8)
 
+- `Engine.SetPolicy` replaces the rules without rebuilding the
+  matchers, which are the expensive half and do not change, and
+  without replacing the config the loop holds, which
+  `agentturn.Agent.SetConfig` refuses while a run is active. A tool an
+  MCP server announces mid-session was a tool the policy had never
+  heard of, so an `Ask()` default parked every call to it for an
+  approval nobody would give. The new policy is validated and expanded
+  as `Build` does, and the deferred calls, the scoped grants and the
+  review log are untouched. A policy that cannot be re-derived covers
+  the tools it has not seen with a bare name or a tool-name glob in
+  the deny or ask list. (#10)
+
 ## v0.0.2 - 2026-09-20
 
 - Depends on `agentturn` v0.0.6 and, through it, `agenttool` v0.0.5.

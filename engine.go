@@ -335,6 +335,44 @@ func (e *Engine) Policy() Policy {
 	return clonePolicy(e.policy)
 }
 
+// SetPolicy replaces the policy the engine decides with, validated as
+// [Build] validates one and expanded through the same aliases. The
+// matchers are not rebuilt, since they are the expensive half and they
+// do not change, and the hook values the loop holds keep working, so a
+// product re-derives its rules without replacing its config, which
+// agentturn refuses while a run is active.
+//
+// It is what a tool list that changes needs. An engine is built from a
+// snapshot of that list, so a tool an MCP server announces mid-session
+// is a tool the policy never heard of: an Ask() default defers every
+// call to it and an unattended run parks on an approval nobody will
+// give. A product that cannot re-derive a policy writes rules that
+// cover the tools it has not seen instead: a bare name, or a tool-name
+// glob in the deny or ask list, "mcp__*", governs a tool that appears
+// later, where an allow rule needs the tool's own name.
+//
+// The policy in force changes for the next call decided, not for the
+// calls already decided: a run that ended on an ask is answered under
+// the rules that deferred it, and a batch being decided as the policy
+// changes can see both, so a product that must not straddle one
+// replaces the policy between turns. The scoped grants
+// [Engine.GrantSet] activated, the deferred calls and the review log
+// are untouched. The replacement is not journalled; a product records
+// it where it derives the policy.
+func (e *Engine) SetPolicy(p Policy) error {
+	if _, ok := p.Default.Action(); !ok {
+		return ErrNoDefault
+	}
+	p = e.expandPolicy(p)
+	if err := checkPolicy(p, e.matchers); err != nil {
+		return err
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.policy = clonePolicy(p)
+	return nil
+}
+
 // PolicyOf returns the rules of one source, as a [RuleSet] carrying
 // that source, which is what a product writes back into that source's
 // settings file. The whole policy is not: it holds the rules of every

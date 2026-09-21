@@ -857,3 +857,61 @@ func TestGrantOverCarveOutSourceAndPolicyOf(t *testing.T) {
 		t.Errorf("a repository carve-out opened a managed deny: %+v", d)
 	}
 }
+
+// A tool that appears after the engine was built: an MCP server
+// announces one mid-session, the policy has never heard of it, and an
+// Ask() default parks every call to it for an approval nobody will
+// give. SetPolicy repairs that from inside the run, and a rule
+// written over tool names covers it without one.
+func TestSetPolicy(t *testing.T) {
+	ctx := context.Background()
+	e, err := Build(Policy{Allow: rules(t, "read"), Default: Ask()}, testMatchers)
+	if err != nil {
+		t.Fatal(err)
+	}
+	late := call("call_1", "mcp__cocode__lint", `{"path":"/repo"}`)
+	if d, _ := e.Decide(ctx, late); d.Action != agentturn.Defer || d.Reason != "no rule allows mcp__cocode__lint: approval required by default" {
+		t.Fatalf("a late tool: %+v", d)
+	}
+	// The product re-derives its rules when its tool list changes. The
+	// hook value the loop holds is the same one.
+	if err := e.SetPolicy(Policy{Allow: rules(t, "read mcp__cocode__lint"), Default: Ask()}); err != nil {
+		t.Fatal(err)
+	}
+	if d, err := e.BeforeToolCall()(ctx, late); err != nil || d.Action != agentturn.Allow || d.Reason != "allowed by mcp__cocode__lint" {
+		t.Errorf("after SetPolicy: %+v, %v", d, err)
+	}
+	// What was deferred under the old policy is still the engine's to
+	// answer.
+	if _, ok := e.Deferred("run_1", "call_1"); !ok {
+		t.Error("SetPolicy forgot a deferred call")
+	}
+	// A new policy is validated as Build validates one.
+	for _, tc := range []struct {
+		name   string
+		policy Policy
+		err    error
+	}{
+		{"no default", Policy{Allow: rules(t, "read")}, ErrNoDefault},
+		{"no matcher", Policy{Allow: rules(t, "web(x:*)"), Default: Ask()}, ErrNoMatcher},
+		{"a glob in the allow list", Policy{Allow: rules(t, "mcp__*"), Default: Ask()}, ErrToolGlob},
+	} {
+		if err := e.SetPolicy(tc.policy); !errors.Is(err, tc.err) {
+			t.Errorf("%s: err = %v, want %v", tc.name, err, tc.err)
+		}
+	}
+	// The refused policy did not take effect.
+	if d, _ := e.Decide(ctx, late); d.Action != agentturn.Allow {
+		t.Errorf("a refused SetPolicy took effect: %+v", d)
+	}
+
+	// The other path for a tool nobody has seen: a glob in the deny or
+	// ask list governs it as it appears.
+	e, err = Build(Policy{Deny: rules(t, "mcp__*"), Allow: rules(t, "read"), Default: Ask()}, testMatchers)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d, _ := e.Decide(ctx, call("call_2", "mcp__cocode__lint", `{}`)); d.Action != agentturn.Block || d.Reason != "denied by mcp__*" {
+		t.Errorf("a glob over a late tool: %+v", d)
+	}
+}

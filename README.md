@@ -88,6 +88,14 @@ what a policy withheld.
 cfg.ToolProvider = eng.ToolProvider(mcp.Tools)
 ```
 
+A tool list that changes needs a policy that can change with it.
+`Engine.SetPolicy` replaces the rules without rebuilding the matchers
+and without replacing the config the loop holds, which `SetConfig`
+refuses while a run is active, so a tool an MCP server announces
+mid-session is not parked by an `Ask()` default for an approval nobody
+will give. A policy that cannot be re-derived covers the tools it has
+not seen with a bare name or a tool-name glob in the deny or ask list.
+
 An ask holds its batch. When the model asks for `git add -A`,
 `git commit -m wip` and `git push --force` in one turn and the policy
 asks about the push, the two calls it allows are deferred too, with
