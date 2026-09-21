@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -120,9 +121,14 @@ type Engine struct {
 	policy Policy
 	// grants are the scoped rule sets in force beside the policy, in
 	// activation order, one per source; withheld holds the allow rules
-	// of the untrusted ones, which apply to nothing.
+	// of the untrusted ones, which apply to nothing. gen counts every
+	// change to the rules, so the batch cache is never read across one.
 	grants   []RuleSet
 	withheld map[string][]Rule
+	gen      uint64
+	// batch is the last batch's verdicts, so the product's splitter
+	// runs once per call of a batch rather than once per pair.
+	batch batchCache
 	// deferred remembers the calls deferred in each run, asked and
 	// held, keyed by run and then by call, so Answers can hand the
 	// reviewer what the hook saw and Release can answer the held ones.
@@ -370,6 +376,7 @@ func (e *Engine) SetPolicy(p Policy) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.policy = clonePolicy(p)
+	e.gen++
 	return nil
 }
 
@@ -494,19 +501,61 @@ func (e *Engine) decide(a active, name string, args json.RawMessage) (agentturn.
 	return e.fold(a, name, subjects)
 }
 
+// batchCache is the number of calls of one batch that ask, kept for
+// the rest of that batch's decisions. key names the batch and the
+// rules it was decided under, so a batch is never read against
+// another's calls or against a policy that has changed since.
+type batchCache struct {
+	key  string
+	asks int
+}
+
 // batchAsks reports whether a call of info's batch other than info's
-// own asks. The batch holds the loop's own pointers, so the call's is
-// told by identity.
+// own asks. It is asked only of a call the policy allows, so any ask
+// in the batch is another call's.
+//
+// The batch is decided once, on the first call of it the engine sees,
+// and the count is kept for the rest: the loop hands the hook every
+// call of the batch before any executes, so deciding the whole batch
+// per call ran the product's splitter once per pair, ninety times over
+// on a batch of ten.
 func (e *Engine) batchAsks(a active, info agentturn.ToolCallInfo) bool {
+	if len(info.Batch) < 2 {
+		return false
+	}
+	key := batchKey(info.Batch, a.gen)
+	e.mu.Lock()
+	cached := e.batch
+	e.mu.Unlock()
+	if cached.key == key {
+		return cached.asks > 0
+	}
+	asks := 0
 	for _, c := range info.Batch {
-		if c == nil || c == info.Call {
+		if c == nil {
 			continue
 		}
 		if action, _, _, _ := e.decide(a, c.Name, callArgs(c)); action == agentturn.Defer {
-			return true
+			asks++
 		}
 	}
-	return false
+	e.mu.Lock()
+	e.batch = batchCache{key: key, asks: asks}
+	e.mu.Unlock()
+	return asks > 0
+}
+
+// batchKey names a batch by its calls and the rules of the moment.
+func batchKey(batch []*openresponses.FunctionCall, gen uint64) string {
+	var b strings.Builder
+	b.WriteString(strconv.FormatUint(gen, 10))
+	for _, c := range batch {
+		b.WriteByte(0)
+		if c != nil {
+			b.WriteString(c.CallID)
+		}
+	}
+	return b.String()
 }
 
 // callArgs returns a call's arguments as the loop hands them to the
@@ -685,6 +734,7 @@ func (e *Engine) Grant(ctx context.Context, r Rule) error {
 	}
 	e.mu.Lock()
 	e.policy.Allow = append(e.policy.Allow, granted...)
+	e.gen++
 	e.mu.Unlock()
 	for i := range granted {
 		g := granted[i]
@@ -731,6 +781,7 @@ func (e *Engine) GrantOver(ctx context.Context, v Verdict, r Rule) (granted bool
 	if v.Rule == nil {
 		e.mu.Lock()
 		e.policy.Allow = append(e.policy.Allow, rules...)
+		e.gen++
 		e.mu.Unlock()
 		reason = "granted " + r.String()
 		for i := range rules {
@@ -771,6 +822,7 @@ func (e *Engine) GrantOver(ctx context.Context, v Verdict, r Rule) (granted bool
 		e.policy.Ask = append(e.policy.Ask, Rule{Tool: ask.Tool, Spec: "!" + g.Spec, Source: g.Source})
 	}
 	e.policy.Allow = append(e.policy.Allow, rules...)
+	e.gen++
 	e.mu.Unlock()
 	reason = "granted " + r.String() + " over " + ask.String()
 	for i := range rules {

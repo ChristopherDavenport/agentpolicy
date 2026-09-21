@@ -92,7 +92,7 @@ func TestMerge(t *testing.T) {
 	if _, err := Merge(RuleSet{Source: Source{Rank: 1}}); err == nil || err.Error() != "agentpolicy: merge: a source has no name" {
 		t.Errorf("unnamed source: %v", err)
 	}
-	if _, err := Merge(RuleSet{Source: user}, RuleSet{Source: Source{Name: "user"}}); err == nil || err.Error() != `agentpolicy: merge: duplicate source "user"` {
+	if _, err := Merge(RuleSet{Source: user}, RuleSet{Source: Source{Name: "user"}}); err == nil || err.Error() != `agentpolicy: merge: duplicate source "user"; give each source its own name, "user:<name>" for one skill of several` {
 		t.Errorf("duplicate source: %v", err)
 	}
 	// Merging nothing is an empty policy.

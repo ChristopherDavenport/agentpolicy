@@ -114,6 +114,7 @@ func (e *Engine) GrantSet(ctx context.Context, set RuleSet) (granted []Rule, ref
 		e.grants = append(e.grants, kept)
 	}
 	e.withheld[set.Source.Name] = withheldOf(set)
+	e.gen++
 	e.mu.Unlock()
 
 	for i := range granted {
@@ -189,6 +190,7 @@ func (e *Engine) Revoke(ctx context.Context, source string) int {
 	}
 	e.grants = kept
 	delete(e.withheld, source)
+	e.gen++
 	e.mu.Unlock()
 	if n > 0 {
 		e.observe(ctx, Verdict{Action: agentturn.Block, Reason: "revoked the rules granted by " + source})
@@ -221,13 +223,16 @@ func (e *Engine) Grants() []RuleSet {
 type active struct {
 	policy Policy
 	grants []RuleSet
+	// gen is the engine's count of rule changes when the snapshot was
+	// taken, which the batch cache is keyed on.
+	gen uint64
 }
 
 // active snapshots the rules of the moment.
 func (e *Engine) active() active {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	a := active{policy: e.policy}
+	a := active{policy: e.policy, gen: e.gen}
 	if len(e.grants) == 0 {
 		return a
 	}

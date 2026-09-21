@@ -147,6 +147,20 @@ versions may break the API.
   the tools it has not seen with a bare name or a tool-name glob in
   the deny or ask list. (#10)
 
+- The hold decides a batch once rather than once per call of it: the
+  engine kept a per-pair pass, so the product's splitter ran ninety
+  extra times on a batch of ten. The count of asking calls is cached
+  for the batch and dropped whenever the rules change, so a grant made
+  mid-batch is never read from a stale count.
+- `Merge`'s duplicate-source error says what to do: `give each source
+  its own name, "skill:<name>" for one skill of several`. A product
+  with several skills more often wants `Engine.GrantSet`, which keys
+  rules by source and takes them back at the turn boundary.
+- The presets say what they are: approximations of Codex's three
+  approval modes, not the modes themselves, since the reference pairs
+  every mode with a sandbox policy and a network policy and this
+  module decides without confining.
+
 ## v0.0.2 - 2026-09-20
 
 - Depends on `agentturn` v0.0.6 and, through it, `agenttool` v0.0.5.

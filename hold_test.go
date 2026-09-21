@@ -328,3 +328,61 @@ func TestEngineServesSeveralRuns(t *testing.T) {
 		t.Errorf("runs after Forget = %v", got)
 	}
 }
+
+// The hold decides a batch once, not once per pair: the loop hands
+// the hook every call of the batch before any runs, and deciding the
+// whole batch per call ran the product's splitter ninety extra times
+// on a batch of ten.
+func TestBatchIsDecidedOnce(t *testing.T) {
+	ctx := context.Background()
+	splits := 0
+	matchers := map[string]ToolMatcher{"bash": {
+		Match: PrefixMatcher("command"),
+		Subjects: func(args json.RawMessage) ([]Subject, error) {
+			splits++
+			return shellSplit(args)
+		},
+	}}
+	e, err := Build(Policy{Allow: rules(t, "bash(git:*)"), Ask: rules(t, "bash(git push:*)"), Default: Ask()}, matchers)
+	if err != nil {
+		t.Fatal(err)
+	}
+	commands := []string{"git status", "git diff", "git log", "git add -A", "git commit -m x"}
+	infos := batch("run_1", commands...)
+	for _, info := range infos {
+		if d, _ := e.Decide(ctx, info); d.Action != agentturn.Allow {
+			t.Fatalf("%s: %+v", info.Call.CallID, d)
+		}
+	}
+	// One split for each call's own verdict, plus one pass over the
+	// batch: linear, where it was one pass per call.
+	if want := 2 * len(commands); splits > want {
+		t.Errorf("the splitter ran %d times for %d calls, want at most %d", splits, len(commands), want)
+	}
+
+	// A policy that changes is a batch decided again, so a grant
+	// mid-batch is not read from a stale count.
+	splits = 0
+	if err := e.Grant(ctx, Rule{Tool: "bash", Spec: "npm test:*"}); err != nil {
+		t.Fatal(err)
+	}
+	if d, _ := e.Decide(ctx, infos[0]); d.Action != agentturn.Allow {
+		t.Fatalf("after the grant: %+v", d)
+	}
+	if splits < 2 {
+		t.Errorf("the batch was read from a stale count: %d splits", splits)
+	}
+
+	// An ask anywhere in the batch holds the rest, cache or no cache.
+	e2, err := Build(Policy{Allow: rules(t, "bash(git:*)"), Ask: rules(t, "bash(git push:*)"), Default: Ask()}, matchers)
+	if err != nil {
+		t.Fatal(err)
+	}
+	held := batch("run_2", "git status", "git push --force", "git log")
+	for i, info := range held {
+		d, _ := e2.Decide(ctx, info)
+		if d.Action != agentturn.Defer {
+			t.Errorf("held[%d] = %+v", i, d)
+		}
+	}
+}

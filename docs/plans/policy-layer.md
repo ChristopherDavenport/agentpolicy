@@ -431,9 +431,13 @@ may.
 
 `Suggest`, `AutoEdit` and `FullAuto` return a `Policy` over a given
 set of tool names, split into read, edit and execute by the product,
-matching Codex's three modes. They are examples of the grammar, kept
-in the package so two products do not diverge. Each sets `Default` to
-`Ask()`, so a tool the split does not name prompts.
+approximating Codex's three modes. They are approximations and say so:
+the reference pairs every mode with a sandbox policy and a network
+policy, and this module decides without confining, so a preset carries
+the approval half and the product carries the rest. They are examples
+of the grammar, kept in the package so two products do not diverge.
+Each sets `Default` to `Ask()`, so a tool the split does not name
+prompts. (Round 2, seam 15.)
 
 ### `guard`
 

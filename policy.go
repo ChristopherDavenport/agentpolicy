@@ -87,7 +87,13 @@ type RuleSet struct {
 // dropped, so a front can tell the user what trusting a folder would
 // allow. Nothing evaluates that list.
 //
-// Each source must be named, and no two may share a name.
+// Each source must be named, and no two may share a name, since the
+// name is what scopes a grant and names the file a product persists
+// its own rules into. A product merging several skills names each one,
+// "skill:commit", and the error says so; a skill's rules more often
+// belong in [Engine.GrantSet], which keys them by source and takes
+// them back at the turn boundary, than in the policy every run is
+// built from.
 func Merge(sets ...RuleSet) (Policy, error) {
 	ordered := append([]RuleSet(nil), sets...)
 	sort.SliceStable(ordered, func(i, j int) bool { return ordered[i].Source.Rank > ordered[j].Source.Rank })
@@ -98,7 +104,7 @@ func Merge(sets ...RuleSet) (Policy, error) {
 			return Policy{}, fmt.Errorf("agentpolicy: merge: a source has no name")
 		}
 		if seen[set.Source.Name] {
-			return Policy{}, fmt.Errorf("agentpolicy: merge: duplicate source %q", set.Source.Name)
+			return Policy{}, fmt.Errorf("agentpolicy: merge: duplicate source %q; give each source its own name, %q for one skill of several", set.Source.Name, set.Source.Name+":<name>")
 		}
 		seen[set.Source.Name] = true
 		p.Sources = append(p.Sources, set.Source)
