@@ -71,6 +71,31 @@ versions may break the API.
   something was withheld. Nothing evaluates the list: `Decide` walks
   the allow, deny and ask lists as before. (#5)
 
+- `Engine.GrantSet` activates a rule set under its source, which is
+  what a skill's `allowed-tools` needs and neither `Merge` nor
+  `GrantOver` could give: there is no prompt behind a skill's rules,
+  so there is no verdict to grant over, and an appended allow rule
+  loses to any ask rule naming the tool, so a commit skill written by
+  the very team whose settings ask before every `Bash` granted
+  nothing. While a set is active its allow rules shadow the ask rules
+  they cover, from other sources, of equal or lower rank; its deny and
+  ask rules apply at once, trusted or not; and a grant still never
+  beats a deny. Every rule is stamped with the set's source, so the
+  verdict names where the permission came from. A rule the set cannot
+  activate is returned as a `Refusal` with the same stable text
+  `GrantOver` reports, so a front can show what a skill asked for and
+  did not get. (#2, #9)
+- `Engine.Revoke(source)` removes the rules a source granted, for the
+  grant that lasts one turn, and `Engine.Grants` reports the sets in
+  force. A set is keyed by its source name, so a product activates a
+  skill when the skill tool returns it rather than merging every
+  skill's rules into the policy before the run, and `Merge` no longer
+  has to be given two sources with one name. `Engine.Policy` holds
+  what a product persists and not the scoped grants; an engine rebuilt
+  from it decides as this one does once they are revoked. (#2, #9)
+- `Engine.Withheld` also reports the allow rules of a grant set from a
+  source the user has not trusted. (#9)
+
 ## v0.0.2 - 2026-09-20
 
 - Depends on `agentturn` v0.0.6 and, through it, `agenttool` v0.0.5.

@@ -110,6 +110,11 @@ type Engine struct {
 
 	mu     sync.Mutex
 	policy Policy
+	// grants are the scoped rule sets in force beside the policy, in
+	// activation order, one per source; withheld holds the allow rules
+	// of the untrusted ones, which apply to nothing.
+	grants   []RuleSet
+	withheld map[string][]Rule
 	// deferred remembers the calls deferred in each run, asked and
 	// held, keyed by run and then by call, so Answers can hand the
 	// reviewer what the hook saw and Release can answer the held ones.
@@ -148,6 +153,7 @@ func Build(p Policy, matchers map[string]ToolMatcher, opts ...Option) (*Engine, 
 		matchers: matchers,
 		bound:    DefaultDenialBound,
 		deferred: make(map[string]map[string]deferredCall),
+		withheld: make(map[string][]Rule),
 	}
 	for _, opt := range opts {
 		opt(e)
@@ -304,10 +310,17 @@ func clonePolicy(p Policy) Policy {
 	}
 }
 
-// Policy returns a copy of the policy in force: the one built, with
-// every grant since applied. A grant appends an allow rule; a grant
-// over an ask rule also appends a carve-out beside that rule, or
-// removes it, so what a product must persist is all here.
+// Policy returns a copy of the policy to persist: the one built, with
+// every grant [Engine.Grant] and [Engine.GrantOver] made applied. A
+// grant appends an allow rule; a grant over an ask rule also appends a
+// carve-out beside that rule, or removes it, so what a product writes
+// back into its settings is all here.
+//
+// The scoped rule sets [Engine.GrantSet] activated are not here, and
+// [Engine.Grants] reports those: they last as long as the source that
+// carries them, a skill in use rather than a settings file, and an
+// engine rebuilt from this policy decides as this one does once they
+// are revoked.
 func (e *Engine) Policy() Policy {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -322,16 +335,21 @@ func (e *Engine) Sources() []Source {
 	return append([]Source(nil), e.policy.Sources...)
 }
 
-// Withheld returns the allow rules the merge withheld, the rules of
-// the sources the user has not trusted. The engine never consults
-// them: they are what a front shows when it asks whether to trust a
-// folder or a skill, so the user reads what trusting it would allow
-// rather than agreeing blind. Trusting a source means merging again
-// with Source.Trusted set and rebuilding.
+// Withheld returns the allow rules withheld from the untrusted
+// sources: those the merge withheld, and those of the rule sets
+// [Engine.GrantSet] activated from a source the user has not trusted.
+// The engine never consults them: they are what a front shows when it
+// asks whether to trust a folder or a skill, so the user reads what
+// trusting it would allow rather than agreeing blind. Trusting a
+// source means merging or granting again with Source.Trusted set.
 func (e *Engine) Withheld() []Rule {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	return append([]Rule(nil), e.policy.Withheld...)
+	out := append([]Rule(nil), e.policy.Withheld...)
+	for _, g := range e.grants {
+		out = append(out, e.withheld[g.Source.Name]...)
+	}
+	return out
 }
 
 // BeforeToolCall returns the hook value for agentturn.Config.
@@ -369,13 +387,11 @@ func (e *Engine) Decide(ctx context.Context, info agentturn.ToolCallInfo) (*agen
 	}
 	v := Verdict{RunID: info.RunID, Turn: info.Turn, CallID: callID, Tool: name}
 
-	e.mu.Lock()
-	p := e.policy
-	e.mu.Unlock()
+	a := e.active()
 
-	v.Action, v.Rule, v.Reason = e.decide(p, name, info.Args)
+	v.Action, v.Rule, v.Reason = e.decide(a, name, info.Args)
 	d := deferredCall{info: info}
-	if v.Action == agentturn.Allow && e.batchAsks(p, info) {
+	if v.Action == agentturn.Allow && e.batchAsks(a, info) {
 		d.allowed = v.Reason
 		v.Action, v.Held, v.Reason = agentturn.Defer, true, "held for approval: "+v.Reason
 	}
@@ -388,23 +404,23 @@ func (e *Engine) Decide(ctx context.Context, info agentturn.ToolCallInfo) (*agen
 }
 
 // decide evaluates one call as Decide does, without recording it.
-func (e *Engine) decide(p Policy, name string, args json.RawMessage) (agentturn.ToolAction, *Rule, string) {
+func (e *Engine) decide(a active, name string, args json.RawMessage) (agentturn.ToolAction, *Rule, string) {
 	subjects, err := e.split(name, args)
 	if err != nil {
 		return agentturn.Block, nil, name + " call could not be evaluated: " + err.Error()
 	}
-	return e.fold(p, name, subjects)
+	return e.fold(a, name, subjects)
 }
 
 // batchAsks reports whether a call of info's batch other than info's
 // own asks. The batch holds the loop's own pointers, so the call's is
 // told by identity.
-func (e *Engine) batchAsks(p Policy, info agentturn.ToolCallInfo) bool {
+func (e *Engine) batchAsks(a active, info agentturn.ToolCallInfo) bool {
 	for _, c := range info.Batch {
 		if c == nil || c == info.Call {
 			continue
 		}
-		if a, _, _ := e.decide(p, c.Name, callArgs(c)); a == agentturn.Defer {
+		if action, _, _ := e.decide(a, c.Name, callArgs(c)); action == agentturn.Defer {
 			return true
 		}
 	}
@@ -440,7 +456,7 @@ func (e *Engine) split(name string, args json.RawMessage) ([]Subject, error) {
 
 // fold decides every subject and keeps the most restrictive verdict,
 // the first of equals.
-func (e *Engine) fold(p Policy, name string, subjects []Subject) (agentturn.ToolAction, *Rule, string) {
+func (e *Engine) fold(a active, name string, subjects []Subject) (agentturn.ToolAction, *Rule, string) {
 	var (
 		action agentturn.ToolAction
 		rule   *Rule
@@ -451,9 +467,9 @@ func (e *Engine) fold(p Policy, name string, subjects []Subject) (agentturn.Tool
 		if tool == "" {
 			tool = name
 		}
-		a, r, why := e.decideSubject(p, tool, s.Args)
-		if i == 0 || restrictiveness(a) > restrictiveness(action) {
-			action, rule, reason = a, r, why
+		act, r, why := e.decideSubject(a, tool, s.Args)
+		if i == 0 || restrictiveness(act) > restrictiveness(action) {
+			action, rule, reason = act, r, why
 		}
 	}
 	return action, rule, reason
@@ -470,11 +486,12 @@ func restrictiveness(a agentturn.ToolAction) int {
 }
 
 // decideSubject applies the precedence to one subject.
-func (e *Engine) decideSubject(p Policy, tool string, args json.RawMessage) (agentturn.ToolAction, *Rule, string) {
+func (e *Engine) decideSubject(a active, tool string, args json.RawMessage) (agentturn.ToolAction, *Rule, string) {
+	p := a.policy
 	if r, ok := e.match(p.Deny, tool, args); ok {
 		return agentturn.Block, &r, "denied by " + r.String()
 	}
-	if r, ok := e.match(p.Ask, tool, args); ok {
+	if r, ok := e.matchAsk(a, tool, args); ok {
 		return agentturn.Defer, &r, "approval required by " + r.String()
 	}
 	if r, ok := e.match(p.Allow, tool, args); ok {
@@ -496,16 +513,38 @@ func (e *Engine) decideSubject(p Policy, tool string, args json.RawMessage) (age
 // source cancels it.
 func (e *Engine) match(list []Rule, tool string, args json.RawMessage) (Rule, bool) {
 	for _, r := range list {
-		if !r.MatchesTool(tool) {
+		if e.fires(list, r, tool, args) {
+			return r, true
+		}
+	}
+	return Rule{}, false
+}
+
+// fires reports whether one rule of a list matches the subject.
+func (e *Engine) fires(list []Rule, r Rule, tool string, args json.RawMessage) bool {
+	if !r.MatchesTool(tool) {
+		return false
+	}
+	if _, carve := r.CarveOut(); carve {
+		return false
+	}
+	if !r.Bare() && !e.matches(r.Tool, r.Spec, args) {
+		return false
+	}
+	return !e.carvedOut(list, r, args)
+}
+
+// matchAsk returns the first ask rule that matches the subject and
+// that no active grant shadows. A grant's allow rule shadows an ask
+// rule it covers, since precedence alone would let the rule ask again
+// for the very calls the grant was made for; the allow list then
+// carries the grant's own rule, so the subject is decided by it.
+func (e *Engine) matchAsk(a active, tool string, args json.RawMessage) (Rule, bool) {
+	for _, r := range a.policy.Ask {
+		if !e.fires(a.policy.Ask, r, tool, args) {
 			continue
 		}
-		if _, carve := r.CarveOut(); carve {
-			continue
-		}
-		if !r.Bare() && !e.matches(r.Tool, r.Spec, args) {
-			continue
-		}
-		if e.carvedOut(list, r, args) {
+		if _, shadowed := e.shadowedBy(a, r, tool, args); shadowed {
 			continue
 		}
 		return r, true

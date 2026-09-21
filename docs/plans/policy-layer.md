@@ -319,6 +319,19 @@ func (e *Engine) Grant(ctx context.Context, r Rule) error
 // over a deny rule, over an ask rule from a source that outranks r's,
 // or for a rule that does not name the ask rule's tool. (Finding 2.)
 func (e *Engine) GrantOver(ctx context.Context, v Verdict, r Rule) (granted bool, reason string)
+
+// GrantSet activates a rule set under its source, as a skill's
+// allowed-tools grants the tools the skill was written to run: there
+// is no prompt behind it, so GrantOver has no verdict to answer, and
+// an appended allow rule loses to any ask rule naming the tool. Its
+// allow rules therefore shadow the ask rules they cover, from other
+// sources, of equal or lower rank, while the set is active. A rule it
+// cannot activate is reported with the reason, as GrantOver reports
+// one. Revoke removes the set at the turn boundary, and Grants
+// reports the sets in force. (Round 2, issues 2 and 9.)
+func (e *Engine) GrantSet(ctx context.Context, set RuleSet) (granted []Rule, refused []Refusal)
+func (e *Engine) Revoke(ctx context.Context, source string) int
+func (e *Engine) Grants() []RuleSet
 ```
 
 The way an ask rule is kept from firing is written into the policy,
@@ -331,6 +344,16 @@ what the policy now holds into its settings and rebuilds the engine
 at the next start. A grant never beats a deny rule, and a grant from
 a lower-ranked source never touches an ask rule from a higher-ranked
 one.
+
+A scoped grant is not written into the policy, because it is not the
+product's to persist: it lasts as long as the source that carries it,
+a skill in use rather than a settings file, and a product that wrote
+it into its settings would grant the tools of a skill the model opened
+once. `Engine.Grants` reports the sets in force beside
+`Engine.Policy`, and an engine rebuilt from the policy decides as this
+one does once they are revoked. That is the one place the "policy in
+force is a value" invariant is qualified, and `Revoke` is the
+revocation the plan's open question left for a second product.
 
 ### The reviewer
 
@@ -488,8 +511,10 @@ this package's. The reviewer takes a timeout and reports it as
 - A carve-out reaches only rules from its own source.
 - A grant never beats a deny rule, and never touches an ask rule from
   a source that outranks it.
-- The policy in force is a value: `Engine.Policy` holds every grant,
-  and an engine rebuilt from it decides the same.
+- The policy in force is a value: `Engine.Policy` holds every grant a
+  prompt answered, and an engine rebuilt from it decides the same,
+  absent the scoped grants `Engine.Grants` reports, which last only as
+  long as their source.
 - `Decide` never calls a model or opens a socket.
 - Every decision, every hold and release, every grant, every guard
   verdict and every reviewer answer reaches the observer exactly once.
@@ -531,10 +556,11 @@ the model's order and `Refuse` ends the turn with nothing run.
   (approve once, approve for this run). `GrantOver` covers always;
   the other two are the front's until a second product wants them
   here.
-- Whether grants need a lifetime and a revocation. A skill's
-  `allowed-tools` grants for one turn, and Claude Code's permission
-  updates carry `removeRules`. A product rebuilds the engine today;
-  `Revoke` and a scope on `Rule` wait for the second product.
+- Answered in round 2: grants need a lifetime and a revocation, and
+  the second product is the composed one. A scope on `Rule` is not
+  what they need, though: the scope is the rule set's source, so
+  `GrantSet` activates a set under its source and `Revoke` removes it
+  at the turn boundary. (Issues 2 and 9.)
 - Answered in round 2: a bare-name deny removes the tool from the
   request, as Claude Code does. It is `Engine.Filter` beside `Decide`,
   with `Engine.ToolProvider` as the hook value and `Engine.Removes`

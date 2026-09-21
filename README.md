@@ -166,6 +166,34 @@ option and offers a one-time approval instead. `Engine.Policy` holds
 everything a grant changed, so a product persists it by writing what
 the policy now holds. A grant never beats a deny.
 
+## A skill's rules
+
+A skill's `allowed-tools` is a grant with no prompt behind it, so
+there is no verdict to grant over, and an appended allow rule loses to
+any ask rule naming the tool. `GrantSet` activates a rule set under
+its source instead:
+
+```go
+granted, refused := eng.GrantSet(ctx, agentpolicy.RuleSet{Source: skill, Allow: rules})
+defer eng.Revoke(ctx, skill.Name)
+```
+
+While the set is active, its allow rules shadow the ask rules they
+cover, from other sources, of equal or lower rank: the team that asks
+before every `Bash` gets the `git` commands of the commit skill it
+wrote, and nothing else. A rule the set cannot activate is in
+`refused` with the reason, as `GrantOver` reports one, so a front can
+show what the skill asked for and did not get: a bare deny for the
+tool, a bare ask rule from a source that outranks the set, a source
+the user has not trusted, whose allow rules go to `Engine.Withheld`.
+
+The set is keyed by its source, so a product activates a skill when
+the skill tool returns it and calls `Revoke` at the turn boundary,
+rather than merging every skill's rules into the policy before the run
+and granting the tools of skills the model never opened.
+`Engine.Grants` reports the sets in force; `Engine.Policy` holds only
+what a product persists.
+
 ## A reviewer instead of a human
 
 ```go
