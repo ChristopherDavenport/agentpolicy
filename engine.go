@@ -74,12 +74,14 @@ type Engine struct {
 
 	mu     sync.Mutex
 	policy Policy
-	// deferred remembers the calls deferred in the run named by runID,
-	// asked and held, so Answers can hand the reviewer what the hook
-	// saw and Release can answer the held ones. A decision for another
-	// run forgets them.
-	deferred map[string]deferredCall
-	runID    string
+	// deferred remembers the calls deferred in each run, asked and
+	// held, keyed by run and then by call, so Answers can hand the
+	// reviewer what the hook saw and Release can answer the held ones.
+	// One engine serves as many runs as a product has agents: a
+	// decision in one run never touches another's. A run's calls are
+	// forgotten as they are answered, and [Engine.Forget] drops what a
+	// run that ended another way left behind.
+	deferred map[string]map[string]deferredCall
 	reviews  reviewLog
 }
 
@@ -116,7 +118,7 @@ func Build(p Policy, matchers map[string]ToolMatcher, opts ...Option) (*Engine, 
 		matchers: matchers,
 		bound:    DefaultDenialBound,
 		policy:   clonePolicy(p),
-		deferred: make(map[string]deferredCall),
+		deferred: make(map[string]map[string]deferredCall),
 	}
 	for _, opt := range opts {
 		opt(e)
@@ -203,6 +205,10 @@ func (e *Engine) BeforeToolCall() func(context.Context, agentturn.ToolCallInfo) 
 // The decision names the policy as its decider. The verdict reaches
 // the observer before Decide returns, and the same policy and the same
 // call in the same batch always give the same verdict.
+//
+// One engine serves every agent of a product. What it defers is
+// remembered under the call's own run, so a decision in a sub-agent's
+// run never forgets what the main agent is waiting on.
 func (e *Engine) Decide(ctx context.Context, info agentturn.ToolCallInfo) (*agentturn.ToolDecision, error) {
 	name, callID := "", ""
 	if info.Call != nil {
@@ -211,10 +217,6 @@ func (e *Engine) Decide(ctx context.Context, info agentturn.ToolCallInfo) (*agen
 	v := Verdict{RunID: info.RunID, Turn: info.Turn, CallID: callID, Tool: name}
 
 	e.mu.Lock()
-	if info.RunID != e.runID {
-		clear(e.deferred)
-		e.runID = info.RunID
-	}
 	p := e.policy
 	e.mu.Unlock()
 
@@ -226,9 +228,7 @@ func (e *Engine) Decide(ctx context.Context, info agentturn.ToolCallInfo) (*agen
 	}
 	if v.Action == agentturn.Defer {
 		d.verdict = v
-		e.mu.Lock()
-		e.deferred[callID] = d
-		e.mu.Unlock()
+		e.remember(info.RunID, callID, d)
 	}
 	e.observe(ctx, v)
 	return &agentturn.ToolDecision{Action: v.Action, Reason: v.Reason, By: byPolicy}, nil

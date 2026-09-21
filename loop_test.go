@@ -287,7 +287,7 @@ func TestLoopHoldsTheBatchForAnAsk(t *testing.T) {
 	asked := func(t *testing.T, end *agentturn.RunEnd) string {
 		var ids []string
 		for _, p := range end.Pending {
-			v, ok := e.Deferred(p.Call.CallID)
+			v, ok := e.Deferred(end.RunID, p.Call.CallID)
 			if !ok {
 				t.Fatalf("%s not deferred", p.Call.CallID)
 			}
@@ -309,7 +309,7 @@ func TestLoopHoldsTheBatchForAnAsk(t *testing.T) {
 	}
 	// The user approves the push: the held calls are released and the
 	// batch runs in the model's order, with the user's note after.
-	end, err = agent.Resume(ctx, e.Release(ctx, end, agentturn.Approve(asked(t, end)).WithNote("last time"))...)
+	end, err = agent.Resume(ctx, released(ctx, t, e, end, agentturn.Approve(asked(t, end)).WithNote("last time"))...)
 	if err != nil || end.Reason != agentturn.ReasonDone {
 		t.Fatalf("resume: err=%v end=%+v", err, end)
 	}
@@ -328,7 +328,7 @@ func TestLoopHoldsTheBatchForAnAsk(t *testing.T) {
 	if err != nil || end.Reason != agentturn.ReasonInputRequired {
 		t.Fatalf("prompt again: err=%v end=%+v", err, end)
 	}
-	end, err = agent.Resume(ctx, e.Release(ctx, end, agentturn.Refuse(openresponses.NewFunctionCallOutput(asked(t, end), "no, stop")))...)
+	end, err = agent.Resume(ctx, released(ctx, t, e, end, agentturn.Refuse(openresponses.NewFunctionCallOutput(asked(t, end), "no, stop")))...)
 	if err != nil || end.Reason != agentturn.ReasonStopped || end.Cause != agentturn.StopRefused || len(bash.ran) != 0 {
 		t.Fatalf("stop: err=%v end=%+v ran=%v", err, end, bash.ran)
 	}
@@ -356,8 +356,9 @@ func TestLoopHoldsTheBatchForAnAsk(t *testing.T) {
 	if err != nil || end.Reason != agentturn.ReasonInputRequired {
 		t.Fatalf("prompt for review: err=%v end=%+v", err, end)
 	}
+	askedID := asked(t, end)
 	answers, err := e.Answers(ctx, reviewer, end)
-	if err != nil || len(answers) != 3 || strings.Join(reviewed, "|") != asked(t, end)+": approval required by bash(git push:*)" {
+	if err != nil || len(answers) != 3 || strings.Join(reviewed, "|") != askedID+": approval required by bash(git push:*)" {
 		t.Fatalf("answers = %v, %v, reviewed %v", answers, err, reviewed)
 	}
 	end, err = agent.Resume(ctx, answers...)
@@ -391,5 +392,71 @@ func TestLoopHoldsTheBatchForAnAsk(t *testing.T) {
 		"held held asked reviewed released released" // the review
 	if got := strings.Join(kinds, " "); got != want {
 		t.Errorf("verdicts = %q\nwant %q", got, want)
+	}
+}
+
+// Two agents, one engine: a product's policy belongs to the product,
+// not to a loop, and a sub-agent deciding a call while the user is
+// being asked must not cost the main agent its pending calls. The
+// round 2 codex-permissions study ran this against v0.0.2 and got one
+// answer for three pending calls and a Resume that failed.
+func TestLoopTwoAgentsOneEngine(t *testing.T) {
+	ctx := context.Background()
+	e, err := Build(Policy{
+		Allow:   rules(t, "bash(git add:*) bash(git commit:*)"),
+		Ask:     rules(t, "bash(git push:*)"),
+		Default: Deny(),
+	}, testMatchers)
+	if err != nil {
+		t.Fatal(err)
+	}
+	newAgent := func() (*agentturn.Agent, *bashTool) {
+		bash := &bashTool{}
+		return agentturn.New(agentturn.Config{
+			Model:          &batchModel{},
+			Tools:          []agenttool.Tool{bash.tool()},
+			BeforeToolCall: e.BeforeToolCall(),
+			ToolExecution:  agentturn.ExecSequential,
+		}), bash
+	}
+
+	main, mainBash := newAgent()
+	end, err := main.Prompt(ctx, openresponses.UserText("git add -A\ngit commit -m wip\ngit push --force"))
+	if err != nil || end.Reason != agentturn.ReasonInputRequired || len(end.Pending) != 3 {
+		t.Fatalf("main: err=%v end=%+v", err, end)
+	}
+
+	// The sub-agent runs on the same engine while the user reads the
+	// question, and its calls are allowed outright.
+	sub, subBash := newAgent()
+	subEnd, err := sub.Prompt(ctx, openresponses.UserText("git add docs\ngit commit -m docs"))
+	if err != nil || subEnd.Reason != agentturn.ReasonDone || len(subBash.ran) != 2 {
+		t.Fatalf("sub: err=%v end=%+v ran=%v", err, subEnd, subBash.ran)
+	}
+
+	// The main agent's calls are still the engine's: the held ones are
+	// still held, and Release answers all three.
+	var asked []string
+	for _, p := range end.Pending {
+		v, ok := e.Deferred(end.RunID, p.Call.CallID)
+		if !ok {
+			t.Fatalf("%s was forgotten by the sub-agent's run", p.Call.CallID)
+		}
+		if !v.Held {
+			asked = append(asked, p.Call.CallID)
+		}
+	}
+	if len(asked) != 1 {
+		t.Fatalf("asked = %v", asked)
+	}
+	answers, err := e.Release(ctx, end, agentturn.Approve(asked[0]))
+	if err != nil || len(answers) != 3 {
+		t.Fatalf("Release built %d answers for 3 pending calls: %v", len(answers), err)
+	}
+	if end, err = main.Resume(ctx, answers...); err != nil || end.Reason != agentturn.ReasonDone {
+		t.Fatalf("resume: err=%v end=%+v", err, end)
+	}
+	if got := strings.Join(mainBash.ran, "|"); got != "git add -A|git commit -m wip|git push --force" {
+		t.Errorf("the main agent ran %q", got)
 	}
 }

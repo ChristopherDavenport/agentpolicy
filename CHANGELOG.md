@@ -5,6 +5,29 @@ All user-visible changes to this library. The format follows
 uses [Semantic Versioning](https://semver.org/); before v1.0.0 minor
 versions may break the API.
 
+## Unreleased
+
+- **Breaking**: one engine serves every agent of a product. The calls
+  the engine defers are remembered under their own run rather than in
+  one map cleared whenever a decision names another run, so a
+  sub-agent's first decision no longer erases what the main agent is
+  waiting on. `Engine.Deferred` takes the run as well as the call,
+  `Engine.Forget(runID)` drops what a run that ended another way left
+  behind, and `Engine.Runs` reports the runs still holding deferred
+  calls. `Release` and `Answers` take the run from the `RunEnd` they
+  are given and forget each call as they answer it, so an engine
+  shared by several agents does not grow with the runs they finish;
+  a front that shows why a call waited reads the verdict from the
+  observer rather than from `Deferred` after the answer. (#1)
+- **Breaking**: `Engine.Release` returns an error as well as the
+  answers. A call the run left pending that neither the caller
+  answered nor the engine held is `ErrUnanswered`, whose text names
+  every such call, `agentpolicy: pending call has no answer: call_a
+  (bash)`, where before it was dropped and `Resume` failed with the
+  loop's own error and nothing said which call was missed.
+  `Engine.Answers` completes with `Release` and returns its error,
+  joined with `ErrDenialBound` when both hold. (#1)
+
 ## v0.0.2 - 2026-09-20
 
 - Depends on `agentturn` v0.0.6 and, through it, `agenttool` v0.0.5.

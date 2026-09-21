@@ -62,7 +62,7 @@ The front asks about the calls `Engine.Deferred` reports as not held,
 and `Release` answers the rest from the user's answer:
 
 ```go
-answers := eng.Release(ctx, end, agentturn.Approve(callID).WithNote("last time"))
+answers, err := eng.Release(ctx, end, agentturn.Approve(callID).WithNote("last time"))
 end, err = agent.Resume(ctx, answers...)
 ```
 
@@ -70,7 +70,15 @@ The held calls run with the approved one, in the model's order. An
 answer built with `agentturn.Refuse` ends the turn instead, and the
 held calls are answered with text that says so; a plain refusal lets
 them run, since the policy allowed them and the model sees the one
-refusal.
+refusal. A pending call neither the front nor the engine answers is
+`ErrUnanswered`, which names it, rather than a `Resume` that fails
+with nothing to say.
+
+One engine serves every agent: what it defers is remembered under the
+call's own run, so a sub-agent deciding a call while the user reads a
+question costs the main agent nothing. `Release` and `Answers` forget
+a call as they answer it, and `Engine.Forget(runID)` drops what an
+abandoned run left behind.
 
 When a tool's `Subjects` splits a call, a shell command into its
 subcommands say, every subject is decided and the verdicts fold: the

@@ -238,16 +238,22 @@ with the asked ones, and answers them once the front has answered the
 asks:
 
 ```go
-// Deferred returns the verdict that deferred the call in the run in
-// progress, asked or held, so a front tells the calls it must answer
-// from the ones Release answers.
-func (e *Engine) Deferred(callID string) (Verdict, bool)
+// Deferred returns the verdict that deferred the call in the run,
+// asked or held, so a front tells the calls it must answer from the
+// ones Release answers.
+func (e *Engine) Deferred(runID, callID string) (Verdict, bool)
 
 // Release completes the answers to a run that ended on an ask: given
 // the front's answers to the asked calls, it answers each held call and
 // returns every answer in the order of end.Pending, the model's order,
-// which is the order a sequential batch runs in.
-func (e *Engine) Release(ctx context.Context, end *agentturn.RunEnd, answers ...agentturn.Answer) []agentturn.Answer
+// which is the order a sequential batch runs in. A pending call it
+// cannot answer is ErrUnanswered, which names it.
+func (e *Engine) Release(ctx context.Context, end *agentturn.RunEnd, answers ...agentturn.Answer) ([]agentturn.Answer, error)
+
+// Forget drops what a run that ended another way left behind, and Runs
+// reports the runs still holding deferred calls.
+func (e *Engine) Forget(runID string)
+func (e *Engine) Runs() []string
 ```
 
 The policy allowed a held call, so it is approved and runs with the
@@ -257,6 +263,13 @@ one refusal. An answer built with `agentturn.Refuse` ends the turn
 instead, and then the held calls are refused with text that says so,
 since the user said stop before anything ran. A front shows the held
 calls beside the ask, since they run on any answer but a stop.
+
+One engine serves every agent of a product, because the policy is the
+product's and not a loop's. What the engine defers is therefore keyed
+by the run it was deferred in, and a decision in one run never touches
+another's; `Release` and `Answers` forget each call as they answer it,
+and `Forget` drops what an abandoned run left, so the memory is
+bounded by the calls still waiting. (Round 2, issue 1.)
 
 ### Runtime changes
 
@@ -326,9 +339,9 @@ type Reviewer interface {
 func (e *Engine) Answers(ctx context.Context, r Reviewer, end *agentturn.RunEnd) ([]agentturn.Answer, error)
 ```
 
-The engine remembers what it deferred in the run in progress, the
-hook's `ToolCallInfo` and the verdict, so the reviewer sees the tool
-and the reason the policy asked. It reviews only the calls the policy
+The engine remembers what it deferred in each run, the hook's
+`ToolCallInfo` and the verdict, so the reviewer sees the tool and the
+reason the policy asked. It reviews only the calls the policy
 asked about: a held call is released with them, as `Release` does for
 a human's answers, and a call an abort cut off or one found unanswered
 in a seeded transcript, which the loop marks as such on `PendingCall`,

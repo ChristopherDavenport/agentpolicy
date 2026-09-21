@@ -113,7 +113,7 @@ func dump(v any) string {
 	return string(b)
 }
 
-func TestAnswersRecallsOnlyTheRunInProgress(t *testing.T) {
+func TestAnswersRecallsTheCallsOfItsOwnRun(t *testing.T) {
 	ctx := context.Background()
 	var seen []Verdict
 	reviewer := ReviewerFunc(func(_ context.Context, info agentturn.ToolCallInfo, v Verdict) (Review, error) {
@@ -128,11 +128,14 @@ func TestAnswersRecallsOnlyTheRunInProgress(t *testing.T) {
 		t.Fatal(err)
 	}
 	c := &openresponses.FunctionCall{CallID: "c1", Name: "bash", Arguments: `{"command":"ls"}`}
-	if _, err := e.Decide(ctx, agentturn.ToolCallInfo{RunID: "run_1", Turn: 3, Call: c, Args: json.RawMessage(c.Arguments)}); err != nil {
-		t.Fatal(err)
+	deferOne := func() {
+		if _, err := e.Decide(ctx, agentturn.ToolCallInfo{RunID: "run_1", Turn: 3, Call: c, Args: json.RawMessage(c.Arguments)}); err != nil {
+			t.Fatal(err)
+		}
 	}
-	// A decision for another run forgets run_1's deferred calls; the
-	// reviewer then sees the call alone and an empty reason.
+	deferOne()
+	// A decision for another run does not forget run_1's deferred
+	// calls: the reviewer sees the verdict the hook made.
 	other := call("c2", "read", `{}`)
 	other.RunID = "run_2"
 	if _, err := e.Decide(ctx, other); err != nil {
@@ -142,8 +145,20 @@ func TestAnswersRecallsOnlyTheRunInProgress(t *testing.T) {
 	if err != nil || len(answers) != 1 || answers[0].CallID != "c1" {
 		t.Fatalf("answers = %+v, %v", answers, err)
 	}
-	if want := (Verdict{RunID: "run_1", CallID: "c1", Tool: "bash", Action: agentturn.Defer}); len(seen) != 1 || !reflect.DeepEqual(seen[0], want) {
+	want := Verdict{RunID: "run_1", Turn: 3, CallID: "c1", Tool: "bash", Action: agentturn.Defer, Reason: "no rule allows bash: approval required by default"}
+	if len(seen) != 1 || !reflect.DeepEqual(seen[0], want) {
 		t.Errorf("reviewer saw %+v, want %+v", seen, want)
+	}
+	// A call of a run the engine has forgotten is reviewed with the
+	// call alone and an empty reason.
+	seen = nil
+	deferOne()
+	e.Forget("run_1")
+	if _, err := e.Answers(ctx, reviewer, pendingEnd("run_1", c)); err != nil {
+		t.Fatal(err)
+	}
+	if want := (Verdict{RunID: "run_1", CallID: "c1", Tool: "bash", Action: agentturn.Defer}); len(seen) != 1 || !reflect.DeepEqual(seen[0], want) {
+		t.Errorf("after Forget the reviewer saw %+v, want %+v", seen, want)
 	}
 	// A call with no arguments is reviewed with an empty object, as the
 	// loop would run it.

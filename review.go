@@ -131,9 +131,8 @@ func refusalText(reason string) string {
 //
 // The reviewer sees each deferred call as the hook saw it, with the
 // verdict that deferred it, for the calls the engine asked about in
-// the run in progress; a call from a run it has forgotten is reviewed
-// with the call alone and a verdict whose Action is Defer and whose
-// Reason is empty. A call the engine held for an ask is not reviewed:
+// that run; a call of a run it has forgotten is reviewed with the call
+// alone and a verdict whose Action is Defer and whose Reason is empty. A call the engine held for an ask is not reviewed:
 // the policy allowed it, and [Engine.Release] answers it from the
 // asked calls' answers. A call an abort cut off or one found
 // unanswered in a seeded transcript, whose tool may have run, is not
@@ -147,6 +146,10 @@ func refusalText(reason string) string {
 // held calls are refused with it, and the answers are returned with
 // [ErrDenialBound] so the front can say why. The bound counts across
 // calls to Answers until [Engine.ResetReviews].
+//
+// Answers completes with [Engine.Release], so a pending call it could
+// not answer is [ErrUnanswered], returned with the answers and joined
+// with [ErrDenialBound] when both hold.
 func (e *Engine) Answers(ctx context.Context, r Reviewer, end *agentturn.RunEnd) ([]agentturn.Answer, error) {
 	if end == nil || len(end.Pending) == 0 {
 		return nil, nil
@@ -188,19 +191,22 @@ func (e *Engine) Answers(ctx context.Context, r Reviewer, end *agentturn.RunEnd)
 			}
 		}
 	}
-	answers = e.Release(ctx, end, answers...)
-	if bounded {
+	answers, err := e.Release(ctx, end, answers...)
+	switch {
+	case bounded && err != nil:
+		return answers, errors.Join(ErrDenialBound, err)
+	case bounded:
 		return answers, ErrDenialBound
 	}
-	return answers, nil
+	return answers, err
 }
 
-// recall returns what the engine remembers of a deferred call, or the
-// call alone.
+// recall returns what the engine remembers of a deferred call of the
+// run, or the call alone.
 func (e *Engine) recall(runID string, call *openresponses.FunctionCall) (agentturn.ToolCallInfo, Verdict) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	if d, ok := e.deferred[call.CallID]; ok && e.runID == runID {
+	if d, ok := e.deferred[runID][call.CallID]; ok {
 		return d.info, d.verdict
 	}
 	return agentturn.ToolCallInfo{RunID: runID, Call: call, Args: callArgs(call)},
