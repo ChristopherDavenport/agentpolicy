@@ -222,7 +222,7 @@ func TestReviewerFailsClosed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	end := &agentturn.RunEnd{RunID: "r", Reason: agentturn.ReasonInputRequired, Pending: []*openresponses.FunctionCall{info.Call}}
+	end := &agentturn.RunEnd{RunID: "r", Reason: agentturn.ReasonInputRequired, Pending: []agentturn.PendingCall{{Call: info.Call, Reason: agentturn.PendingDeferred}}}
 	answers, err := e.Answers(ctx, r, end)
 	if err != nil || len(answers) != 1 || answers[0].Output == nil || answers[0].Output.Output.Text != "The reviewer could not evaluate the call; the call did not run." {
 		t.Errorf("answers = %+v, %v", answers, err)

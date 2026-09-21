@@ -5,6 +5,67 @@ All user-visible changes to this library. The format follows
 uses [Semantic Versioning](https://semver.org/); before v1.0.0 minor
 versions may break the API.
 
+## Unreleased
+
+- Depends on `agentturn` v0.0.6 and, through it, `agenttool` v0.0.5.
+  v0.0.1 does not build against agentturn v0.0.6, which made
+  `RunEnd.Pending` a list of `PendingCall` values; a product importing
+  both got v0.0.6 through minimum version selection and failed to
+  build.
+- **Breaking**: an ask holds its batch. `Decide` defers a call the
+  policy allows when another call of its batch asks, with the new
+  `Verdict.Held` set and `held for approval: <the allow reason>` as
+  its reason, so nothing the model asked for in the same turn runs
+  before the user has answered; the loop hands the hook every call of
+  the batch before any executes, so the ask is seen wherever it sits.
+  A blocked call is blocked whatever its batch holds. `Engine.Deferred`
+  returns the verdict that deferred a pending call, asked or held, and
+  `Engine.Release` completes a front's answers to the asked calls with
+  one per held call, in the order of `end.Pending`: an approval or a
+  plain refusal releases them, with `released: <the allow reason>` on
+  the record, since the policy allowed them; an answer built with
+  `agentturn.Refuse` refuses them with `not released: the turn was
+  stopped` and the text `The call was held for an approval and the
+  turn was stopped; the call did not run.` A front that answered a
+  pending call itself keeps its answer. `GrantOver` refuses a held
+  verdict with `nothing to grant over: the call was held for another
+  call's approval`, since the policy allowed the call.
+- `Decide` names the policy as the decision's decider through
+  `ToolDecision.By`, so the loop's recorder writes `by: policy` on the
+  call's decision entry.
+- `Review.Note` is what the reviewer tells the model with the result:
+  `Answers` attaches it to an approval or a refusal with
+  `Answer.WithNote`, and the loop appends it after the outputs as a
+  user message.
+- `Answers` returns its answers in the order of `end.Pending`, reviews
+  only the calls the policy asked about and releases the held ones
+  with them. A call an abort cut off or one found unanswered in a
+  seeded transcript is not reviewed: it is refused with `The call was
+  cut off before it finished and may have run; it was not run again.`,
+  recorded as `not reviewed: aborted` or `not reviewed: unknown`, and
+  does not count toward the denial bound. When the bound is reached
+  every refusal among the answers is built with `agentturn.Refuse`, so
+  `Resume` appends the outputs and ends the run with `StopRefused`
+  instead of calling the model; `ErrDenialBound` is still returned
+  with them.
+- `guard`: `Chain.ShouldStopAfterTurn` stops the run as a guard stop.
+  Its `BlockedError` wraps `agentturn.ErrGuard`, so the run ends
+  `ReasonStopped` with `StopGuard` and the error on `RunEnd.Err`
+  rather than as a plain hook stop; the error from `BeforeModelCall`
+  wraps it too, so `errors.Is` tells a guard's refusal from a failure
+  either way. **Breaking**: `BlockedError` gains `Subject`, `"input"`
+  or `"output"`, and its text reads `blocked the <subject>`.
+- `guard`: `Message` is a new subject, one assistant message as the
+  stream completes it, and `Chain.OutputGuard` and `OutputGuard` are
+  the hook values for `agentturn.Config.OutputGuard`: a rewrite
+  replaces the message before the transcript keeps it, and a Block
+  withholds it behind a placeholder, `Withheld` unless the chain's
+  `Placeholder` builds its own, that keeps the original's ID, status
+  and phase. `Limit`, `Deny` and `Secrets` check a message as they do
+  an input, with `message` as the noun in `Limit`'s reason; `Redact`
+  rewrites one, since it is not in the transcript yet.
+- `classify`: the guard classifies a `guard.Message` as output.
+
 ## v0.0.1 - 2026-09-20
 
 - The rule grammar: `Rule` is a tool name or a name with a specifier,

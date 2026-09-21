@@ -2,8 +2,9 @@
 // tool calls, an engine that becomes the loop's BeforeToolCall hook, a
 // journal of every verdict, and an answer source for the calls the
 // engine defers. Guards over content live in the guard package and
-// become the loop's BeforeModelCall and ShouldStopAfterTurn hooks; a
-// guard and a reviewer backed by a model live in classify.
+// become the loop's BeforeModelCall, OutputGuard and
+// ShouldStopAfterTurn hooks; a guard and a reviewer backed by a model
+// live in classify.
 //
 // A policy is three lists of rules and a default:
 //
@@ -19,10 +20,12 @@
 //
 // Precedence is deny, then ask, then allow, then the default, always. A
 // deny blocks the call with a reason that names the rule; an ask defers
-// it to the caller, who answers through the loop's Resume. When a
-// tool's matcher splits a call into several subjects, a shell command
-// into its subcommands say, the call is denied if any subject is, asked
-// about if any subject is, and allowed only when every subject is.
+// it to the caller, who answers through the loop's Resume, and holds
+// the calls of the same batch the policy allows, which Engine.Release
+// answers from the caller's answer. When a tool's matcher splits a
+// call into several subjects, a shell command into its subcommands
+// say, the call is denied if any subject is, asked about if any
+// subject is, and allowed only when every subject is.
 //
 // The engine never calls a model or opens a socket: the same policy and
 // the same call always give the same verdict. Every verdict, every

@@ -118,8 +118,8 @@ func parseAnswer(text string) (answer, error) {
 }
 
 // Guard classifies content with a model and blocks what the rubric
-// refuses. It checks a guard.Input or a guard.Output and passes
-// anything else.
+// refuses. It checks a guard.Input, a guard.Message or a guard.Output
+// and passes anything else.
 type Guard struct {
 	model     openresponses.Streamer
 	modelName string
@@ -146,6 +146,11 @@ func (g *Guard) Check(ctx context.Context, subject any) (guard.Verdict, error) {
 	switch s := subject.(type) {
 	case guard.Input:
 		items, kind = s.Items, "input"
+	case guard.Message:
+		kind = "output"
+		if s.Message != nil {
+			items = openresponses.Items{s.Message}
+		}
 	case guard.Output:
 		kind = "output"
 		if s.Response != nil {

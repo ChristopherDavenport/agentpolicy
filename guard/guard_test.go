@@ -64,7 +64,7 @@ func TestChainBeforeModelCall(t *testing.T) {
 		{name: "no guards", input: "hello"},
 		{name: "allow", guards: []Guard{fixed("a", allow, nil), fixed("b", allow, nil)}, input: "hello", reasons: []string{"", ""}},
 		{name: "rewrite feeds the next guard", guards: []Guard{rewriter, seesUpper}, input: "HELLO", reasons: []string{"upper-cased", ""}},
-		{name: "block", guards: []Guard{fixed("a", allow, nil), fixed("b", block("nope"), nil), fixed("c", allow, nil)}, blocked: &BlockedError{Guard: "b", Reason: "nope"}, wantErr: "agentpolicy/guard: b blocked the input: nope", input: "hello", reasons: []string{"", "nope"}},
+		{name: "block", guards: []Guard{fixed("a", allow, nil), fixed("b", block("nope"), nil), fixed("c", allow, nil)}, blocked: &BlockedError{Guard: "b", Subject: "input", Reason: "nope"}, wantErr: "agentpolicy/guard: b blocked the input: nope", input: "hello", reasons: []string{"", "nope"}},
 		{name: "block ignores a rewrite", guards: []Guard{fixed("a", Verdict{Action: agentturn.Block, Reason: "x", Items: openresponses.Items{openresponses.UserText("no")}}, nil)}, wantErr: "agentpolicy/guard: a blocked the input: x", input: "hello", reasons: []string{"x"}},
 		{name: "error", guards: []Guard{fixed("a", allow, errors.New("boom"))}, wantErr: "agentpolicy/guard: a: boom", input: "hello"},
 		{name: "defer", guards: []Guard{fixed("a", Verdict{Action: agentturn.Defer}, nil)}, wantErr: "agentpolicy/guard: a: Defer is not valid for content", input: "hello", reasons: []string{""}},
@@ -82,7 +82,7 @@ func TestChainBeforeModelCall(t *testing.T) {
 		}
 		if tc.blocked != nil {
 			var be *BlockedError
-			if !errors.As(err, &be) || *be != *tc.blocked {
+			if !errors.As(err, &be) || *be != *tc.blocked || !errors.Is(err, agentturn.ErrGuard) {
 				t.Errorf("%s: BlockedError = %+v", tc.name, be)
 			}
 		}
@@ -113,11 +113,12 @@ func TestChainShouldStopAfterTurn(t *testing.T) {
 		guards  []Guard
 		stop    bool
 		wantErr string
+		guard   bool
 		reasons []string
 	}{
 		{name: "no guards"},
 		{name: "allow", guards: []Guard{fixed("a", allow, nil)}, reasons: []string{""}},
-		{name: "stop at the first block", guards: []Guard{fixed("a", allow, nil), fixed("b", block("bad"), nil), fixed("c", block("later"), nil)}, stop: true, reasons: []string{"", "bad"}},
+		{name: "stop at the first block", guards: []Guard{fixed("a", allow, nil), fixed("b", block("bad"), nil), fixed("c", block("later"), nil)}, stop: true, wantErr: "agentpolicy/guard: b blocked the output: bad", guard: true, reasons: []string{"", "bad"}},
 		{name: "error", guards: []Guard{fixed("a", allow, errors.New("boom"))}, wantErr: "agentpolicy/guard: a: boom"},
 		{name: "defer", guards: []Guard{fixed("a", Verdict{Action: agentturn.Defer}, nil)}, wantErr: "agentpolicy/guard: a: Defer is not valid for content", reasons: []string{""}},
 	}
@@ -129,6 +130,10 @@ func TestChainShouldStopAfterTurn(t *testing.T) {
 		}
 		if tc.wantErr != "" && (err == nil || err.Error() != tc.wantErr) {
 			t.Errorf("%s: err = %v, want %q", tc.name, err, tc.wantErr)
+		}
+		// A block is a guard stop, told from a failure by ErrGuard.
+		if errors.Is(err, agentturn.ErrGuard) != tc.guard {
+			t.Errorf("%s: ErrGuard = %v on %v", tc.name, !tc.guard, err)
 		}
 		if stop != tc.stop {
 			t.Errorf("%s: stop = %v", tc.name, stop)
@@ -143,8 +148,86 @@ func TestChainShouldStopAfterTurn(t *testing.T) {
 			}
 		}
 	}
-	if stop, _ := ShouldStopAfterTurn(fixed("a", block("x"), nil))(ctx, info); !stop {
-		t.Error("ShouldStopAfterTurn did not stop")
+	if stop, err := ShouldStopAfterTurn(fixed("a", block("x"), nil))(ctx, info); !stop || !errors.Is(err, agentturn.ErrGuard) {
+		t.Errorf("ShouldStopAfterTurn = %v, %v", stop, err)
+	}
+}
+
+func TestChainOutputGuard(t *testing.T) {
+	ctx := context.Background()
+	original := &openresponses.Message{ID: "msg_1", Status: openresponses.StatusCompleted, Role: openresponses.RoleAssistant, Phase: openresponses.PhaseFinalAnswer, Content: openresponses.Contents{&openresponses.OutputText{Text: "hello"}}}
+	info := agentturn.OutputInfo{RunID: "run_3", Turn: 2, ResponseID: "resp_1", Message: original}
+	upper := New("upper", func(_ context.Context, subject any) (Verdict, error) {
+		items, _ := items(subject)
+		out, _ := rewrite(items, strings.ToUpper)
+		return Verdict{Action: agentturn.Allow, Reason: "upper-cased", Items: out}, nil
+	})
+	seesUpper := New("sees", func(_ context.Context, subject any) (Verdict, error) {
+		if text := subject.(Message).Message.Text(); text != "HELLO" {
+			return block("saw " + text), nil
+		}
+		return allow, nil
+	})
+	notAMessage := New("odd", func(context.Context, any) (Verdict, error) {
+		return Verdict{Action: agentturn.Allow, Items: openresponses.Items{openresponses.UserText("x"), openresponses.UserText("y")}}, nil
+	})
+	tests := []struct {
+		name    string
+		guards  []Guard
+		text    string // the replacement's text; "" keeps the message
+		wantErr string
+		reasons []string
+	}{
+		{name: "no guards"},
+		{name: "allow keeps the message", guards: []Guard{fixed("a", allow, nil)}, reasons: []string{""}},
+		{name: "rewrite feeds the next guard and the transcript", guards: []Guard{upper, seesUpper}, text: "HELLO", reasons: []string{"upper-cased", ""}},
+		{name: "block withholds behind the placeholder", guards: []Guard{fixed("a", allow, nil), fixed("b", block("bad"), nil), fixed("c", block("later"), nil)}, text: "Withheld by b: bad", reasons: []string{"", "bad"}},
+		{name: "block ignores a rewrite", guards: []Guard{fixed("a", Verdict{Action: agentturn.Block, Reason: "x", Items: openresponses.Items{openresponses.AssistantText("no")}}, nil)}, text: "Withheld by a: x", reasons: []string{"x"}},
+		{name: "error", guards: []Guard{fixed("a", allow, errors.New("boom"))}, wantErr: "agentpolicy/guard: a: boom"},
+		{name: "defer", guards: []Guard{fixed("a", Verdict{Action: agentturn.Defer}, nil)}, wantErr: "agentpolicy/guard: a: Defer is not valid for content", reasons: []string{""}},
+		{name: "a rewrite that is not one message", guards: []Guard{notAMessage}, wantErr: "agentpolicy/guard: odd: a rewrite of a message must be one message", reasons: []string{""}},
+	}
+	for _, tc := range tests {
+		j := &journal{}
+		replacement, err := Chain{Guards: tc.guards, Observer: j.observe}.OutputGuard()(ctx, info)
+		if tc.wantErr == "" && err != nil {
+			t.Errorf("%s: %v", tc.name, err)
+		}
+		if tc.wantErr != "" && (err == nil || err.Error() != tc.wantErr) {
+			t.Errorf("%s: err = %v, want %q", tc.name, err, tc.wantErr)
+		}
+		switch {
+		case tc.text == "" && replacement != nil:
+			t.Errorf("%s: replaced with %+v", tc.name, replacement)
+		case tc.text != "" && (replacement == nil || replacement.Text() != tc.text):
+			t.Errorf("%s: replacement = %+v, want %q", tc.name, replacement, tc.text)
+		case tc.text != "" && (replacement.ID != "msg_1" || replacement.Status != openresponses.StatusCompleted || replacement.Phase != openresponses.PhaseFinalAnswer || replacement.Role != openresponses.RoleAssistant):
+			t.Errorf("%s: replacement lost the original's identity: %+v", tc.name, replacement)
+		}
+		if original.Text() != "hello" {
+			t.Fatalf("%s: the original was modified", tc.name)
+		}
+		vs := j.all()
+		if len(vs) != len(tc.reasons) {
+			t.Fatalf("%s: verdicts = %+v, want %d", tc.name, vs, len(tc.reasons))
+		}
+		for i, v := range vs {
+			if v.RunID != "run_3" || v.Turn != 2 || v.Guard != tc.guards[i].Name() || v.Reason != tc.reasons[i] {
+				t.Errorf("%s: verdict[%d] = %+v", tc.name, i, v)
+			}
+		}
+	}
+	// A product's own placeholder.
+	own := Chain{Guards: []Guard{fixed("a", block("x"), nil)}, Placeholder: func(_ *openresponses.Message, guard, reason string) *openresponses.Message {
+		return openresponses.AssistantText("[" + guard + "/" + reason + "]")
+	}}
+	if m, err := own.OutputGuard()(ctx, info); err != nil || m == nil || m.Text() != "[a/x]" {
+		t.Errorf("own placeholder = %+v, %v", m, err)
+	}
+	// The plain constructor is the chain without an observer, and a nil
+	// message is passed without a guard seeing text.
+	if m, err := OutputGuard(fixed("a", block("x"), nil))(ctx, agentturn.OutputInfo{}); err != nil || m == nil || m.Text() != "Withheld by a: x" || m.ID != "" {
+		t.Errorf("OutputGuard = %+v, %v", m, err)
 	}
 }
 
@@ -162,6 +245,8 @@ func TestLimit(t *testing.T) {
 		{"long input", Input{Items: openresponses.Items{long}}, agentturn.Block, "input is 118 bytes, over the 100 byte limit"},
 		{"long output", Output{Response: response(long)}, agentturn.Block, "output is 118 bytes, over the 100 byte limit"},
 		{"nil response", Output{}, agentturn.Allow, ""},
+		{"long message", Message{Message: long}, agentturn.Block, "message is 118 bytes, over the 100 byte limit"},
+		{"nil message", Message{}, agentturn.Allow, ""},
 		{"unknown subject", "text", agentturn.Allow, ""},
 	}
 	for _, tc := range tests {
@@ -232,6 +317,15 @@ func TestSecretsAndRedact(t *testing.T) {
 		if v.Action != agentturn.Block || v.Reason != "secret detected: "+name {
 			t.Errorf("Redact output %s: %+v", name, v)
 		}
+		// A message is not in the transcript yet, so it is rewritten.
+		v, _ = redact.Check(ctx, Message{Message: openresponses.AssistantText(text)})
+		if v.Action != agentturn.Allow || v.Reason != "redacted 1 secret: "+name || len(v.Items) != 1 || v.Items[0].(*openresponses.Message).Text() != "token: [REDACTED "+name+"] end" {
+			t.Errorf("Redact message %s: %+v", name, v)
+		}
+		v, _ = secrets.Check(ctx, Message{Message: openresponses.AssistantText(text)})
+		if v.Action != agentturn.Block || v.Reason != "secret detected: "+name {
+			t.Errorf("Secrets message %s: %+v", name, v)
+		}
 	}
 	// Clean text passes both, and Redact returns no rewrite.
 	clean := Input{Items: openresponses.Items{openresponses.UserText("nothing to see, sk-short, AKIA123")}}
@@ -297,18 +391,21 @@ func TestGuardsInTheLoop(t *testing.T) {
 	if got := agent.State().Transcript[0].(*openresponses.Message).Text(); got != "my key is AKIAIOSFODNN7EXAMPLE" {
 		t.Errorf("transcript = %q", got)
 	}
-	// Output that matches a denied pattern stops the run; the echo
-	// adapter says what it was told.
+	// Output that matches a denied pattern stops the run as a guard
+	// stop, with the guard's error on the end; the echo adapter says
+	// what it was told.
 	end, err = agent.Prompt(ctx, openresponses.UserText("say forbidden"))
-	if err != nil || end.Reason != agentturn.ReasonStopped {
+	var be *BlockedError
+	if err != nil || end.Reason != agentturn.ReasonStopped || end.Cause != agentturn.StopGuard || !errors.As(end.Err, &be) || be.Guard != "deny" || be.Subject != "output" {
 		t.Fatalf("stop: err=%v end=%+v", err, end)
 	}
-	// A blocked input fails the run with the guard's error.
+	// A blocked input fails the run with the guard's error, which
+	// ErrGuard tells from a failure.
 	input.Guards = []Guard{Secrets()}
 	agent = agentturn.New(agentturn.Config{Model: &echo.Adapter{}, BeforeModelCall: input.BeforeModelCall()})
 	end, err = agent.Prompt(ctx, openresponses.UserText("AKIAIOSFODNN7EXAMPLE"))
-	var be *BlockedError
-	if end.Reason != agentturn.ReasonError || !errors.As(err, &be) || be.Guard != "secrets" || be.Reason != "secret detected: aws_access_key" {
+	be = nil
+	if end.Reason != agentturn.ReasonError || !errors.As(err, &be) || !errors.Is(err, agentturn.ErrGuard) || be.Guard != "secrets" || be.Subject != "input" || be.Reason != "secret detected: aws_access_key" {
 		t.Fatalf("block: err=%v end=%+v", err, end)
 	}
 	// Every guard's verdict was recorded with the run it belongs to.
@@ -328,5 +425,44 @@ func TestGuardsInTheLoop(t *testing.T) {
 	want := `redact: redacted 1 secret: aws_access_key|redact: redacted 1 secret: aws_access_key|deny: matched denied pattern "forbidden"|secrets: secret detected: aws_access_key`
 	if got := strings.Join(reasons, "|"); got != want {
 		t.Errorf("reasons = %q\nwant %q", got, want)
+	}
+}
+
+func TestOutputGuardInTheLoop(t *testing.T) {
+	ctx := context.Background()
+	j := &journal{}
+	// The echo adapter repeats the prompt, so a secret in it comes back
+	// in the assistant's message; with no input guard the model reads
+	// it, and the output guard keeps it out of the transcript.
+	output := Chain{Guards: []Guard{Redact(), Deny(regexp.MustCompile(`forbidden`))}, Observer: j.observe}
+	agent := agentturn.New(agentturn.Config{Model: &echo.Adapter{}, OutputGuard: output.OutputGuard()})
+	end, err := agent.Prompt(ctx, openresponses.UserText("my key is AKIAIOSFODNN7EXAMPLE"))
+	if err != nil || end.Reason != agentturn.ReasonDone {
+		t.Fatalf("redact: err=%v end=%+v", err, end)
+	}
+	if reply := end.Items[len(end.Items)-1].(*openresponses.Message).Text(); reply != "my key is [REDACTED aws_access_key]" {
+		t.Errorf("transcript kept %q", reply)
+	}
+	// A denied message is withheld behind the placeholder and the run
+	// goes on.
+	end, err = agent.Prompt(ctx, openresponses.UserText("say forbidden"))
+	if err != nil || end.Reason != agentturn.ReasonDone {
+		t.Fatalf("withhold: err=%v end=%+v", err, end)
+	}
+	last := end.Items[len(end.Items)-1].(*openresponses.Message)
+	if last.Text() != `Withheld by deny: matched denied pattern "forbidden"` || last.Role != openresponses.RoleAssistant || last.ID == "" {
+		t.Errorf("placeholder = %+v", last)
+	}
+	var reasons []string
+	for _, v := range j.all() {
+		if v.RunID == "" || v.Turn == 0 || v.Guard == "" {
+			t.Errorf("verdict = %+v", v)
+		}
+		if v.Reason != "" {
+			reasons = append(reasons, v.Guard+": "+v.Reason)
+		}
+	}
+	if got := strings.Join(reasons, "|"); got != `redact: redacted 1 secret: aws_access_key|deny: matched denied pattern "forbidden"` {
+		t.Errorf("reasons = %q", got)
 	}
 }

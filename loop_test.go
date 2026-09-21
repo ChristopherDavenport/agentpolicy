@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -100,7 +101,10 @@ func TestLoopDeferAndResume(t *testing.T) {
 	if len(bash.ran) != 1 {
 		t.Errorf("a deferred call ran: %v", bash.ran)
 	}
-	pending := end.Pending[0]
+	pending := end.Pending[0].Call
+	if end.Pending[0].Reason != agentturn.PendingDeferred {
+		t.Errorf("pending reason = %q", end.Pending[0].Reason)
+	}
 	if _, err := agent.Prompt(ctx, openresponses.UserText("again")); !errors.Is(err, agentturn.ErrInputRequired) {
 		t.Errorf("prompt while pending: %v", err)
 	}
@@ -212,5 +216,180 @@ func TestLoopAnswersResumeWithoutAHuman(t *testing.T) {
 	}
 	if strings.Join(reasons, "|") != strings.Join(wantReasons, "|") {
 		t.Errorf("verdicts = %q", reasons)
+	}
+}
+
+// batchModel emits one bash call per line of a multi-line user
+// message, and an assistant message otherwise: after the calls'
+// outputs, and after a one-line user message, which is a note.
+type batchModel struct{ calls int }
+
+func (b *batchModel) CreateStream(_ context.Context, req openresponses.Request, sink openresponses.EventSink) error {
+	em := openresponses.NewEmitter(sink, openresponses.NewResponse(req))
+	m, ok := req.Input[len(req.Input)-1].(*openresponses.Message)
+	if ok && m.Role == openresponses.RoleUser && strings.Contains(m.Text(), "\n") {
+		for _, line := range strings.Split(m.Text(), "\n") {
+			b.calls++
+			w, err := em.FunctionCall(fmt.Sprintf("call_%d", b.calls), "bash")
+			if err != nil {
+				return err
+			}
+			args, _ := json.Marshal(bashArgs{Command: line})
+			if err := w.Arguments(string(args)); err != nil {
+				return err
+			}
+			if err := w.Close(); err != nil {
+				return err
+			}
+		}
+		return em.Complete()
+	}
+	var outputs []string
+	for _, it := range req.Input {
+		if o, ok := it.(*openresponses.FunctionCallOutput); ok {
+			outputs = append(outputs, o.Output.Text)
+		}
+	}
+	msg, err := em.Message(openresponses.PhaseFinalAnswer)
+	if err != nil {
+		return err
+	}
+	if err := msg.Text(strings.Join(outputs, "; ")); err != nil {
+		return err
+	}
+	if err := msg.Close(); err != nil {
+		return err
+	}
+	return em.Complete()
+}
+
+func TestLoopHoldsTheBatchForAnAsk(t *testing.T) {
+	ctx := context.Background()
+	j := &journal{}
+	e, err := Build(Policy{
+		Allow:   rules(t, "bash(git add:*) bash(git commit:*)"),
+		Ask:     rules(t, "bash(git push:*)"),
+		Default: Deny(),
+	}, testMatchers, WithObserver(j.observe))
+	if err != nil {
+		t.Fatal(err)
+	}
+	bash := &bashTool{}
+	agent := agentturn.New(agentturn.Config{
+		Model:          &batchModel{},
+		Tools:          []agenttool.Tool{bash.tool()},
+		BeforeToolCall: e.BeforeToolCall(),
+		ToolExecution:  agentturn.ExecSequential,
+	})
+	prompt := "git add -A\ngit commit -m wip\ngit push --force"
+	// asked returns the one pending call the policy asked about, the
+	// push, as a front finds it: the deferred call that is not held.
+	asked := func(t *testing.T, end *agentturn.RunEnd) string {
+		var ids []string
+		for _, p := range end.Pending {
+			v, ok := e.Deferred(p.Call.CallID)
+			if !ok {
+				t.Fatalf("%s not deferred", p.Call.CallID)
+			}
+			if !v.Held {
+				ids = append(ids, p.Call.CallID)
+			}
+		}
+		if len(ids) != 1 || end.Pending[2].Call.CallID != ids[0] {
+			t.Fatalf("asked = %v of %+v", ids, end.Pending)
+		}
+		return ids[0]
+	}
+
+	// The ask holds the whole batch: nothing runs, three calls wait, and
+	// the front can tell the asked one from the held ones.
+	end, err := agent.Prompt(ctx, openresponses.UserText(prompt))
+	if err != nil || end.Reason != agentturn.ReasonInputRequired || len(end.Pending) != 3 || len(bash.ran) != 0 {
+		t.Fatalf("prompt: err=%v end=%+v ran=%v", err, end, bash.ran)
+	}
+	// The user approves the push: the held calls are released and the
+	// batch runs in the model's order, with the user's note after.
+	end, err = agent.Resume(ctx, e.Release(ctx, end, agentturn.Approve(asked(t, end)).WithNote("last time"))...)
+	if err != nil || end.Reason != agentturn.ReasonDone {
+		t.Fatalf("resume: err=%v end=%+v", err, end)
+	}
+	if got := strings.Join(bash.ran, "|"); got != "git add -A|git commit -m wip|git push --force" {
+		t.Errorf("ran = %q", got)
+	}
+	tail := agent.State().Transcript
+	if got := itemTypes(tail[len(tail)-5:]); got != "function_call_output function_call_output function_call_output user assistant" {
+		t.Errorf("transcript tail = %q", got)
+	}
+
+	// The user stops the turn instead: nothing of the batch runs, every
+	// call has an output, and the run ends without a model call.
+	bash.ran = nil
+	end, err = agent.Prompt(ctx, openresponses.UserText(prompt))
+	if err != nil || end.Reason != agentturn.ReasonInputRequired {
+		t.Fatalf("prompt again: err=%v end=%+v", err, end)
+	}
+	end, err = agent.Resume(ctx, e.Release(ctx, end, agentturn.Refuse(openresponses.NewFunctionCallOutput(asked(t, end), "no, stop")))...)
+	if err != nil || end.Reason != agentturn.ReasonStopped || end.Cause != agentturn.StopRefused || len(bash.ran) != 0 {
+		t.Fatalf("stop: err=%v end=%+v ran=%v", err, end, bash.ran)
+	}
+	st := agent.State()
+	if len(st.Pending) != 0 || !agentturn.CanContinue(st.Transcript) {
+		t.Errorf("after the stop: pending=%v", st.Pending)
+	}
+	var outputs []string
+	for _, it := range st.Transcript[len(st.Transcript)-3:] {
+		outputs = append(outputs, it.(*openresponses.FunctionCallOutput).Output.Text)
+	}
+	if got := strings.Join(outputs, "|"); got != "The call was held for an approval and the turn was stopped; the call did not run.|The call was held for an approval and the turn was stopped; the call did not run.|no, stop" {
+		t.Errorf("outputs after the stop = %q", got)
+	}
+
+	// Without a human, Answers reviews the push alone and releases the
+	// rest with it.
+	bash.ran = nil
+	var reviewed []string
+	reviewer := ReviewerFunc(func(_ context.Context, info agentturn.ToolCallInfo, v Verdict) (Review, error) {
+		reviewed = append(reviewed, info.Call.CallID+": "+v.Reason)
+		return Review{Outcome: Approved, Note: "pushed under review"}, nil
+	})
+	end, err = agent.Prompt(ctx, openresponses.UserText(prompt))
+	if err != nil || end.Reason != agentturn.ReasonInputRequired {
+		t.Fatalf("prompt for review: err=%v end=%+v", err, end)
+	}
+	answers, err := e.Answers(ctx, reviewer, end)
+	if err != nil || len(answers) != 3 || strings.Join(reviewed, "|") != asked(t, end)+": approval required by bash(git push:*)" {
+		t.Fatalf("answers = %v, %v, reviewed %v", answers, err, reviewed)
+	}
+	end, err = agent.Resume(ctx, answers...)
+	if err != nil || end.Reason != agentturn.ReasonDone || len(bash.ran) != 3 {
+		t.Fatalf("resume reviewed: err=%v end=%+v ran=%v", err, end, bash.ran)
+	}
+	tail = agent.State().Transcript
+	if note := tail[len(tail)-2].(*openresponses.Message); note.Role != openresponses.RoleUser || note.Text() != "pushed under review" {
+		t.Errorf("note = %+v", note)
+	}
+
+	// Every verdict is on the record: three holds or asks per prompt,
+	// then the answers.
+	var kinds []string
+	for _, v := range j.all() {
+		switch {
+		case v.Held && v.Action == agentturn.Defer:
+			kinds = append(kinds, "held")
+		case v.Held && v.Action == agentturn.Allow:
+			kinds = append(kinds, "released")
+		case v.Held:
+			kinds = append(kinds, "stopped")
+		case v.Action == agentturn.Defer:
+			kinds = append(kinds, "asked")
+		default:
+			kinds = append(kinds, "reviewed")
+		}
+	}
+	want := "held held asked released released " + // the approval: two releases
+		"held held asked stopped stopped " + // the stop
+		"held held asked reviewed released released" // the review
+	if got := strings.Join(kinds, " "); got != want {
+		t.Errorf("verdicts = %q\nwant %q", got, want)
 	}
 }

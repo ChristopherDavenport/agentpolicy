@@ -502,6 +502,8 @@ func TestGrantOver(t *testing.T) {
 		{"over a deny", Verdict{Action: agentturn.Block, Rule: &Rule{Tool: "bash", Spec: "rm:*"}}, Rule{Tool: "bash"}, "cannot grant over a deny rule: bash(rm:*)"},
 		{"over an allow", Verdict{Action: agentturn.Allow}, Rule{Tool: "bash"}, "nothing to grant over: the call was not deferred"},
 		{"over a default deny", Verdict{Action: agentturn.Block}, Rule{Tool: "bash"}, "nothing to grant over: the call was not deferred"},
+		{"over a held call", Verdict{Action: agentturn.Defer, Held: true, Rule: &Rule{Tool: "bash", Spec: "git status:*"}}, Rule{Tool: "bash", Spec: "git status:*", Source: managed}, "nothing to grant over: the call was held for another call's approval"},
+		{"over a held call of the default", Verdict{Action: agentturn.Defer, Held: true}, Rule{Tool: "bash", Source: managed}, "nothing to grant over: the call was held for another call's approval"},
 	}
 	for _, tc := range tests {
 		before := len(j.all())

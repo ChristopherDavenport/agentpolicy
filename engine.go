@@ -9,6 +9,7 @@ import (
 	"sync"
 
 	"github.com/ChristopherDavenport/agentturn"
+	"github.com/ChristopherDavenport/openresponses"
 )
 
 // Errors returned by [Build] and the grants. Every error the package
@@ -23,10 +24,12 @@ var (
 )
 
 // Verdict is what was decided and why, for recording: the engine's
-// decision on a call, a grant, a guard's verdict on content, or a
-// reviewer's answer to a deferred call. A product writes a verdict on
-// a call into the session's decision entry for that call, and a grant
-// or a guard's verdict as a custom entry under agentpolicy.
+// decision on a call, a hold and its release, a grant, a guard's
+// verdict on content, or a reviewer's answer to a deferred call. The
+// loop's recorder writes the decision the hook returned as the call's
+// decision entry; the verdict carries what that entry cannot, the rule
+// above all, and a product writes it beside the decision as a custom
+// entry under agentpolicy.
 type Verdict struct {
 	RunID string
 	Turn  int
@@ -44,6 +47,10 @@ type Verdict struct {
 	// Reason is the stable text behind the action, the same text the
 	// model reads when the action blocks a call.
 	Reason string
+	// Held is set on a Defer for a call the policy allowed but holds
+	// because another call of its batch asks, and on the verdict that
+	// releases or refuses it once the ask is answered.
+	Held bool
 }
 
 // Option configures an [Engine].
@@ -68,8 +75,9 @@ type Engine struct {
 	mu     sync.Mutex
 	policy Policy
 	// deferred remembers the calls deferred in the run named by runID,
-	// so Answers can hand the reviewer what the hook saw. A decision
-	// for another run forgets them.
+	// asked and held, so Answers can hand the reviewer what the hook
+	// saw and Release can answer the held ones. A decision for another
+	// run forgets them.
 	deferred map[string]deferredCall
 	runID    string
 	reviews  reviewLog
@@ -78,7 +86,14 @@ type Engine struct {
 type deferredCall struct {
 	info    agentturn.ToolCallInfo
 	verdict Verdict
+	// allowed is the reason the policy allowed a held call, for the
+	// verdict that releases it.
+	allowed string
 }
+
+// byPolicy is what the engine's decisions name as their decider, the
+// session format's word for a rule the harness evaluated on its own.
+const byPolicy = "policy"
 
 // Build validates the policy against the matchers and returns the
 // runtime form. It fails with [ErrNoDefault] when the default is unset
@@ -176,8 +191,18 @@ func (e *Engine) BeforeToolCall() func(context.Context, agentturn.ToolCallInfo) 
 // restrictive: the call is blocked if any subject is denied, deferred
 // if any subject asks, and allowed only when every subject is. A
 // splitter that fails blocks the call with its error as the reason.
-// The verdict reaches the observer before Decide returns, and the
-// same policy and the same call always give the same verdict.
+//
+// A call the policy allows is held, deferred with Verdict.Held set,
+// when another call of its batch asks, so nothing the model asked for
+// in the same turn runs before the user has answered; the loop runs
+// the hook for every call of the batch before any executes, so the
+// engine sees the ask wherever it sits in the batch. [Engine.Release]
+// answers the held calls once the asked ones are answered. A blocked
+// call is blocked whatever its batch holds.
+//
+// The decision names the policy as its decider. The verdict reaches
+// the observer before Decide returns, and the same policy and the same
+// call in the same batch always give the same verdict.
 func (e *Engine) Decide(ctx context.Context, info agentturn.ToolCallInfo) (*agentturn.ToolDecision, error) {
 	name, callID := "", ""
 	if info.Call != nil {
@@ -193,19 +218,53 @@ func (e *Engine) Decide(ctx context.Context, info agentturn.ToolCallInfo) (*agen
 	p := e.policy
 	e.mu.Unlock()
 
-	subjects, err := e.split(name, info.Args)
-	if err != nil {
-		v.Action, v.Reason = agentturn.Block, name+" call could not be evaluated: "+err.Error()
-	} else {
-		v.Action, v.Rule, v.Reason = e.fold(p, name, subjects)
+	v.Action, v.Rule, v.Reason = e.decide(p, name, info.Args)
+	d := deferredCall{info: info}
+	if v.Action == agentturn.Allow && e.batchAsks(p, info) {
+		d.allowed = v.Reason
+		v.Action, v.Held, v.Reason = agentturn.Defer, true, "held for approval: "+v.Reason
 	}
 	if v.Action == agentturn.Defer {
+		d.verdict = v
 		e.mu.Lock()
-		e.deferred[callID] = deferredCall{info: info, verdict: v}
+		e.deferred[callID] = d
 		e.mu.Unlock()
 	}
 	e.observe(ctx, v)
-	return &agentturn.ToolDecision{Action: v.Action, Reason: v.Reason}, nil
+	return &agentturn.ToolDecision{Action: v.Action, Reason: v.Reason, By: byPolicy}, nil
+}
+
+// decide evaluates one call as Decide does, without recording it.
+func (e *Engine) decide(p Policy, name string, args json.RawMessage) (agentturn.ToolAction, *Rule, string) {
+	subjects, err := e.split(name, args)
+	if err != nil {
+		return agentturn.Block, nil, name + " call could not be evaluated: " + err.Error()
+	}
+	return e.fold(p, name, subjects)
+}
+
+// batchAsks reports whether a call of info's batch other than info's
+// own asks. The batch holds the loop's own pointers, so the call's is
+// told by identity.
+func (e *Engine) batchAsks(p Policy, info agentturn.ToolCallInfo) bool {
+	for _, c := range info.Batch {
+		if c == nil || c == info.Call {
+			continue
+		}
+		if a, _, _ := e.decide(p, c.Name, callArgs(c)); a == agentturn.Defer {
+			return true
+		}
+	}
+	return false
+}
+
+// callArgs returns a call's arguments as the loop hands them to the
+// hook: the empty object when the model gave none.
+func callArgs(c *openresponses.FunctionCall) json.RawMessage {
+	if c.Arguments == "" {
+		return json.RawMessage("{}")
+	}
+	return json.RawMessage(c.Arguments)
 }
 
 // split returns the subjects of a call: the splitter's, or the call
@@ -371,6 +430,9 @@ func (e *Engine) GrantOver(ctx context.Context, v Verdict, r Rule) (granted bool
 			return false, "cannot grant over a deny rule: " + v.Rule.String()
 		}
 		return false, "nothing to grant over: the call was not deferred"
+	}
+	if v.Held {
+		return false, "nothing to grant over: the call was held for another call's approval"
 	}
 	if v.Rule == nil {
 		e.mu.Lock()

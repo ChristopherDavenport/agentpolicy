@@ -50,20 +50,22 @@ func Secrets(patterns ...Pattern) Guard {
 	})
 }
 
-// Redact rewrites the input before a model call, replacing every
-// secret with "[REDACTED <name>]", so the model never reads it and
-// the session records what the model saw. The output of a turn cannot
-// be rewritten, since it is in the transcript already, so there Redact
+// Redact rewrites the input before a model call, and a message before
+// the transcript keeps it, replacing every secret with
+// "[REDACTED <name>]", so the model never reads one and the session
+// records what the model saw and said. The output of a turn cannot be
+// rewritten, since it is in the transcript already, so there Redact
 // stops the run as [Secrets] does. With no patterns it uses
 // [DefaultSecrets].
 func Redact(patterns ...Pattern) Guard {
 	patterns = orDefault(patterns)
 	return New("redact", func(_ context.Context, subject any) (Verdict, error) {
 		switch s := subject.(type) {
-		case Input:
+		case Input, Message:
+			items, _ := items(s)
 			count := 0
 			var names []string
-			out, changed := rewrite(s.Items, func(text string) string {
+			out, changed := rewrite(items, func(text string) string {
 				for _, p := range patterns {
 					text = p.Regexp.ReplaceAllStringFunc(text, func(string) string {
 						count++

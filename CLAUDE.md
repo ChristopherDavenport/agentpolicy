@@ -2,8 +2,8 @@
 
 Decisions for Go agents over Open Responses: a rule grammar and engine
 that becomes the loop's `BeforeToolCall`, guards over input and output
-that become `BeforeModelCall` and `ShouldStopAfterTurn`, and an
-observer so every verdict is recorded. The design is in
+that become `BeforeModelCall`, `OutputGuard` and `ShouldStopAfterTurn`,
+and an observer so every verdict is recorded. The design is in
 `docs/plans/policy-layer.md`; read it before writing code. `docs/feedback.md` holds the design studies' findings against that plan; apply them to the plan before building the piece they touch.
 
 ## Module
@@ -27,9 +27,11 @@ observer so every verdict is recorded. The design is in
 - `../agenttool`: the tool contract, for `ToolCallInfo`'s tool.
 - `../agentturn`: the loop. This module produces its hook values and
   sits above it, as `tools/agent` does.
-- `../agentsession`: the session format. A verdict on a call is what
-  the product writes into that call's `decision` entry; a guard's
-  verdict and a grant are `custom` entries under `agentpolicy`.
+- `../agentsession`: the session format. The loop's recorder writes
+  the hook's decision as the call's `decision` entry, `by` naming the
+  policy; the observer's verdict, with the rule, a guard's verdict or
+  a grant, is what the product writes beside it as a `custom` entry
+  under `agentpolicy`.
 - `../agentskill`: skills carry `allowed-tools` in this grammar.
 
 ## Conventions

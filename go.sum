@@ -1,6 +1,6 @@
-github.com/ChristopherDavenport/agenttool v0.0.4 h1:JUIjm3cQpy9uoOV7hbOUsMX86+5dgf7P06tr7lbEGmA=
-github.com/ChristopherDavenport/agenttool v0.0.4/go.mod h1:ZwrMvxCq1LTtp0e2EgxYKJ3Nr3NJRpjVkGnEZSM6fO4=
-github.com/ChristopherDavenport/agentturn v0.0.5 h1:1WdVU+7LsaXWGwgse5PlxeH3hmYHKyFdc1YZcbBnjvI=
-github.com/ChristopherDavenport/agentturn v0.0.5/go.mod h1:Q+1tuEiB1dtDzs/IcmYZH8QJxReHxugPS8gaIZPeKuw=
+github.com/ChristopherDavenport/agenttool v0.0.5 h1:osZw54L1J3f/Awe94Se5XLCLWMIdd2+L1JTqfgnP0yo=
+github.com/ChristopherDavenport/agenttool v0.0.5/go.mod h1:ZwrMvxCq1LTtp0e2EgxYKJ3Nr3NJRpjVkGnEZSM6fO4=
+github.com/ChristopherDavenport/agentturn v0.0.6 h1:BgdWjuDa5cTtaq/O0GwosZWYu3238myvVLLStAV7BDc=
+github.com/ChristopherDavenport/agentturn v0.0.6/go.mod h1:uIWHbQHBF5rSu/ydeLl3Z/0QwguxCUNaxGxV9dNlduQ=
 github.com/ChristopherDavenport/openresponses v0.0.9 h1:LazxB0pQg0IQcmHT8Or7MVwRf9ZwIHrsxRsSEw2rha4=
 github.com/ChristopherDavenport/openresponses v0.0.9/go.mod h1:oZT6GCySXw3+vL5LzrJrRI5qagBumqvwDZdp6Kr++a8=

@@ -45,6 +45,11 @@ type Review struct {
 	// Args, for an approval, replaces the arguments the tool receives.
 	// nil keeps the call's own.
 	Args json.RawMessage
+	// Note is what the reviewer tells the model with the result, on an
+	// approval or a refusal: the loop appends it after the outputs as a
+	// user message, so the model reads the result and the note
+	// together, as a user's note on an approval reaches it.
+	Note string
 }
 
 // Reviewer answers a deferred call without a human: Codex's
@@ -95,10 +100,12 @@ type reviewLog struct {
 	consecutive int
 }
 
-// What the model reads when a reviewer does not approve.
+// What the model reads when a reviewer does not approve, and for a
+// call no reviewer sees.
 const (
 	reviewerTimedOutText = "The reviewer did not answer in time; the call did not run."
 	reviewerFailedText   = "The reviewer could not evaluate the call; the call did not run."
+	cutOffText           = "The call was cut off before it finished and may have run; it was not run again."
 	noWorkaroundText     = "Do not pursue the same outcome through a workaround, indirect execution or policy circumvention."
 )
 
@@ -112,25 +119,34 @@ func refusalText(reason string) string {
 }
 
 // Answers reviews the calls end left pending and returns one Answer
-// per call, in the order of end.Pending, for agentturn's Resume. An
+// per call for agentturn's Resume, in the order of end.Pending. An
 // approval runs the call inside the loop, with the reviewer's
-// arguments when it gave any. A refusal, a timeout and a review that
-// failed each answer the call with a refusal the model reads, and a
-// refusal tells the model not to pursue the same outcome by another
-// route; only a cancelled ctx returns an error instead of answers.
-// Every answer is a Verdict through the observer: Allow for an
-// approval, Block otherwise, with the reason.
+// arguments when it gave any, and carries the reviewer's note. A
+// refusal, a timeout and a review that failed each answer the call
+// with a refusal the model reads, and a refusal tells the model not to
+// pursue the same outcome by another route; only a cancelled ctx
+// returns an error instead of answers. Every answer is a Verdict
+// through the observer: Allow for an approval, Block otherwise, with
+// the reason.
 //
-// The reviewer sees each call as the hook saw it, with the verdict
-// that deferred it, for the calls the engine deferred in the run in
-// progress; a call it did not defer, one an abort cut off or one from
-// a run it has forgotten, is reviewed with the call alone and a
-// verdict whose Action is Defer and whose Reason is empty.
+// The reviewer sees each deferred call as the hook saw it, with the
+// verdict that deferred it, for the calls the engine asked about in
+// the run in progress; a call from a run it has forgotten is reviewed
+// with the call alone and a verdict whose Action is Defer and whose
+// Reason is empty. A call the engine held for an ask is not reviewed:
+// the policy allowed it, and [Engine.Release] answers it from the
+// asked calls' answers. A call an abort cut off or one found
+// unanswered in a seeded transcript, whose tool may have run, is not
+// reviewed either: it is answered with a refusal that says so, and
+// does not count toward the bound, so the model decides whether to
+// ask for it again.
 //
-// When the [DenialBound] is reached the answers are returned with
-// [ErrDenialBound], so the front can end the run instead of resuming
-// it. The bound counts across calls to Answers until
-// [Engine.ResetReviews].
+// When the [DenialBound] is reached, every refusal among the answers
+// is built with agentturn.Refuse, so Resume appends the outputs and
+// ends the run with StopRefused instead of calling the model, the
+// held calls are refused with it, and the answers are returned with
+// [ErrDenialBound] so the front can say why. The bound counts across
+// calls to Answers until [Engine.ResetReviews].
 func (e *Engine) Answers(ctx context.Context, r Reviewer, end *agentturn.RunEnd) ([]agentturn.Answer, error) {
 	if end == nil || len(end.Pending) == 0 {
 		return nil, nil
@@ -140,8 +156,20 @@ func (e *Engine) Answers(ctx context.Context, r Reviewer, end *agentturn.RunEnd)
 	}
 	answers := make([]agentturn.Answer, 0, len(end.Pending))
 	bounded := false
-	for _, call := range end.Pending {
+	for _, p := range end.Pending {
+		call := p.Call
+		if call == nil {
+			continue
+		}
+		if p.Reason == agentturn.PendingAborted || p.Reason == agentturn.PendingUnknown {
+			answers = append(answers, agentturn.Output(openresponses.NewFunctionCallOutput(call.CallID, cutOffText)))
+			e.observe(ctx, Verdict{RunID: end.RunID, CallID: call.CallID, Tool: call.Name, Action: agentturn.Block, Reason: "not reviewed: " + string(p.Reason)})
+			continue
+		}
 		info, v := e.recall(end.RunID, call)
+		if v.Held {
+			continue
+		}
 		rev, err := r.Review(ctx, info, v)
 		if cerr := ctx.Err(); cerr != nil {
 			return nil, cerr
@@ -154,6 +182,14 @@ func (e *Engine) Answers(ctx context.Context, r Reviewer, end *agentturn.RunEnd)
 		e.observe(ctx, verdict)
 	}
 	if bounded {
+		for i := range answers {
+			if answers[i].Output != nil {
+				answers[i].Terminate = true
+			}
+		}
+	}
+	answers = e.Release(ctx, end, answers...)
+	if bounded {
 		return answers, ErrDenialBound
 	}
 	return answers, nil
@@ -164,14 +200,10 @@ func (e *Engine) Answers(ctx context.Context, r Reviewer, end *agentturn.RunEnd)
 func (e *Engine) recall(runID string, call *openresponses.FunctionCall) (agentturn.ToolCallInfo, Verdict) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	if d, ok := e.deferred[call.CallID]; ok {
+	if d, ok := e.deferred[call.CallID]; ok && e.runID == runID {
 		return d.info, d.verdict
 	}
-	args := json.RawMessage(call.Arguments)
-	if len(args) == 0 {
-		args = json.RawMessage("{}")
-	}
-	return agentturn.ToolCallInfo{RunID: runID, Call: call, Args: args},
+	return agentturn.ToolCallInfo{RunID: runID, Call: call, Args: callArgs(call)},
 		Verdict{RunID: runID, CallID: call.CallID, Tool: call.Name, Action: agentturn.Defer}
 }
 
@@ -190,15 +222,15 @@ func answer(call *openresponses.FunctionCall, info agentturn.ToolCallInfo, rev R
 		v.Action = agentturn.Allow
 		v.Reason = withReason("approved by reviewer", rev.Reason)
 		if rev.Args != nil {
-			return agentturn.ApproveWith(call.CallID, rev.Args), v
+			return agentturn.ApproveWith(call.CallID, rev.Args).WithNote(rev.Note), v
 		}
-		return agentturn.Approve(call.CallID), v
+		return agentturn.Approve(call.CallID).WithNote(rev.Note), v
 	case rev.Outcome == TimedOut:
 		v.Reason = "reviewer timed out"
 		return refuse(reviewerTimedOutText), v
 	}
 	v.Reason = withReason("denied by reviewer", rev.Reason)
-	return refuse(refusalText(rev.Reason)), v
+	return refuse(refusalText(rev.Reason)).WithNote(rev.Note), v
 }
 
 func withReason(text, reason string) string {

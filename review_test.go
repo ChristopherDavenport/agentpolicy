@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/ChristopherDavenport/agentturn"
@@ -13,7 +14,11 @@ import (
 
 // pendingEnd builds the RunEnd of a run that deferred the given calls.
 func pendingEnd(runID string, calls ...*openresponses.FunctionCall) *agentturn.RunEnd {
-	return &agentturn.RunEnd{RunID: runID, Reason: agentturn.ReasonInputRequired, Pending: calls}
+	end := &agentturn.RunEnd{RunID: runID, Reason: agentturn.ReasonInputRequired}
+	for _, c := range calls {
+		end.Pending = append(end.Pending, agentturn.PendingCall{Call: c, Reason: agentturn.PendingDeferred})
+	}
+	return end
 }
 
 func TestAnswers(t *testing.T) {
@@ -27,9 +32,9 @@ func TestAnswers(t *testing.T) {
 		rev Review
 		err error
 	}{
-		"approve":      {rev: Review{Outcome: Approved, Reason: "read-only"}},
+		"approve":      {rev: Review{Outcome: Approved, Reason: "read-only", Note: "keep it read-only"}},
 		"approve-args": {rev: Review{Outcome: Approved, Args: json.RawMessage(`{"command":"git status --short"}`)}},
-		"refuse":       {rev: Review{Outcome: Refused, Reason: "exfiltrates a token."}},
+		"refuse":       {rev: Review{Outcome: Refused, Reason: "exfiltrates a token.", Note: "use the vault instead"}},
 		"refuse-bare":  {rev: Review{Outcome: Refused}},
 		"timeout":      {rev: Review{Outcome: TimedOut}},
 		"fail":         {err: errors.New("model unavailable")},
@@ -67,9 +72,9 @@ func TestAnswers(t *testing.T) {
 		}
 	}
 	want := []agentturn.Answer{
-		agentturn.Approve("approve"),
+		agentturn.Approve("approve").WithNote("keep it read-only"),
 		agentturn.ApproveWith("approve-args", json.RawMessage(`{"command":"git status --short"}`)),
-		agentturn.Output(openresponses.NewFunctionCallOutput("refuse", "Denied by reviewer: exfiltrates a token. Do not pursue the same outcome through a workaround, indirect execution or policy circumvention.")),
+		agentturn.Output(openresponses.NewFunctionCallOutput("refuse", "Denied by reviewer: exfiltrates a token. Do not pursue the same outcome through a workaround, indirect execution or policy circumvention.")).WithNote("use the vault instead"),
 		agentturn.Output(openresponses.NewFunctionCallOutput("refuse-bare", "Denied by reviewer. Do not pursue the same outcome through a workaround, indirect execution or policy circumvention.")),
 		agentturn.Output(openresponses.NewFunctionCallOutput("timeout", "The reviewer did not answer in time; the call did not run.")),
 		agentturn.Output(openresponses.NewFunctionCallOutput("fail", "The reviewer could not evaluate the call; the call did not run.")),
@@ -210,6 +215,18 @@ func TestAnswersDenialBound(t *testing.T) {
 	if !errors.Is(err, ErrDenialBound) || len(answers) != 1 {
 		t.Errorf("third refusal: %v, %v", answers, err)
 	}
+	// The refusals that reach the bound end the run: they are built with
+	// Refuse, so Resume appends them and stops instead of calling the
+	// model. Before the bound they are plain outputs.
+	if !answers[0].Terminate || answers[0].Output == nil {
+		t.Errorf("bounded answer = %+v", answers[0])
+	}
+	if plain, _ := Build(Policy{Default: Ask()}, nil); plain != nil {
+		answers, _ := plain.Answers(ctx, refuse, pendingEnd("r", c))
+		if answers[0].Terminate {
+			t.Errorf("unbounded answer = %+v", answers[0])
+		}
+	}
 	// An approval resets the run of refusals.
 	e.ResetReviews()
 	for _, r := range []Reviewer{refuse, refuse, approve, refuse, refuse} {
@@ -270,5 +287,100 @@ func TestOutcomeString(t *testing.T) {
 		if o.String() != want {
 			t.Errorf("%d.String() = %q, want %q", o, o.String(), want)
 		}
+	}
+}
+
+func TestAnswersCutOffCalls(t *testing.T) {
+	ctx := context.Background()
+	j := &journal{}
+	e, err := Build(Policy{Default: Ask()}, nil, WithObserver(j.observe))
+	if err != nil {
+		t.Fatal(err)
+	}
+	reviewed := 0
+	approve := ReviewerFunc(func(context.Context, agentturn.ToolCallInfo, Verdict) (Review, error) {
+		reviewed++
+		return Review{Outcome: Approved}, nil
+	})
+	fc := func(id string) *openresponses.FunctionCall {
+		return &openresponses.FunctionCall{CallID: id, Name: "bash", Arguments: `{}`}
+	}
+	// A call an abort cut off or one found unanswered is not the
+	// reviewer's to approve: its tool may have run. It is refused with
+	// text that says so; the deferred call is reviewed as ever.
+	end := &agentturn.RunEnd{RunID: "r", Reason: agentturn.ReasonAborted, Pending: []agentturn.PendingCall{
+		{Call: fc("aborted"), Reason: agentturn.PendingAborted},
+		{Call: fc("deferred"), Reason: agentturn.PendingDeferred},
+		{Call: fc("unknown"), Reason: agentturn.PendingUnknown},
+		{Call: nil},
+	}}
+	answers, err := e.Answers(ctx, approve, end)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []agentturn.Answer{
+		agentturn.Output(openresponses.NewFunctionCallOutput("aborted", "The call was cut off before it finished and may have run; it was not run again.")),
+		agentturn.Approve("deferred"),
+		agentturn.Output(openresponses.NewFunctionCallOutput("unknown", "The call was cut off before it finished and may have run; it was not run again.")),
+	}
+	if !reflect.DeepEqual(answers, want) || reviewed != 1 {
+		t.Errorf("answers = %s (reviewed %d)\nwant %s", dump(answers), reviewed, dump(want))
+	}
+	var reasons []string
+	for _, v := range j.all() {
+		reasons = append(reasons, v.CallID+" "+v.Reason)
+	}
+	if got := strings.Join(reasons, "|"); got != "aborted not reviewed: aborted|deferred approved by reviewer|unknown not reviewed: unknown" {
+		t.Errorf("verdicts = %q", got)
+	}
+	// A cut-off call does not count toward the denial bound.
+	e, err = Build(Policy{Default: Ask()}, nil, WithDenialBound(DenialBound{Consecutive: 1}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cut := &agentturn.RunEnd{RunID: "r", Reason: agentturn.ReasonAborted, Pending: []agentturn.PendingCall{{Call: fc("aborted"), Reason: agentturn.PendingAborted}}}
+	if answers, err := e.Answers(ctx, approve, cut); err != nil || answers[0].Terminate {
+		t.Errorf("cut off counted: %s, %v", dump(answers), err)
+	}
+}
+
+func TestAnswersReleasesHeldCalls(t *testing.T) {
+	ctx := context.Background()
+	j := &journal{}
+	e, err := Build(Policy{Allow: rules(t, "bash(git add:*)"), Ask: rules(t, "bash(git push:*)"), Default: Deny()}, testMatchers, WithObserver(j.observe), WithDenialBound(DenialBound{Consecutive: 1}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var reviewedIDs []string
+	reviewer := func(outcome Outcome) Reviewer {
+		return ReviewerFunc(func(_ context.Context, info agentturn.ToolCallInfo, _ Verdict) (Review, error) {
+			reviewedIDs = append(reviewedIDs, info.Call.CallID)
+			return Review{Outcome: outcome}, nil
+		})
+	}
+	hold := func() *agentturn.RunEnd {
+		end := &agentturn.RunEnd{RunID: "run_1", Reason: agentturn.ReasonInputRequired}
+		for _, info := range batch("run_1", "git add -A", "git push") {
+			e.Decide(ctx, info)
+			end.Pending = append(end.Pending, agentturn.PendingCall{Call: info.Call, Reason: agentturn.PendingDeferred})
+		}
+		return end
+	}
+	// The reviewer sees only the asked call; the held one is released
+	// with its approval.
+	answers, err := e.Answers(ctx, reviewer(Approved), hold())
+	if err != nil || !reflect.DeepEqual(answers, []agentturn.Answer{agentturn.Approve("call_a"), agentturn.Approve("call_b")}) || strings.Join(reviewedIDs, ",") != "call_b" {
+		t.Errorf("approved: %s, %v, reviewed %v", dump(answers), err, reviewedIDs)
+	}
+	// A refusal at the bound ends the run, so the held call is refused
+	// with it.
+	reviewedIDs = nil
+	answers, err = e.Answers(ctx, reviewer(Refused), hold())
+	want := []agentturn.Answer{
+		agentturn.Output(openresponses.NewFunctionCallOutput("call_a", "The call was held for an approval and the turn was stopped; the call did not run.")),
+		agentturn.Refuse(openresponses.NewFunctionCallOutput("call_b", "Denied by reviewer. Do not pursue the same outcome through a workaround, indirect execution or policy circumvention.")),
+	}
+	if !errors.Is(err, ErrDenialBound) || !reflect.DeepEqual(answers, want) || strings.Join(reviewedIDs, ",") != "call_b" {
+		t.Errorf("refused: %s, %v, reviewed %v", dump(answers), err, reviewedIDs)
 	}
 }

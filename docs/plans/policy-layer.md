@@ -27,9 +27,10 @@ them applied, and each place it changed says which finding changed it.
   lists and a fixed precedence.
 - A policy that becomes a `BeforeToolCall` value and returns the
   loop's own `ToolDecision`: Allow, Block with a reason, or Defer for
-  approval.
-- Guards over input and output that become `BeforeModelCall` and
-  `ShouldStopAfterTurn` values.
+  approval. An ask holds its batch, so nothing the model asked for in
+  the same turn runs before the answer.
+- Guards over input and output that become `BeforeModelCall`,
+  `OutputGuard` and `ShouldStopAfterTurn` values.
 - Every verdict observable, so a product records it beside the
   session.
 - A mutable policy for "always allow this", with its own journal.
@@ -200,22 +201,62 @@ type Verdict struct {
     Action agentturn.ToolAction
     Rule   *Rule  // the rule that fired, nil for the default
     Reason string
+    Held   bool   // a call held for an ask in its batch, and its release
 }
 
 func WithObserver(fn func(context.Context, Verdict)) Option
 ```
 
 A hook cannot append to the transcript, so a verdict reaches the
-session through the observer. A verdict on a call is what the
-product's recorder writes as the session format's `decision` entry on
-that call: Block is `reject` carrying the reason, Defer is `hold`, and
-Allow is `proceed`, which the format has a writer record only when it
-answers a hold or rewrote the arguments, since the call's `dispatch`
-is otherwise the record. `by` is `policy` for the engine's decision
-and `agent` for a reviewer's answer; the rule that fired is a member
-the format does not define, which readers preserve. A guard's verdict
-on content and a grant are not a call's fate, so the recorder writes
-those as `custom` entries under `agentpolicy`.
+session two ways. The `ToolDecision` the hook returns is what the
+loop's own recorder writes as the format's `decision` entry on the
+call: Block is `reject` carrying the reason, Defer is `hold`, and an
+approval on `Resume` is `proceed`, which the format has a writer
+record only when it answers a hold or rewrote the arguments, since
+the call's `dispatch` is otherwise the record. `by` is what the
+decision names, and the engine names `policy`; an answer through
+`Resume` names nobody, so a product that records a reviewer as
+`agent` does so from the observer. What the entry cannot carry, the
+rule that fired, a hold and its release, a guard's verdict on content,
+a grant, reaches the session through the observer, and a product
+writes it beside the decision as a `custom` entry under `agentpolicy`,
+through the recorder's `Annotate`.
+
+### Holding a batch
+
+The loop runs `BeforeToolCall` for every call of a batch, in the
+model's order, before any call executes, and hands each call its
+`Batch` and `Index`. Deferring one call alone would let the rest of
+the batch run while the user reads the question, so the user answers
+about a push after the commit it follows has happened. The engine
+therefore holds: a call the policy allows is deferred, with
+`Verdict.Held` set and `held for approval: <the allow reason>` as its
+reason, when any other call of its batch asks, wherever that call sits
+in the batch. A blocked call is blocked whatever its batch holds, and
+a batch with no ask holds nothing. The engine remembers the held calls
+with the asked ones, and answers them once the front has answered the
+asks:
+
+```go
+// Deferred returns the verdict that deferred the call in the run in
+// progress, asked or held, so a front tells the calls it must answer
+// from the ones Release answers.
+func (e *Engine) Deferred(callID string) (Verdict, bool)
+
+// Release completes the answers to a run that ended on an ask: given
+// the front's answers to the asked calls, it answers each held call and
+// returns every answer in the order of end.Pending, the model's order,
+// which is the order a sequential batch runs in.
+func (e *Engine) Release(ctx context.Context, end *agentturn.RunEnd, answers ...agentturn.Answer) []agentturn.Answer
+```
+
+The policy allowed a held call, so it is approved and runs with the
+batch, on an approval and on a refusal alike: both references let the
+other calls of a batch run when one is refused, and the model sees the
+one refusal. An answer built with `agentturn.Refuse` ends the turn
+instead, and then the held calls are refused with text that says so,
+since the user said stop before anything ran. A front shows the held
+calls beside the ask, since they run on any answer but a stop.
 
 ### Runtime changes
 
@@ -266,6 +307,7 @@ type Review struct {
     Outcome Outcome
     Reason  string
     Args    json.RawMessage // for an approval, rewritten arguments
+    Note    string          // what the model reads with the result, as a user's note does
 }
 
 type Reviewer interface {
@@ -278,15 +320,25 @@ type Reviewer interface {
 // the refusal tells it not to pursue the same outcome by another
 // route. Every answer is a Verdict through the observer. After three
 // consecutive refusals, or ten within the last fifty reviews, the
-// answers are returned with ErrDenialBound so the front can stop the
-// run instead of resuming it.
+// refusals are built with Refuse, so Resume ends the run without a
+// model call, and the answers are returned with ErrDenialBound so the
+// front can say why.
 func (e *Engine) Answers(ctx context.Context, r Reviewer, end *agentturn.RunEnd) ([]agentturn.Answer, error)
 ```
 
 The engine remembers what it deferred in the run in progress, the
 hook's `ToolCallInfo` and the verdict, so the reviewer sees the tool
-and the reason the policy asked. `Decide` never calls a model; the
-reviewer the front passes in may.
+and the reason the policy asked. It reviews only the calls the policy
+asked about: a held call is released with them, as `Release` does for
+a human's answers, and a call an abort cut off or one found unanswered
+in a seeded transcript, which the loop marks as such on `PendingCall`,
+is not the reviewer's to approve, since its tool may have run; it is
+refused with text that says so, outside the denial bound, and the
+model decides whether to ask for it again. The note is the reviewer's,
+or the user's through the front: the engine sets none on its own
+decisions, since a rule has nothing to tell the model beyond its
+reason. `Decide` never calls a model; the reviewer the front passes in
+may.
 
 ### Presets
 
@@ -300,13 +352,14 @@ in the package so two products do not diverge. Each sets `Default` to
 
 ```go
 // Subject is what a guard looks at.
-type Input struct{ Items openresponses.Items }      // the request's input before a model call
+type Input struct{ Items openresponses.Items }        // the request's input before a model call
+type Message struct{ Message *openresponses.Message } // an assistant message before the transcript keeps it
 type Output struct{ Response *openresponses.Response } // a finished turn
 
 type Verdict struct {
     Action agentturn.ToolAction // Allow passes; Block stops; Defer is not valid for content
     Reason string
-    Items  openresponses.Items  // for Input, a rewrite; nil keeps the input
+    Items  openresponses.Items  // for Input or Message, a rewrite; nil keeps the subject
 }
 
 type Guard interface {
@@ -323,21 +376,32 @@ type Chain struct {
 }
 
 func (c Chain) BeforeModelCall() func(context.Context, *openresponses.Request) error
+func (c Chain) OutputGuard() func(context.Context, agentturn.OutputInfo) (*openresponses.Message, error)
 func (c Chain) ShouldStopAfterTurn() func(context.Context, agentturn.TurnInfo) (bool, error)
 
 func BeforeModelCall(guards ...Guard) func(context.Context, *openresponses.Request) error
+func OutputGuard(guards ...Guard) func(context.Context, agentturn.OutputInfo) (*openresponses.Message, error)
 func ShouldStopAfterTurn(guards ...Guard) func(context.Context, agentturn.TurnInfo) (bool, error)
 ```
 
 An input guard may block, which fails the model call with the reason,
 or rewrite, which replaces the request's input for that call; the loop
 already documents that a changed input affects session verification
-like a `Transform` does. An output guard can only stop the run, since
-the assistant's items are already in the transcript; a product that
-wants to re-prompt appends a message and continues. Deterministic
-guards ship here: a byte size limit, a regex deny list, a secret
-pattern scanner that blocks, and one that redacts. Every verdict goes
-to the same observer.
+like a `Transform` does. A guard on a message sees each assistant
+message as the stream completes it, before the transcript, the record
+or the front's `item_end` keeps it, so it may rewrite the message or
+withhold it behind a placeholder; the deltas have already been
+delivered, so a front that must not show withheld text renders on
+`item_end`. A guard on a finished turn can only stop the run, since
+the turn's items are already in the transcript; a product that wants
+to re-prompt appends a message and continues. It stops the run as a
+guard stop: the hook returns a `BlockedError` wrapping
+`agentturn.ErrGuard`, so the run ends `ReasonStopped` with `StopGuard`
+and the error on `RunEnd.Err`, and a policy stop is told from a
+failure; the same error from `BeforeModelCall` fails the call.
+Deterministic guards ship here: a byte size limit, a regex deny list,
+a secret pattern scanner that blocks, and one that redacts, the input
+and a message alike. Every verdict goes to the same observer.
 
 ### `classify`
 
@@ -359,11 +423,11 @@ this package's. The reviewer takes a timeout and reports it as
    settings files carries its sources, with a path and a hash each,
    and `Build`'s result reports them, so the session can name the
    policy version in force.
-3. Recording through entries the session format already has: a
-   verdict on a call as the `decision` entry on that call, a guard's
-   verdict and a grant as `custom` entries under `agentpolicy`, each
-   written by the product from the observer. Nothing is added to the
-   RFC.
+3. Recording through entries the session format already has: the
+   hook's decision as the call's `decision` entry, written by the
+   loop's recorder, and the observer's verdict as a `custom` entry
+   under `agentpolicy`, written by the product. Nothing is added to
+   the RFC.
 
 ## Invariants
 
@@ -371,6 +435,9 @@ this package's. The reviewer takes a timeout and reports it as
   on which source a rule came from.
 - One call, several subjects: deny if any, ask if any, allow only if
   all.
+- One batch, one answer: an ask holds every call of its batch the
+  policy allows, a blocked call is never held, and a held call runs
+  only once the ask is answered and never after a stop.
 - A rule with a spec and no matcher never builds, and is never
   granted.
 - A policy whose default is unset never builds.
@@ -380,19 +447,22 @@ this package's. The reviewer takes a timeout and reports it as
 - The policy in force is a value: `Engine.Policy` holds every grant,
   and an engine rebuilt from it decides the same.
 - `Decide` never calls a model or opens a socket.
-- Every decision, every grant, every guard verdict and every
-  reviewer answer reaches the observer exactly once.
-- The same `Policy` and the same call give the same `Verdict`.
+- Every decision, every hold and release, every grant, every guard
+  verdict and every reviewer answer reaches the observer exactly once.
+- The same `Policy` and the same call in the same batch give the same
+  `Verdict`.
 
 ## Testing
 
 Table-driven: the grammar, precedence, matchers, subject folding,
 carve-outs by source, the merge, presets over a fixed tool set, grants
-and grants over an ask rule, and every verdict through the observer. A
-run under `agentturn` with the `echo` adapter proves Defer ends the
-run with the pending call and `Approve` resumes it, and that `Answers`
-resumes it without a human. `classify` is tested against the echo
-adapter with a canned answer.
+and grants over an ask rule, the hold and its release, and every
+verdict through the observer. A run under `agentturn` with the `echo`
+adapter proves Defer ends the run with the pending call and `Approve`
+resumes it, and that `Answers` resumes it without a human; one with a
+model that emits a batch proves an ask holds it, `Release` runs it in
+the model's order and `Refuse` ends the turn with nothing run.
+`classify` is tested against the echo adapter with a canned answer.
 
 ## Milestones
 
@@ -407,6 +477,9 @@ adapter with a canned answer.
 5. `classify`: the guard and the reviewer.
 6. The Codex and Claude Code study: presets and rule files wired into
    dex with an approval prompt in the TUI.
+7. The loop's seams from that study, agentturn v0.0.6: the batch hold
+   and `Release`, `Refuse` at the denial bound, `By` on decisions and
+   `Note` on answers, `ErrGuard` and `OutputGuard`.
 
 ## Open questions
 
