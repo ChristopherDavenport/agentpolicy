@@ -5,7 +5,7 @@ All user-visible changes to this library. The format follows
 uses [Semantic Versioning](https://semver.org/); before v1.0.0 minor
 versions may break the API.
 
-## Unreleased
+## v0.0.2 - 2026-09-20
 
 - Depends on `agentturn` v0.0.6 and, through it, `agenttool` v0.0.5.
   v0.0.1 does not build against agentturn v0.0.6, which made
