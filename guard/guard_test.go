@@ -332,15 +332,20 @@ func TestDeny(t *testing.T) {
 
 func TestSecretsAndRedact(t *testing.T) {
 	ctx := context.Background()
+	// Each sample is a shape, not a key: the prefix a pattern looks for
+	// followed by counted filler. Every prefix is its own literal, which
+	// the compiler folds back together, so a credential scanner reading
+	// this file does not take a fixture for a live key as GitHub's did
+	// for the Google one. Keep new samples split the same way.
 	samples := map[string]string{
-		"aws_access_key": "AKIAIOSFODNN7EXAMPLE",
-		"github_token":   "ghp_abcdefghijklmnopqrstuvwxyz0123456789",
-		"github_pat":     "github_pat_11ABCDEFG0123456789abcdefghij",
-		"slack_token":    "xoxb-1234567890-abcdefghij",
-		"google_api_key": "AIzaSyA1234567890abcdefghijklmnopqrstuv",
-		"openai_key":     "sk-proj-abcdefghijklmnopqrstuvwxyz0123",
+		"aws_access_key": "AKIA" + "IOSFODNN7EXAMPLE",
+		"github_token":   "ghp_" + "abcdefghijklmnopqrstuvwxyz0123456789",
+		"github_pat":     "github_pat_" + "11ABCDEFG0123456789abcdefghij",
+		"slack_token":    "xoxb-" + "1234567890-abcdefghij",
+		"google_api_key": "AIza" + "SyA1234567890abcdefghijklmnopqrstuv",
+		"openai_key":     "sk-proj-" + "abcdefghijklmnopqrstuvwxyz0123",
 		"private_key":    "-----BEGIN RSA PRIVATE KEY-----\nMIIE...\n-----END RSA PRIVATE KEY-----",
-		"jwt":            "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c",
+		"jwt":            "eyJ" + "hbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c",
 	}
 	secrets, redact := Secrets(), Redact()
 	for name, sample := range samples {
