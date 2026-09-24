@@ -5,6 +5,164 @@ All user-visible changes to this library. The format follows
 uses [Semantic Versioning](https://semver.org/); before v1.0.0 minor
 versions may break the API.
 
+## Unreleased
+
+- **Breaking**: one engine serves every agent of a product. The calls
+  the engine defers are remembered under their own run rather than in
+  one map cleared whenever a decision names another run, so a
+  sub-agent's first decision no longer erases what the main agent is
+  waiting on. `Engine.Deferred` takes the run as well as the call,
+  `Engine.Forget(runID)` drops what a run that ended another way left
+  behind, and `Engine.Runs` reports the runs still holding deferred
+  calls. `Release` and `Answers` take the run from the `RunEnd` they
+  are given and forget each call as they answer it, so an engine
+  shared by several agents does not grow with the runs they finish;
+  a front that shows why a call waited reads the verdict from the
+  observer rather than from `Deferred` after the answer. (#1)
+- **Breaking**: `Engine.Release` returns an error as well as the
+  answers. A call the run left pending that neither the caller
+  answered nor the engine held is `ErrUnanswered`, whose text names
+  every such call, `agentpolicy: pending call has no answer: call_a
+  (bash)`, where before it was dropped and `Resume` failed with the
+  loop's own error and nothing said which call was missed.
+  `Engine.Answers` completes with `Release` and returns its error,
+  joined with `ErrDenialBound` when both hold. (#1)
+- A rule's tool name may be a glob, `mcp__*`, and the deny and ask
+  lists honour it, where before `Build` accepted such a rule and
+  `Engine.match` compared tool names with `==`, so a managed
+  `deny: ["mcp__*"]` was listed by every front and fired on nothing.
+  A `*` matches any run of characters at any position and nothing
+  folds case. **Breaking**: `Build` now refuses a glob in the allow
+  list and a glob with a specifier with the new `ErrToolGlob`, since
+  neither can be honoured: `agentpolicy: tool-name glob: mcp__* is not
+  honoured in the allow list`. `Rule.MatchesTool` and `Rule.Glob` are
+  the engine's own tool-name test, exported so a product does not
+  write a second one that disagrees. (#3)
+- A deny rule with no specifier removes the tool from the request
+  rather than refusing its calls one at a time, which is the most
+  common deny form in the reference: `Engine.Filter` returns the tools
+  a list still offers, `Engine.ToolProvider` is the hook value for
+  `agentturn.Config.ToolProvider` over a base provider, consulted once
+  per turn so a late tool and a changed policy are both picked up, and
+  `Engine.Removes` reports the rule that withheld a tool. This is the
+  `Offer` the round 1 study asked for. (#3)
+- `ErrNoMatcher` names a near miss: a rule whose tool differs from a
+  registered matcher only in case, as a rule copied out of the
+  reference's documentation does, now reads `agentpolicy: no matcher
+  for the rule's tool: Bash(git status:*); did you mean bash?`. (#4)
+- `WithAliases` names the tools a rule name governs, so the rules a
+  product does not write itself reach its tools: a skill's
+  `allowed-tools` and a settings file spelled with the reference's
+  `Bash`, `Read` and `Edit` now build against tools named `bash`,
+  `read` and `edit`, and one rule name may govern several tools, as
+  the reference's `Read` reaches its search tools. `Build` expands a
+  rule whose name has an entry into one rule per tool, keeping the
+  specifier and the source, and `Engine.Policy` reports the rules as
+  they are evaluated; `Grant` and `GrantOver` expand one the same way.
+  A name with no entry is still a tool's own name and still fails
+  closed. An alias table that names no tool, or that names one with a
+  glob, does not build. (#4)
+- `Merge` keeps an untrusted source's allow rules on the new
+  `Policy.Withheld` rather than dropping them, and `Engine.Withheld`
+  reports them, so a front asking whether to trust a folder or a skill
+  can show the user what trusting it would allow rather than only that
+  something was withheld. Nothing evaluates the list: `Decide` walks
+  the allow, deny and ask lists as before. (#5)
+- `Engine.GrantSet` activates a rule set under its source, which is
+  what a skill's `allowed-tools` needs and neither `Merge` nor
+  `GrantOver` could give: there is no prompt behind a skill's rules,
+  so there is no verdict to grant over, and an appended allow rule
+  loses to any ask rule naming the tool, so a commit skill written by
+  the very team whose settings ask before every `Bash` granted
+  nothing. While a set is active its allow rules shadow the ask rules
+  they cover, from other sources, of equal or lower rank; its deny and
+  ask rules apply at once, trusted or not; and a grant still never
+  beats a deny. Every rule is stamped with the set's source, so the
+  verdict names where the permission came from. A rule the set cannot
+  activate is returned as a `Refusal` with the same stable text
+  `GrantOver` reports, so a front can show what a skill asked for and
+  did not get. (#2, #9)
+- `Engine.Revoke(source)` removes the rules a source granted, for the
+  grant that lasts one turn, and `Engine.Grants` reports the sets in
+  force. A set is keyed by its source name, so a product activates a
+  skill when the skill tool returns it rather than merging every
+  skill's rules into the policy before the run, and `Merge` no longer
+  has to be given two sources with one name. `Engine.Policy` holds
+  what a product persists and not the scoped grants; an engine rebuilt
+  from it decides as this one does once they are revoked. (#2, #9)
+- `Engine.Withheld` also reports the allow rules of a grant set from a
+  source the user has not trusted. (#9)
+- `Verdict.Subject` carries the text of the subject whose verdict the
+  fold kept, which `Subject.Text` was written for and nothing read: a
+  prompt about `npm run build && ./scripts/deploy.sh --prod` can now
+  say that the deploy script is what raised the question, rather than
+  naming the rule and leaving the user to guess which half of the
+  command line they are approving. The reason strings are unchanged.
+  (#6)
+- **Breaking**: `GrantOver` stamps the carve-out it writes with the
+  grant's source rather than the ask rule's, and a carve-out now
+  cancels a rule of any source it does not rank below rather than only
+  its own source's. A developer choosing "always allow" therefore
+  writes `bash(!git push:*)` into their own settings instead of into
+  the file the team shares and commits. The security property is
+  unchanged, since rank is the test: a repository's
+  `read(!.env.example)` still cannot open a `read(.env:*)` an
+  administrator denied. A carve-out from a source that outranks a rule
+  now cancels it, where before it did not. (#7)
+- `Engine.PolicyOf(source)` returns one source's rules as a `RuleSet`,
+  which is what a product writes back into that source's settings
+  file. The README said to persist `Engine.Policy`, which holds every
+  merged file's rules; doing so copied the managed and project files
+  into the local one. (#7)
+- `guard`: `Input` carries the request's instructions beside its
+  items, and a `Verdict` may replace them. The instructions are where
+  most of what enters an agent's window is, an AGENTS.md chain read
+  out of a checkout, a skill catalogue, a memory block the model
+  itself wrote, and no guard could see any of it: the same injection
+  was blocked in a user message and passed in a repository's
+  AGENTS.md, and `Limit(256)` passed a request carrying a hundred
+  kilobytes of instructions. `Limit` now counts them in an input's
+  size, so its reason reports a larger number for the same items;
+  `Deny` and `Secrets` scan them, with the reasons unchanged; `Redact`
+  rewrites them through the new `Verdict.Instructions`, which
+  `Chain.BeforeModelCall` writes back to the request; and the
+  `classify` guard sends them to the model with the items. A guard
+  that reads only the items is unaffected. (#8)
+- `Engine.SetPolicy` replaces the rules without rebuilding the
+  matchers, which are the expensive half and do not change, and
+  without replacing the config the loop holds, which
+  `agentturn.Agent.SetConfig` refuses while a run is active. A tool an
+  MCP server announces mid-session was a tool the policy had never
+  heard of, so an `Ask()` default parked every call to it for an
+  approval nobody would give. The new policy is validated and expanded
+  as `Build` does, and the deferred calls, the scoped grants and the
+  review log are untouched. A policy that cannot be re-derived covers
+  the tools it has not seen with a bare name or a tool-name glob in
+  the deny or ask list. (#10)
+- The hold decides a batch once rather than once per call of it: the
+  engine kept a per-pair pass, so the product's splitter ran ninety
+  extra times on a batch of ten. The count of asking calls is cached
+  for the batch and dropped whenever the rules change, so a grant made
+  mid-batch is never read from a stale count.
+- `Merge`'s duplicate-source error says what to do: `give each source
+  its own name, "skill:<name>" for one skill of several`. A product
+  with several skills more often wants `Engine.GrantSet`, which keys
+  rules by source and takes them back at the turn boundary.
+- The presets say what they are: approximations of Codex's three
+  approval modes, not the modes themselves, since the reference pairs
+  every mode with a sandbox policy and a network policy and this
+  module decides without confining.
+- `Verdict.By` names who decided, in the session format's words, with
+  the new `ByPolicy`, `ByAgent` and `ByHuman` constants: the engine's
+  own decisions are the policy's, a reviewer's answer is the
+  reviewer's through the new `Review.By`, which the `classify`
+  reviewer sets to `agent`, and the fail-closed answers the engine
+  makes when a review times out or fails are the policy's. It is what
+  an answer will carry once `agentturn.Answer` names a decider; until
+  then the README says plainly that an approval on resume names
+  nobody, where it used to claim the recorder writes `proceed` with
+  `by` naming the policy.
+
 ## v0.0.2 - 2026-09-20
 
 - Depends on `agentturn` v0.0.6 and, through it, `agenttool` v0.0.5.

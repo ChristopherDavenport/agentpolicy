@@ -31,6 +31,29 @@ matcher per tool that takes specifiers; `PrefixMatcher` covers the
 common case, `<prefix>:*` or an exact value over one string argument.
 A rule with a specifier for a tool without a matcher does not build.
 
+A rule's tool name may be a glob, `mcp__*`, which the deny and ask
+lists honour: a `*` stands for any run of characters, and nothing
+folds case. A glob in the allow list does not build, since a glob
+names no matcher and the reference refuses one too.
+
+Rules a product did not write are spelled with the reference's tool
+names, `Bash`, `Read`, `Edit`, and one of those names may govern
+several of a product's tools. An alias table says which:
+
+```go
+agentpolicy.WithAliases(map[string][]string{
+	"Bash": {"bash"},
+	"Read": {"read", "grep", "glob"},
+	"Edit": {"edit", "write"},
+})
+```
+
+`Build` expands a rule whose name has an entry into one rule per tool,
+so a skill's `allowed-tools` line and a settings file copied out of
+the reference's documentation build against a product's own tools, and
+`Engine.Policy` reports the rules as they are evaluated. A name with
+no entry is a tool's own name and still fails closed.
+
 ## A policy
 
 ```go
@@ -54,6 +77,25 @@ an ask defers it, the run ends with the call pending, and the front
 answers through `Agent.Resume`. The default must be set: a deny list
 on its own never allows everything else by accident.
 
+A deny with no specifier denies every call of its tool, so the tool is
+not offered at all: the model never sees it and plans nothing around
+it, as in the reference. `Engine.Filter` drops those tools from a
+list, `Engine.ToolProvider` is the hook value over a list that
+changes, and `Engine.Removes` names the rule for a front that shows
+what a policy withheld.
+
+```go
+cfg.ToolProvider = eng.ToolProvider(mcp.Tools)
+```
+
+A tool list that changes needs a policy that can change with it.
+`Engine.SetPolicy` replaces the rules without rebuilding the matchers
+and without replacing the config the loop holds, which `SetConfig`
+refuses while a run is active, so a tool an MCP server announces
+mid-session is not parked by an `Ask()` default for an approval nobody
+will give. A policy that cannot be re-derived covers the tools it has
+not seen with a bare name or a tool-name glob in the deny or ask list.
+
 An ask holds its batch. When the model asks for `git add -A`,
 `git commit -m wip` and `git push --force` in one turn and the policy
 asks about the push, the two calls it allows are deferred too, with
@@ -62,7 +104,7 @@ The front asks about the calls `Engine.Deferred` reports as not held,
 and `Release` answers the rest from the user's answer:
 
 ```go
-answers := eng.Release(ctx, end, agentturn.Approve(callID).WithNote("last time"))
+answers, err := eng.Release(ctx, end, agentturn.Approve(callID).WithNote("last time"))
 end, err = agent.Resume(ctx, answers...)
 ```
 
@@ -70,7 +112,15 @@ The held calls run with the approved one, in the model's order. An
 answer built with `agentturn.Refuse` ends the turn instead, and the
 held calls are answered with text that says so; a plain refusal lets
 them run, since the policy allowed them and the model sees the one
-refusal.
+refusal. A pending call neither the front nor the engine answers is
+`ErrUnanswered`, which names it, rather than a `Resume` that fails
+with nothing to say.
+
+One engine serves every agent: what it defers is remembered under the
+call's own run, so a sub-agent deciding a call while the user reads a
+question costs the main agent nothing. `Release` and `Answers` forget
+a call as they answer it, and `Engine.Forget(runID)` drops what an
+abandoned run left behind.
 
 When a tool's `Subjects` splits a call, a shell command into its
 subcommands say, every subject is decided and the verdicts fold: the
@@ -78,7 +128,10 @@ call is denied if any subject is, asked about if any is, and allowed
 only when every subject is. `git status && rm -rf /` is denied. A
 subject may name another tool, so a redirect target is checked against
 the file tool's rules. The splitter is the product's; there is no
-shell parser here.
+shell parser here. `Verdict.Subject` is the text of the subject the
+verdict was made on, so a prompt about
+`npm run build && ./scripts/deploy.sh --prod` says that the deploy
+script is what it is asking about.
 
 ## Where rules come from
 
@@ -95,11 +148,17 @@ policy.Default = agentpolicy.Ask()
 
 Every rule carries its `Source`. An untrusted source's allow rules are
 withheld while its deny and ask rules apply. A specifier beginning
-with `!` is a carve-out, and it reaches only rules from its own
-source, so a repository's `read(!.env.example)` cannot open a
+with `!` is a carve-out, and it reaches only rules of a source it does
+not rank below, so a repository's `read(!.env.example)` cannot open a
 `read(.env:*)` an administrator denied. `Engine.Sources` reports the
 sources, with their paths and hashes, so a session can name the policy
 in force.
+
+A withheld rule is kept rather than dropped: `Policy.Withheld` and
+`Engine.Withheld` hold the allow rules of the untrusted sources, so a
+front asking whether to trust a folder can show what trusting it would
+allow. Nothing evaluates that list; trusting a source is a merge again
+with `Trusted` set.
 
 ## Always allow
 
@@ -111,12 +170,50 @@ A grant that answers a prompt the default raised is a plain allow
 rule. A grant that answers a prompt an ask rule raised must also keep
 that rule from firing, since precedence alone would let it ask again:
 `GrantOver` writes the carve-out `bash(!git push:*)` beside the ask
-rule, under the rule's own source, or removes the rule when the grant
+rule, under the grant's own source, or removes the rule when the grant
 is bare. It may only when the grant's source ranks at or above the
 rule's, and it says when it cannot, so a front drops the "always"
-option and offers a one-time approval instead. `Engine.Policy` holds
-everything a grant changed, so a product persists it by writing what
-the policy now holds. A grant never beats a deny.
+option and offers a one-time approval instead. A carve-out cancels a
+rule of any source it does not rank below, so a repository's
+`read(!.env.example)` still cannot open a `read(.env:*)` an
+administrator denied. A grant never beats a deny.
+
+What a product persists is one source's rules:
+
+```go
+set := eng.PolicyOf("local") // the local settings file's rules, grants and all
+```
+
+not `Engine.Policy`, which holds every merged file's rules and would
+copy the managed and project files into the local one.
+
+## A skill's rules
+
+A skill's `allowed-tools` is a grant with no prompt behind it, so
+there is no verdict to grant over, and an appended allow rule loses to
+any ask rule naming the tool. `GrantSet` activates a rule set under
+its source instead:
+
+```go
+granted, refused := eng.GrantSet(ctx, agentpolicy.RuleSet{Source: skill, Allow: rules})
+defer eng.Revoke(ctx, skill.Name)
+```
+
+While the set is active, its allow rules shadow the ask rules they
+cover, from other sources, of equal or lower rank: the team that asks
+before every `Bash` gets the `git` commands of the commit skill it
+wrote, and nothing else. A rule the set cannot activate is in
+`refused` with the reason, as `GrantOver` reports one, so a front can
+show what the skill asked for and did not get: a bare deny for the
+tool, a bare ask rule from a source that outranks the set, a source
+the user has not trusted, whose allow rules go to `Engine.Withheld`.
+
+The set is keyed by its source, so a product activates a skill when
+the skill tool returns it and calls `Revoke` at the turn boundary,
+rather than merging every skill's rules into the policy before the run
+and granting the tools of skills the model never opened.
+`Engine.Grants` reports the sets in force; `Engine.Policy` holds only
+what a product persists.
 
 ## A reviewer instead of a human
 
@@ -158,8 +255,12 @@ cfg.OutputGuard = chain.OutputGuard()
 cfg.ShouldStopAfterTurn = chain.ShouldStopAfterTurn()
 ```
 
-An input guard may block, which fails the model call, or rewrite,
-which replaces the request's input for that call. An output guard sees
+An input guard sees the request's instructions beside its items, which
+is where most of what enters an agent's window is: an AGENTS.md chain
+read out of a checkout, a skill catalogue, a memory block the model
+wrote. It may block, which fails the model call, or rewrite, which
+replaces the request's input for that call, and its instructions when
+the verdict carries them. An output guard sees
 each assistant message as the stream completes it, before the
 transcript, the record or the front's `item_end` keeps it: it may
 rewrite the message or withhold it behind a placeholder, `Withheld by
@@ -177,14 +278,22 @@ model with a rubric.
 
 Every decision, hold, release, grant, guard verdict and reviewer
 answer is a `Verdict` through the observer: the run, the turn, the
-call, the action, the rule that fired and the reason. The decision the
-hook returns is what the loop's recorder writes as the session
-format's `decision` entry on the call, Block as `reject` with the
-reason, Defer as `hold`, an approval on resume as `proceed`, with `by`
-naming the policy. What that entry cannot carry, the rule that fired,
-a guard's verdict, a grant, reaches the session through the observer,
-which a product writes beside the decision as a `custom` entry under
-`agentpolicy`.
+call, the action, the rule that fired, the subject it fired on, who
+decided and the reason. The decision the hook returns is what the
+loop's recorder writes as the session format's `decision` entry on the
+call, Block as `reject` with the reason and Defer as `hold`, and the
+engine names itself there, so those entries read `by: policy`.
+
+An answer on resume names nobody: `agentturn.Answer` carries no
+decider, so the `proceed` entry a recorder writes for an approval has
+no `by` of its own. Who answered is on the verdict instead:
+`Verdict.By` is `policy` for a rule the engine evaluated, `agent` for
+a model-backed reviewer and `human` for a person, which a `Reviewer`
+says through `Review.By`. A product records it beside the decision.
+
+What the decision entry cannot carry, the rule that fired, a guard's
+verdict, a grant, reaches the session the same way, as a `custom`
+entry under `agentpolicy`.
 
 ## Development
 

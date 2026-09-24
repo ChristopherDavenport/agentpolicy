@@ -71,12 +71,21 @@ does, because it produces the loop's hook values.
 // Rule is one token of the grammar: a tool name, or a name with a
 // specifier, "Bash(git:*)". The same grammar as a skill's
 // allowed-tools, so agentskill.ToolRule maps onto it field for field
-// without either module importing the other.
+// without either module importing the other. The tool name may be a
+// glob, "mcp__*", which the deny and ask lists honour as both
+// references do; Build refuses one in the allow list and one with a
+// specifier, since a glob names no matcher. (Round 2, issue 3.)
 type Rule struct {
     Tool   string
     Spec   string // "" for a bare name
     Source Source // where the rule came from; zero for the product's own
 }
+
+// MatchesTool is the engine's own tool-name test, exported so a
+// product that filters a tool list does not write a second one that
+// can disagree with the one decisions are made with.
+func (r Rule) MatchesTool(tool string) bool
+func (r Rule) Glob() bool
 
 // Source is where a set of rules came from. Name scopes a carve-out
 // and identifies the source in the merge; Path and Hash let a session
@@ -123,6 +132,15 @@ type ToolMatcher struct {
     Subjects Subjects // nil means one subject, the call
 }
 
+// WithAliases names the tools a rule name governs, for the rules a
+// product does not write: a skill's allowed-tools and a settings file
+// copied out of the reference's documentation are spelled with the
+// reference's tool names, and one of those names may govern several
+// of a product's tools. Build expands a rule whose name has an entry
+// into one rule per tool and still fails closed on a name with
+// neither an entry nor a matcher. (Round 2, issue 4.)
+func WithAliases(aliases map[string][]string) Option
+
 // Default is what applies when no rule matches. It cannot be left
 // unset: Build refuses a Policy whose Default is the zero value, so a
 // deny list alone never allows everything by accident. (Finding 5.)
@@ -139,6 +157,10 @@ type Policy struct {
     Default Default
     // Sources lists where the rules came from, as Merge fills it.
     Sources []Source
+    // Withheld are the allow rules of the untrusted sources, which
+    // Merge keeps rather than drops so a front can show what trusting
+    // a source would allow. Nothing evaluates them. (Round 2, issue 5.)
+    Withheld []Rule
 }
 
 // RuleSet is one source's lists. Merge unions the lists of several
@@ -160,6 +182,25 @@ func (e *Engine) Decide(ctx context.Context, info agentturn.ToolCallInfo) (*agen
 func (e *Engine) BeforeToolCall() func(context.Context, agentturn.ToolCallInfo) (*agentturn.ToolDecision, error)
 func (e *Engine) Policy() Policy
 func (e *Engine) Sources() []Source
+
+// A deny rule with no specifier denies every call of its tool, so the
+// tool is not offered at all: the model never sees it, as in the
+// reference. Removes reports the rule, Filter drops the tools it
+// names and ToolProvider is the hook value over a changing list.
+// (Round 2, issue 3.)
+// SetPolicy replaces the rules without rebuilding the matchers, which
+// are the expensive half and do not change, so a product re-derives
+// its policy when its tool list changes without replacing the config
+// the loop holds. (Round 2, issue 10.)
+func (e *Engine) SetPolicy(p Policy) error
+
+// PolicyOf returns one source's rules, which is what a product
+// persists into that source's file. (Round 2, issue 7.)
+func (e *Engine) PolicyOf(source string) RuleSet
+
+func (e *Engine) Removes(tool string) (Rule, bool)
+func (e *Engine) Filter(tools []agenttool.Tool) []agenttool.Tool
+func (e *Engine) ToolProvider(base func(context.Context) []agenttool.Tool) func(context.Context) []agenttool.Tool
 ```
 
 Precedence is fixed: deny, then ask, then allow, then the default.
@@ -179,12 +220,14 @@ could not read. (Finding 1.)
 
 A specifier that begins with `!` is a carve-out: it never matches on
 its own, and a match of another rule in the same list, for the same
-tool, from the same source, is cancelled when the carve-out's pattern
-matches the subject. The pattern after the `!` is the tool's, as any
-spec is. The carve-out reaches only its own source's rules, so a
-`Read(!.env.example)` in a repository's settings cannot open a
-`Read(.env*)` an administrator denied. That is the whole reason a
-rule carries a source. (Finding 3.)
+tool, from a source it does not rank below, is cancelled when the
+carve-out's pattern matches the subject. The pattern after the `!` is
+the tool's, as any spec is. A `Read(!.env.example)` in a repository's
+settings cannot open a `Read(.env*)` an administrator denied, because
+the repository ranks below the administrator. That is the whole reason
+a rule carries a source. Rank rather than source identity is the test,
+so a grant's carve-out can be filed under the grant's own source and
+still reach the rule it answers. (Finding 3; round 2, issue 7.)
 
 ### Verdict observer
 
@@ -202,6 +245,15 @@ type Verdict struct {
     Rule   *Rule  // the rule that fired, nil for the default
     Reason string
     Held   bool   // a call held for an ask in its batch, and its release
+    // Subject is the Text of the subject whose verdict the fold kept,
+    // so a prompt says which half of a compound command it is asking
+    // about. (Round 2, issue 6.)
+    Subject string
+    // By names who decided, in the session format's words: ByPolicy,
+    // ByAgent for a model-backed reviewer, ByHuman for a person, which
+    // a Reviewer says through Review.By. It is what the answer itself
+    // will carry when agentturn's Answer names a decider. (Round 2.)
+    By string
 }
 
 func WithObserver(fn func(context.Context, Verdict)) Option
@@ -215,8 +267,11 @@ approval on `Resume` is `proceed`, which the format has a writer
 record only when it answers a hold or rewrote the arguments, since
 the call's `dispatch` is otherwise the record. `by` is what the
 decision names, and the engine names `policy`; an answer through
-`Resume` names nobody, so a product that records a reviewer as
-`agent` does so from the observer. What the entry cannot carry, the
+`Resume` names nobody, since `agentturn.Answer` carries no decider, so
+a product that records a reviewer as `agent` does so from the
+observer, where `Verdict.By` says who answered. When the loop's
+`Answer` names a decider, `Release` and `Answers` will set it from
+there and the entry will carry it. What the entry cannot carry, the
 rule that fired, a hold and its release, a guard's verdict on content,
 a grant, reaches the session through the observer, and a product
 writes it beside the decision as a `custom` entry under `agentpolicy`,
@@ -238,16 +293,22 @@ with the asked ones, and answers them once the front has answered the
 asks:
 
 ```go
-// Deferred returns the verdict that deferred the call in the run in
-// progress, asked or held, so a front tells the calls it must answer
-// from the ones Release answers.
-func (e *Engine) Deferred(callID string) (Verdict, bool)
+// Deferred returns the verdict that deferred the call in the run,
+// asked or held, so a front tells the calls it must answer from the
+// ones Release answers.
+func (e *Engine) Deferred(runID, callID string) (Verdict, bool)
 
 // Release completes the answers to a run that ended on an ask: given
 // the front's answers to the asked calls, it answers each held call and
 // returns every answer in the order of end.Pending, the model's order,
-// which is the order a sequential batch runs in.
-func (e *Engine) Release(ctx context.Context, end *agentturn.RunEnd, answers ...agentturn.Answer) []agentturn.Answer
+// which is the order a sequential batch runs in. A pending call it
+// cannot answer is ErrUnanswered, which names it.
+func (e *Engine) Release(ctx context.Context, end *agentturn.RunEnd, answers ...agentturn.Answer) ([]agentturn.Answer, error)
+
+// Forget drops what a run that ended another way left behind, and Runs
+// reports the runs still holding deferred calls.
+func (e *Engine) Forget(runID string)
+func (e *Engine) Runs() []string
 ```
 
 The policy allowed a held call, so it is approved and runs with the
@@ -257,6 +318,13 @@ one refusal. An answer built with `agentturn.Refuse` ends the turn
 instead, and then the held calls are refused with text that says so,
 since the user said stop before anything ran. A front shows the held
 calls beside the ask, since they run on any answer but a stop.
+
+One engine serves every agent of a product, because the policy is the
+product's and not a loop's. What the engine defers is therefore keyed
+by the run it was deferred in, and a decision in one run never touches
+another's; `Release` and `Answers` forget each call as they answer it,
+and `Forget` drops what an abandoned run left, so the memory is
+bounded by the calls still waiting. (Round 2, issue 1.)
 
 ### Runtime changes
 
@@ -275,18 +343,45 @@ func (e *Engine) Grant(ctx context.Context, r Rule) error
 // over a deny rule, over an ask rule from a source that outranks r's,
 // or for a rule that does not name the ask rule's tool. (Finding 2.)
 func (e *Engine) GrantOver(ctx context.Context, v Verdict, r Rule) (granted bool, reason string)
+
+// GrantSet activates a rule set under its source, as a skill's
+// allowed-tools grants the tools the skill was written to run: there
+// is no prompt behind it, so GrantOver has no verdict to answer, and
+// an appended allow rule loses to any ask rule naming the tool. Its
+// allow rules therefore shadow the ask rules they cover, from other
+// sources, of equal or lower rank, while the set is active. A rule it
+// cannot activate is reported with the reason, as GrantOver reports
+// one. Revoke removes the set at the turn boundary, and Grants
+// reports the sets in force. (Round 2, issues 2 and 9.)
+func (e *Engine) GrantSet(ctx context.Context, set RuleSet) (granted []Rule, refused []Refusal)
+func (e *Engine) Revoke(ctx context.Context, source string) int
+func (e *Engine) Grants() []RuleSet
 ```
 
 The way an ask rule is kept from firing is written into the policy,
 not held in the engine: a grant with a specifier appends the
-carve-out `<tool>(!<spec>)` beside the ask rule, under the ask rule's
+carve-out `<tool>(!<spec>)` beside the ask rule, under the grant's
 own source, and a bare grant removes the ask rule. `Engine.Policy`
 therefore holds the whole policy in force, an engine rebuilt from it
 decides the same, and a persisted grant is the product's: it writes
-what the policy now holds into its settings and rebuilds the engine
-at the next start. A grant never beats a deny rule, and a grant from
+what `Engine.PolicyOf` reports for its own source into that source's
+settings and rebuilds the engine at the next start. The carve-out is
+the grant's because the grant is, and a carve-out cancels a rule of
+any source it does not rank below, which is what lets it reach the
+rule it answers while a lower-ranked file still cannot carve out a
+higher-ranked one. (Round 2, issue 7.) A grant never beats a deny rule, and a grant from
 a lower-ranked source never touches an ask rule from a higher-ranked
 one.
+
+A scoped grant is not written into the policy, because it is not the
+product's to persist: it lasts as long as the source that carries it,
+a skill in use rather than a settings file, and a product that wrote
+it into its settings would grant the tools of a skill the model opened
+once. `Engine.Grants` reports the sets in force beside
+`Engine.Policy`, and an engine rebuilt from the policy decides as this
+one does once they are revoked. That is the one place the "policy in
+force is a value" invariant is qualified, and `Revoke` is the
+revocation the plan's open question left for a second product.
 
 ### The reviewer
 
@@ -326,9 +421,9 @@ type Reviewer interface {
 func (e *Engine) Answers(ctx context.Context, r Reviewer, end *agentturn.RunEnd) ([]agentturn.Answer, error)
 ```
 
-The engine remembers what it deferred in the run in progress, the
-hook's `ToolCallInfo` and the verdict, so the reviewer sees the tool
-and the reason the policy asked. It reviews only the calls the policy
+The engine remembers what it deferred in each run, the hook's
+`ToolCallInfo` and the verdict, so the reviewer sees the tool and the
+reason the policy asked. It reviews only the calls the policy
 asked about: a held call is released with them, as `Release` does for
 a human's answers, and a call an abort cut off or one found unanswered
 in a seeded transcript, which the loop marks as such on `PendingCall`,
@@ -344,15 +439,26 @@ may.
 
 `Suggest`, `AutoEdit` and `FullAuto` return a `Policy` over a given
 set of tool names, split into read, edit and execute by the product,
-matching Codex's three modes. They are examples of the grammar, kept
-in the package so two products do not diverge. Each sets `Default` to
-`Ask()`, so a tool the split does not name prompts.
+approximating Codex's three modes. They are approximations and say so:
+the reference pairs every mode with a sandbox policy and a network
+policy, and this module decides without confining, so a preset carries
+the approval half and the product carries the rest. They are examples
+of the grammar, kept in the package so two products do not diverge.
+Each sets `Default` to `Ask()`, so a tool the split does not name
+prompts. (Round 2, seam 15.)
 
 ### `guard`
 
 ```go
-// Subject is what a guard looks at.
-type Input struct{ Items openresponses.Items }        // the request's input before a model call
+// Subject is what a guard looks at. An Input carries the request's
+// instructions as well as its items, because that is where most of
+// what enters the window is: an AGENTS.md chain, a skill catalogue, a
+// memory block the model itself wrote, none of it typed by the person
+// running the agent. (Round 2, issue 8.)
+type Input struct {
+    Items        openresponses.Items
+    Instructions string
+}
 type Message struct{ Message *openresponses.Message } // an assistant message before the transcript keeps it
 type Output struct{ Response *openresponses.Response } // a finished turn
 
@@ -360,6 +466,9 @@ type Verdict struct {
     Action agentturn.ToolAction // Allow passes; Block stops; Defer is not valid for content
     Reason string
     Items  openresponses.Items  // for Input or Message, a rewrite; nil keeps the subject
+    // Instructions, for an Input, replaces the request's instructions,
+    // so Redact rewrites the text nobody typed as it rewrites items.
+    Instructions *string
 }
 
 type Guard interface {
@@ -385,9 +494,11 @@ func ShouldStopAfterTurn(guards ...Guard) func(context.Context, agentturn.TurnIn
 ```
 
 An input guard may block, which fails the model call with the reason,
-or rewrite, which replaces the request's input for that call; the loop
-already documents that a changed input affects session verification
-like a `Transform` does. A guard on a message sees each assistant
+or rewrite, which replaces the request's input for that call and its
+instructions when the verdict carries them; the loop already documents
+that a changed input affects session verification like a `Transform`
+does. `Limit` counts the instructions in an input's size, and `Deny`,
+`Secrets` and `Redact` read them as they read the items. A guard on a message sees each assistant
 message as the stream completes it, before the transcript, the record
 or the front's `item_end` keeps it, so it may rewrite the message or
 withhold it behind a placeholder; the deltas have already been
@@ -441,11 +552,13 @@ this package's. The reviewer takes a timeout and reports it as
 - A rule with a spec and no matcher never builds, and is never
   granted.
 - A policy whose default is unset never builds.
-- A carve-out reaches only rules from its own source.
+- A carve-out reaches only rules of a source it does not rank below.
 - A grant never beats a deny rule, and never touches an ask rule from
   a source that outranks it.
-- The policy in force is a value: `Engine.Policy` holds every grant,
-  and an engine rebuilt from it decides the same.
+- The policy in force is a value: `Engine.Policy` holds every grant a
+  prompt answered, and an engine rebuilt from it decides the same,
+  absent the scoped grants `Engine.Grants` reports, which last only as
+  long as their source.
 - `Decide` never calls a model or opens a socket.
 - Every decision, every hold and release, every grant, every guard
   verdict and every reviewer answer reaches the observer exactly once.
@@ -480,6 +593,12 @@ the model's order and `Refuse` ends the turn with nothing run.
 7. The loop's seams from that study, agentturn v0.0.6: the batch hold
    and `Release`, `Refuse` at the denial bound, `By` on decisions and
    `Note` on answers, `ErrGuard` and `OutputGuard`.
+8. The round 2 studies' ten issues: the deferred calls keyed by run
+   with `Forget`, `Release` reporting a call it cannot answer,
+   tool-name globs with `Filter` and `ToolProvider`, `WithAliases`,
+   `GrantSet` and `Revoke`, `Policy.Withheld`, `Verdict.Subject`, the
+   carve-out under the grant's source with `PolicyOf`, the
+   instructions on `guard.Input`, and `SetPolicy`.
 
 ## Open questions
 
@@ -487,18 +606,23 @@ the model's order and `Refuse` ends the turn with nothing run.
   (approve once, approve for this run). `GrantOver` covers always;
   the other two are the front's until a second product wants them
   here.
-- Whether grants need a lifetime and a revocation. A skill's
-  `allowed-tools` grants for one turn, and Claude Code's permission
-  updates carry `removeRules`. A product rebuilds the engine today;
-  `Revoke` and a scope on `Rule` wait for the second product.
-- Whether a bare-name deny should also remove the tool from the
-  request, as Claude Code does, through `Config.ToolProvider`. That
-  is an `Engine.Offer` beside `Decide`; the study says whether dex
-  needs it before dex's tool list exists.
+- Answered in round 2: grants need a lifetime and a revocation, and
+  the second product is the composed one. A scope on `Rule` is not
+  what they need, though: the scope is the rule set's source, so
+  `GrantSet` activates a set under its source and `Revoke` removes it
+  at the turn boundary. (Issues 2 and 9.)
+- Answered in round 2: a bare-name deny removes the tool from the
+  request, as Claude Code does. It is `Engine.Filter` beside `Decide`,
+  with `Engine.ToolProvider` as the hook value and `Engine.Removes`
+  for the front, and the engine's own tool-name test is exported as
+  `Rule.MatchesTool` so the two cannot disagree. (Issue 3.)
 - Whether the observer should be replaced by an app-only item the
   product appends after the batch, so verdicts sit in the transcript
   next to the call. The hook cannot append; a product could. Reopen
   when replay needs verdicts in context order rather than by call ID.
 - Whether a spec grammar beyond `prefix:*` and exact match is worth
   defining here. Claude Code's has globs; the study says whether dex
-  needs them.
+  needs them. Round 2 answered the tool-name half only: a `*` in
+  `Rule.Tool` is the module's, because the deny and ask lists must
+  honour `mcp__*` and nothing else can match a tool that has no
+  matcher. What a specifier means is still the tool's.

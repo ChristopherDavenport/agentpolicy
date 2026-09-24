@@ -1,5 +1,15 @@
 package agentpolicy
 
+// The presets are approximations of Codex's three approval modes, not
+// the modes themselves. The reference pairs each mode with a sandbox
+// policy and a network policy, and this module decides without
+// confining: it has no sandbox, no filesystem scope and no network
+// rule, so a preset carries the approval half and the product carries
+// the rest. They are kept here as worked examples of the grammar, so
+// two products do not write three slightly different versions of the
+// same three policies, and a product that needs the reference's
+// behaviour exactly writes its own rules.
+
 // Tools is a tool set split the way the presets need it: the tools
 // that read, the tools that edit, and the tools that execute. The
 // split is the product's; the presets only name the tools.
@@ -9,9 +19,10 @@ type Tools struct {
 	Execute []string
 }
 
-// Suggest is Codex's most conservative mode: reads run, everything
-// that changes the world asks, and so does a tool the split does not
-// name.
+// Suggest approximates Codex's most conservative mode: reads run,
+// everything that changes the world asks, and so does a tool the split
+// does not name. The reference also confines the run to a read-only
+// sandbox, which is the product's to arrange.
 func Suggest(t Tools) Policy {
 	return Policy{
 		Allow:   bare(t.Read),
@@ -20,8 +31,10 @@ func Suggest(t Tools) Policy {
 	}
 }
 
-// AutoEdit lets reads and edits run and asks for commands, and for a
-// tool the split does not name.
+// AutoEdit approximates Codex's middle mode: reads and edits run,
+// commands ask, and so does a tool the split does not name. The
+// reference confines the edits to the workspace, which is the
+// product's to arrange.
 func AutoEdit(t Tools) Policy {
 	return Policy{
 		Allow:   bare(t.Read, t.Edit),
@@ -30,9 +43,10 @@ func AutoEdit(t Tools) Policy {
 	}
 }
 
-// FullAuto runs every tool the split names without asking; the
-// confinement is the sandbox's. A tool the split does not name still
-// asks, so a tool added later by a plugin does not run unseen.
+// FullAuto approximates Codex's unattended mode: every tool the split
+// names runs without asking, and the confinement is the sandbox's,
+// which is the product's to arrange. A tool the split does not name
+// still asks, so a tool added later by a plugin does not run unseen.
 func FullAuto(t Tools) Policy {
 	return Policy{
 		Allow:   bare(t.Read, t.Edit, t.Execute),

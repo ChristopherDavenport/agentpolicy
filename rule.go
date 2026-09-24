@@ -21,15 +21,18 @@ type Rule struct {
 }
 
 // Source is where a set of rules came from: a settings file, a skill,
-// the session. Name identifies the source and scopes a carve-out to
-// the rules of the same source. Path and Hash let a session name the
-// policy in force. Trusted false withholds the source's allow rules in
-// [Merge], as a repository's settings wait for the user to trust the
-// folder while its deny and ask rules apply at once; a Source built by
-// hand is untrusted until it says otherwise. Rank orders sources by
-// authority, higher first: a grant may answer an ask rule only from a
-// source of equal or lower rank. Rank never affects precedence between
-// lists; deny before ask before allow holds whatever the sources.
+// the session. Name identifies the source, keys a scoped grant and
+// names the file a product persists its own rules into. Path and Hash
+// let a session name the policy in force. Trusted false withholds the
+// source's allow rules in [Merge], as a repository's settings wait for
+// the user to trust the folder while its deny and ask rules apply at
+// once; a Source built by hand is untrusted until it says otherwise.
+// Rank orders sources by authority, higher first: a grant may answer
+// an ask rule only from a source of equal or lower rank, a carve-out
+// cancels a rule only of a source it does not rank below, and a grant
+// set's allow rules shadow only the ask rules it does not rank below.
+// Rank never affects precedence between lists; deny before ask before
+// allow holds whatever the sources.
 type Source struct {
 	Name    string
 	Path    string
@@ -51,12 +54,55 @@ func (r Rule) String() string {
 // it matches every call of the tool.
 func (r Rule) Bare() bool { return r.Spec == "" }
 
+// Glob reports whether the rule's tool name is a glob over tool names
+// rather than one tool's own name, "mcp__*" for every tool of every
+// MCP server. A glob is honoured in the deny and ask lists, where both
+// references honour one, and [Build] refuses it in the allow list and
+// refuses it with a specifier, since a glob names no matcher.
+func (r Rule) Glob() bool { return strings.Contains(r.Tool, "*") }
+
+// MatchesTool reports whether the rule's tool name names the tool: the
+// same name, or a glob that matches it, where "*" stands for any run
+// of characters at any position. Nothing folds case: the reference
+// documents case sensitivity for almost nothing, so guessing here
+// would replace a loud failure with a quiet one. It is the engine's
+// own test, exported so a product that offers the model a tool list
+// does not write a second one that can disagree.
+func (r Rule) MatchesTool(tool string) bool {
+	if !r.Glob() {
+		return r.Tool == tool
+	}
+	return globMatch(r.Tool, tool)
+}
+
+// globMatch matches a pattern whose "*" stands for any run of
+// characters against a value.
+func globMatch(pattern, value string) bool {
+	parts := strings.Split(pattern, "*")
+	if len(parts) == 1 {
+		return pattern == value
+	}
+	if !strings.HasPrefix(value, parts[0]) {
+		return false
+	}
+	value = value[len(parts[0]):]
+	last := parts[len(parts)-1]
+	for _, p := range parts[1 : len(parts)-1] {
+		i := strings.Index(value, p)
+		if i < 0 {
+			return false
+		}
+		value = value[i+len(p):]
+	}
+	return len(value) >= len(last) && strings.HasSuffix(value, last)
+}
+
 // CarveOut returns the pattern of a carve-out, a specifier beginning
 // with "!", and whether the rule is one. A carve-out never matches on
 // its own; it cancels a match of another rule in the same list, for
-// the same tool, from the same source, when its pattern matches the
-// subject. The pattern is the tool's to interpret, as any specifier
-// is.
+// the same tool, from a source it does not rank below, when its
+// pattern matches the subject. The pattern is the tool's to
+// interpret, as any specifier is.
 func (r Rule) CarveOut() (pattern string, ok bool) {
 	if strings.HasPrefix(r.Spec, "!") {
 		return r.Spec[1:], true

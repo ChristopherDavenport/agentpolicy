@@ -3,6 +3,7 @@ package agentpolicy
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"reflect"
 	"strings"
 	"testing"
@@ -10,6 +11,17 @@ import (
 	"github.com/ChristopherDavenport/agentturn"
 	"github.com/ChristopherDavenport/openresponses"
 )
+
+// released is [Engine.Release] as a front that answered every asked
+// call sees it: the answers, and no error.
+func released(ctx context.Context, t *testing.T, e *Engine, end *agentturn.RunEnd, answers ...agentturn.Answer) []agentturn.Answer {
+	t.Helper()
+	out, err := e.Release(ctx, end, answers...)
+	if err != nil {
+		t.Fatalf("release: %v", err)
+	}
+	return out
+}
 
 // batch builds the hook's view of each call of a batch, one bash
 // command per call, in the model's order.
@@ -107,7 +119,7 @@ func TestDecideHoldsTheBatchForAnAsk(t *testing.T) {
 			}
 			// Deferred returns what deferred a call, asked or held, and
 			// nothing for one that was not.
-			got, ok := e.Deferred(infos[i].Call.CallID)
+			got, ok := e.Deferred("run_1", infos[i].Call.CallID)
 			if ok != (w.action == agentturn.Defer) || (ok && !reflect.DeepEqual(got, v)) {
 				t.Errorf("%s[%d]: Deferred = %+v, %v", tc.name, i, got, ok)
 			}
@@ -148,7 +160,7 @@ func TestRelease(t *testing.T) {
 	// An approval of the ask releases the held calls, which run with
 	// the batch.
 	e, j, end := setup(t)
-	got := e.Release(ctx, end, agentturn.Approve("call_c").WithNote("ok, once"))
+	got := released(ctx, t, e, end, agentturn.Approve("call_c").WithNote("ok, once"))
 	want := []agentturn.Answer{
 		agentturn.Approve("call_a"),
 		agentturn.Approve("call_b"),
@@ -170,7 +182,7 @@ func TestRelease(t *testing.T) {
 	// allowed them, and the model sees the one refusal.
 	e, j, end = setup(t)
 	refusal := agentturn.Output(openresponses.NewFunctionCallOutput("call_c", "no"))
-	if got := e.Release(ctx, end, refusal); !reflect.DeepEqual(got, []agentturn.Answer{agentturn.Approve("call_a"), agentturn.Approve("call_b"), refusal}) {
+	if got := released(ctx, t, e, end, refusal); !reflect.DeepEqual(got, []agentturn.Answer{agentturn.Approve("call_a"), agentturn.Approve("call_b"), refusal}) {
 		t.Errorf("released after a refusal = %s", dump(got))
 	}
 	if r := reasons(j); r != "call_a released: allowed by bash(git add:*)|call_b released: allowed by bash(git commit:*)" {
@@ -181,7 +193,7 @@ func TestRelease(t *testing.T) {
 	// reads, and the turn ends with nothing of the batch run.
 	e, j, end = setup(t)
 	stop := agentturn.Refuse(openresponses.NewFunctionCallOutput("call_c", "no, stop"))
-	got = e.Release(ctx, end, stop)
+	got = released(ctx, t, e, end, stop)
 	want = []agentturn.Answer{
 		agentturn.Output(openresponses.NewFunctionCallOutput("call_a", "The call was held for an approval and the turn was stopped; the call did not run.")),
 		agentturn.Output(openresponses.NewFunctionCallOutput("call_b", "The call was held for an approval and the turn was stopped; the call did not run.")),
@@ -199,26 +211,178 @@ func TestRelease(t *testing.T) {
 		}
 	}
 
-	// A held call the front answered itself keeps the front's answer;
-	// an answer for a call that is not pending is kept after the rest;
-	// a call from a run the engine has forgotten is left alone; a nil
-	// end returns the answers as they are.
+	// A held call the front answered itself keeps the front's answer,
+	// and an answer for a call that is not pending is kept after the
+	// rest.
 	e, j, end = setup(t)
 	own := agentturn.Output(openresponses.NewFunctionCallOutput("call_a", "I ran it myself"))
 	stray := agentturn.Approve("call_z")
-	if got := e.Release(ctx, end, stray, agentturn.Approve("call_c"), own); !reflect.DeepEqual(got, []agentturn.Answer{own, agentturn.Approve("call_b"), agentturn.Approve("call_c"), stray}) {
+	if got := released(ctx, t, e, end, stray, agentturn.Approve("call_c"), own); !reflect.DeepEqual(got, []agentturn.Answer{own, agentturn.Approve("call_b"), agentturn.Approve("call_c"), stray}) {
 		t.Errorf("own answer kept = %s", dump(got))
 	}
 	if len(j.all()) != 1 {
 		t.Errorf("verdicts = %+v", j.all())
 	}
-	other := call("other", "bash", `{"command":"git add x"}`)
-	other.RunID = "run_2"
-	e.Decide(ctx, other) // a new run forgets run_1
-	if got := e.Release(ctx, end, agentturn.Approve("call_c")); len(got) != 1 {
-		t.Errorf("forgotten run released %s", dump(got))
+
+	// The calls it answered are forgotten, so a second release of the
+	// same end has nothing to answer them with and says which calls.
+	got, err := e.Release(ctx, end, agentturn.Approve("call_c"))
+	if !errors.Is(err, ErrUnanswered) || err.Error() != "agentpolicy: pending call has no answer: call_a (bash), call_b (bash)" {
+		t.Errorf("second release: err = %v", err)
 	}
-	if got := e.Release(ctx, nil, agentturn.Approve("call_c")); len(got) != 1 {
-		t.Errorf("nil end = %s", dump(got))
+	if !reflect.DeepEqual(got, []agentturn.Answer{agentturn.Approve("call_c")}) {
+		t.Errorf("second release = %s", dump(got))
+	}
+
+	// A pending call the engine never deferred is named too, and a nil
+	// end returns the answers as they are.
+	e, _, end = setup(t)
+	end.Pending = append(end.Pending, agentturn.PendingCall{Call: &openresponses.FunctionCall{CallID: "call_x", Name: "read"}, Reason: agentturn.PendingDeferred})
+	if _, err := e.Release(ctx, end, agentturn.Approve("call_c")); !errors.Is(err, ErrUnanswered) || err.Error() != "agentpolicy: pending call has no answer: call_x (read)" {
+		t.Errorf("a call the engine never deferred: err = %v", err)
+	}
+	if got, err := e.Release(ctx, nil, agentturn.Approve("call_c")); err != nil || len(got) != 1 {
+		t.Errorf("nil end = %s, %v", dump(got), err)
+	}
+}
+
+// One engine serves every agent of a product: what one run defers is
+// not forgotten when another run decides. The scenario is the round 2
+// codex-permissions study's, a main agent holding a batch of three
+// while a sub-agent runs one allowed call on the same engine.
+func TestEngineServesSeveralRuns(t *testing.T) {
+	ctx := context.Background()
+	e, err := Build(Policy{
+		Allow:   rules(t, "bash(git add:*) bash(git commit:*)"),
+		Ask:     rules(t, "bash(git push:*)"),
+		Default: Ask(),
+	}, testMatchers)
+	if err != nil {
+		t.Fatal(err)
+	}
+	end := &agentturn.RunEnd{RunID: "run_main", Reason: agentturn.ReasonInputRequired}
+	for _, info := range batch("run_main", "git add -A", "git push --force", "git commit -m wip") {
+		if d, _ := e.Decide(ctx, info); d.Action != agentturn.Defer {
+			t.Fatalf("%s: %+v", info.Call.CallID, d)
+		}
+		end.Pending = append(end.Pending, agentturn.PendingCall{Call: info.Call, Reason: agentturn.PendingDeferred})
+	}
+
+	// A sub-agent decides one call on the same engine while the user is
+	// being asked.
+	sub := call("call_sub", "bash", `{"command":"git add docs"}`)
+	sub.RunID = "run_sub"
+	sub.Batch = []*openresponses.FunctionCall{sub.Call}
+	if d, _ := e.Decide(ctx, sub); d.Action != agentturn.Allow {
+		t.Fatalf("the sub-agent's call = %+v", d)
+	}
+
+	// The main agent's three calls are still the engine's, held and
+	// asked as they were.
+	for i, want := range []bool{true, false, true} {
+		id := end.Pending[i].Call.CallID
+		v, ok := e.Deferred("run_main", id)
+		if !ok || v.Held != want {
+			t.Errorf("Deferred(run_main, %s) = %+v, %v", id, v, ok)
+		}
+		if _, ok := e.Deferred("run_sub", id); ok {
+			t.Errorf("%s is known to the sub-agent's run", id)
+		}
+	}
+	answers, err := e.Release(ctx, end, agentturn.Approve(end.Pending[1].Call.CallID))
+	if err != nil || len(answers) != 3 {
+		t.Fatalf("Release built %d answers for 3 pending calls: %v", len(answers), err)
+	}
+
+	// A reviewer sees the asked call alone, not the held ones.
+	e2, err := Build(Policy{Allow: rules(t, "bash(git add:*)"), Ask: rules(t, "bash(git push:*)"), Default: Ask()}, testMatchers)
+	if err != nil {
+		t.Fatal(err)
+	}
+	end2 := &agentturn.RunEnd{RunID: "run_main", Reason: agentturn.ReasonInputRequired}
+	for _, info := range batch("run_main", "git add -A", "git push --force") {
+		e2.Decide(ctx, info)
+		end2.Pending = append(end2.Pending, agentturn.PendingCall{Call: info.Call, Reason: agentturn.PendingDeferred})
+	}
+	e2.Decide(ctx, sub)
+	var reviewed []string
+	answers, err = e2.Answers(ctx, ReviewerFunc(func(_ context.Context, info agentturn.ToolCallInfo, _ Verdict) (Review, error) {
+		reviewed = append(reviewed, info.Call.CallID)
+		return Review{Outcome: Approved}, nil
+	}), end2)
+	if err != nil || len(answers) != 2 || len(reviewed) != 1 || reviewed[0] != "call_b" {
+		t.Errorf("Answers reviewed %v and built %d answers: %v", reviewed, len(answers), err)
+	}
+
+	// Forget drops what a run that ended another way left behind: the
+	// release answered and forgot the main agent's calls, and the
+	// sub-agent's own ask is still waiting.
+	asked := call("call_sub_push", "bash", `{"command":"git push docs"}`)
+	asked.RunID = "run_sub"
+	e.Decide(ctx, asked)
+	if got := e.Runs(); len(got) != 1 || got[0] != "run_sub" {
+		t.Errorf("runs after the release = %v", got)
+	}
+	e.Forget("run_sub")
+	if got := e.Runs(); len(got) != 0 {
+		t.Errorf("runs after Forget = %v", got)
+	}
+}
+
+// The hold decides a batch once, not once per pair: the loop hands
+// the hook every call of the batch before any runs, and deciding the
+// whole batch per call ran the product's splitter ninety extra times
+// on a batch of ten.
+func TestBatchIsDecidedOnce(t *testing.T) {
+	ctx := context.Background()
+	splits := 0
+	matchers := map[string]ToolMatcher{"bash": {
+		Match: PrefixMatcher("command"),
+		Subjects: func(args json.RawMessage) ([]Subject, error) {
+			splits++
+			return shellSplit(args)
+		},
+	}}
+	e, err := Build(Policy{Allow: rules(t, "bash(git:*)"), Ask: rules(t, "bash(git push:*)"), Default: Ask()}, matchers)
+	if err != nil {
+		t.Fatal(err)
+	}
+	commands := []string{"git status", "git diff", "git log", "git add -A", "git commit -m x"}
+	infos := batch("run_1", commands...)
+	for _, info := range infos {
+		if d, _ := e.Decide(ctx, info); d.Action != agentturn.Allow {
+			t.Fatalf("%s: %+v", info.Call.CallID, d)
+		}
+	}
+	// One split for each call's own verdict, plus one pass over the
+	// batch: linear, where it was one pass per call.
+	if want := 2 * len(commands); splits > want {
+		t.Errorf("the splitter ran %d times for %d calls, want at most %d", splits, len(commands), want)
+	}
+
+	// A policy that changes is a batch decided again, so a grant
+	// mid-batch is not read from a stale count.
+	splits = 0
+	if err := e.Grant(ctx, Rule{Tool: "bash", Spec: "npm test:*"}); err != nil {
+		t.Fatal(err)
+	}
+	if d, _ := e.Decide(ctx, infos[0]); d.Action != agentturn.Allow {
+		t.Fatalf("after the grant: %+v", d)
+	}
+	if splits < 2 {
+		t.Errorf("the batch was read from a stale count: %d splits", splits)
+	}
+
+	// An ask anywhere in the batch holds the rest, cache or no cache.
+	e2, err := Build(Policy{Allow: rules(t, "bash(git:*)"), Ask: rules(t, "bash(git push:*)"), Default: Ask()}, matchers)
+	if err != nil {
+		t.Fatal(err)
+	}
+	held := batch("run_2", "git status", "git push --force", "git log")
+	for i, info := range held {
+		d, _ := e2.Decide(ctx, info)
+		if d.Action != agentturn.Defer {
+			t.Errorf("held[%d] = %+v", i, d)
+		}
 	}
 }

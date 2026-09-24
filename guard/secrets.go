@@ -35,13 +35,18 @@ var DefaultSecrets = []Pattern{
 
 // Secrets blocks a subject in which a secret appears, the input before
 // a model call or the output of a turn, with the first pattern's name
-// as the reason. With no patterns it uses [DefaultSecrets].
+// as the reason. An input's instructions are checked with its items,
+// since a key the model saved into a memory block reaches it there.
+// With no patterns it uses [DefaultSecrets].
 func Secrets(patterns ...Pattern) Guard {
 	patterns = orDefault(patterns)
 	return New("secrets", func(_ context.Context, subject any) (Verdict, error) {
 		items, ok := items(subject)
 		if !ok {
 			return allow, nil
+		}
+		if name := findText(instructions(subject), patterns); name != "" {
+			return block("secret detected: " + name), nil
 		}
 		if name := find(items, patterns); name != "" {
 			return block("secret detected: " + name), nil
@@ -50,13 +55,13 @@ func Secrets(patterns ...Pattern) Guard {
 	})
 }
 
-// Redact rewrites the input before a model call, and a message before
-// the transcript keeps it, replacing every secret with
-// "[REDACTED <name>]", so the model never reads one and the session
-// records what the model saw and said. The output of a turn cannot be
-// rewritten, since it is in the transcript already, so there Redact
-// stops the run as [Secrets] does. With no patterns it uses
-// [DefaultSecrets].
+// Redact rewrites the input before a model call, its instructions with
+// its items, and a message before the transcript keeps it, replacing
+// every secret with "[REDACTED <name>]", so the model never reads one
+// and the session records what the model saw and said. The output of a
+// turn cannot be rewritten, since it is in the transcript already, so
+// there Redact stops the run as [Secrets] does. With no patterns it
+// uses [DefaultSecrets].
 func Redact(patterns ...Pattern) Guard {
 	patterns = orDefault(patterns)
 	return New("redact", func(_ context.Context, subject any) (Verdict, error) {
@@ -65,7 +70,7 @@ func Redact(patterns ...Pattern) Guard {
 			items, _ := items(s)
 			count := 0
 			var names []string
-			out, changed := rewrite(items, func(text string) string {
+			redact := func(text string) string {
 				for _, p := range patterns {
 					text = p.Regexp.ReplaceAllStringFunc(text, func(string) string {
 						count++
@@ -76,15 +81,25 @@ func Redact(patterns ...Pattern) Guard {
 					})
 				}
 				return text
-			})
+			}
+			var instr *string
+			if was := instructions(s); was != "" {
+				if now := redact(was); now != was {
+					instr = &now
+				}
+			}
+			out, changed := rewrite(items, redact)
 			if !changed {
+				out = nil
+			}
+			if out == nil && instr == nil {
 				return allow, nil
 			}
 			word := "secrets"
 			if count == 1 {
 				word = "secret"
 			}
-			return Verdict{Action: allow.Action, Reason: fmt.Sprintf("redacted %d %s: %s", count, word, strings.Join(names, ", ")), Items: out}, nil
+			return Verdict{Action: allow.Action, Reason: fmt.Sprintf("redacted %d %s: %s", count, word, strings.Join(names, ", ")), Items: out, Instructions: instr}, nil
 		case Output:
 			items, _ := items(s)
 			if name := find(items, patterns); name != "" {
@@ -100,6 +115,19 @@ func orDefault(patterns []Pattern) []Pattern {
 		return DefaultSecrets
 	}
 	return patterns
+}
+
+// findText returns the name of the first pattern found in one string.
+func findText(text string, patterns []Pattern) string {
+	if text == "" {
+		return ""
+	}
+	for _, p := range patterns {
+		if p.Regexp.MatchString(text) {
+			return p.Name
+		}
+	}
+	return ""
 }
 
 // find returns the name of the first pattern found in the items, in

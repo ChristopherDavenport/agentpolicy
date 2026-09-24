@@ -27,6 +27,16 @@
 // say, the call is denied if any subject is, asked about if any
 // subject is, and allowed only when every subject is.
 //
+// A deny rule with no specifier, or one whose tool name is a glob,
+// takes the tool out of the request rather than refusing its calls:
+// Engine.ToolProvider is the hook value that does it. One engine
+// serves every agent of a product, since the policy is the product's
+// and not a loop's, and it remembers what it defers under the call's
+// own run. The rules change under it: Engine.SetPolicy for a tool list
+// that changed, Engine.Grant and Engine.GrantOver for an "always
+// allow", and Engine.GrantSet for a rule set that lasts as long as its
+// source, a skill's allowed-tools, which Engine.Revoke takes back.
+//
 // The engine never calls a model or opens a socket: the same policy and
 // the same call always give the same verdict. Every verdict, every
 // grant and every reviewer's answer reaches the observer exactly once,
