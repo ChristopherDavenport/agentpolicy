@@ -6,7 +6,8 @@ GOVULNCHECK ?= $(GO) run golang.org/x/vuln/cmd/govulncheck@latest
 # the root module.
 SUBMODULES =
 
-.PHONY: build deps test vet fmt tidy tidy-check lint vuln check release clean
+.PHONY: build deps test vet fmt tidy tidy-check lint vuln check \
+	release-guard release clean
 
 build:
 	$(GO) build ./...
@@ -52,7 +53,19 @@ vuln:
 check: fmt tidy-check vet deps lint vuln test
 
 MODULE := $(shell $(GO) list -m)
-NOTES := $(shell mktemp)
+
+# Every tag a release writes. SUBMODULES is empty, so this is the root
+# tag alone; it is written this way so that adding a nested module puts
+# its tag here too.
+RELEASE_TAGS = $(VERSION) $(patsubst %,%/$(VERSION),$(SUBMODULES))
+
+# Checks one tag is safe to push, before it is pushed. A pushed tag is
+# permanent — the proxy and the checksum database keep the version
+# forever — so this is the last point at which a mistake is free:
+#   make release-guard TAG=v0.1.0
+release-guard:
+	@test -n "$(TAG)" || { echo "usage: make release-guard TAG=<tag>"; exit 1; }
+	@scripts/release-guard.sh "$(TAG)"
 
 # Cut a release. Every module in the repository shares one version and
 # one commit: each nested module's requirement on the root, and on any
@@ -60,9 +73,16 @@ NOTES := $(shell mktemp)
 # building from the tree; the changelog's Unreleased section is dated;
 # everything is checked; one commit is made; the root is tagged VERSION
 # and each nested module <dir>/VERSION with the changelog section as the
-# message; and the branch and tags are pushed, the tags one at a time
-# because GitHub creates no events for a push of more than three tags.
+# message; and the branch and tags are pushed with --atomic, so they
+# land in one transaction and no window exists in which a tag is visible
+# without the commit it names. GitHub creates no events for a push of
+# more than three tags, which the check below refuses rather than let a
+# release land with the workflow silently never running.
 # TRAILER, when set, is appended to the commit message.
+#
+# The guard runs after the commit and before any tag is written, which
+# is the last moment everything is still local: if it refuses, undo with
+# git reset --hard HEAD~1. Nothing is public until the push.
 #
 # The changelog is dated through a temp file rather than sed -i, which is
 # a GNU-ism: BSD sed reads the argument after -i as a backup suffix, so
@@ -71,6 +91,12 @@ NOTES := $(shell mktemp)
 # untracked behind for the clean-tree gate to trip over next time.
 release:
 	@test -n "$(VERSION)" || { echo "usage: make release VERSION=vX.Y.Z"; exit 1; }
+	@test $(words $(RELEASE_TAGS)) -le 3 || { \
+	  echo "$(words $(RELEASE_TAGS)) tags would be pushed at once, and GitHub creates no events"; \
+	  echo "for a push of more than three tags — every tag would land and the release"; \
+	  echo "workflow would silently never run. Either push the tags one at a time and"; \
+	  echo "lose the atomic push, or create the GitHub releases from here with gh."; \
+	  exit 1; }
 	@grep -q '^## Unreleased$$' CHANGELOG.md || { echo "CHANGELOG.md has no Unreleased section"; exit 1; }
 	@test -z "$$(git status --porcelain)" || { echo "working tree is not clean"; exit 1; }
 	@for m in $(SUBMODULES); do ( \
@@ -84,12 +110,11 @@ release:
 	$(MAKE) tidy
 	$(MAKE) check
 	git add -A && git commit -q -m "Release $(VERSION)" $(if $(TRAILER),-m "$(TRAILER)")
-	@awk -v v="$(VERSION)" '/^## /{p=($$2==v)} p' CHANGELOG.md | sed '1s/.*/$(VERSION)/' > $(NOTES)
-	git tag -a $(VERSION) -F $(NOTES)
-	@for m in $(SUBMODULES); do git tag -a $$m/$(VERSION) -F $(NOTES) || exit 1; done
-	@rm -f $(NOTES)
-	git push origin HEAD
-	@for t in $(VERSION) $(patsubst %,%/$(VERSION),$(SUBMODULES)); do git push origin $$t || exit 1; done
+	@scripts/release-guard.sh "$(VERSION)"
+	@notes="$$(scripts/release-notes.sh $(VERSION))" || exit 1; \
+	 git tag -a $(VERSION) -m "$$notes"; \
+	 for m in $(SUBMODULES); do git tag -a $$m/$(VERSION) -m "$$notes" || exit 1; done
+	git push origin --atomic HEAD $(RELEASE_TAGS)
 
 clean:
 	rm -rf .cache
