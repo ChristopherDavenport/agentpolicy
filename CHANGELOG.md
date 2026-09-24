@@ -163,6 +163,10 @@ versions may break the API.
   nobody, where it used to claim the recorder writes `proceed` with
   `by` naming the policy.
 
+- Dependencies: openresponses v0.0.9 to v0.0.12, agenttool v0.0.5 to
+  v0.0.7, and agentturn v0.0.6 to v0.0.8. No API of this module changes
+  with them.
+
 ## v0.0.2 - 2026-09-20
 
 - Depends on `agentturn` v0.0.6 and, through it, `agenttool` v0.0.5.
