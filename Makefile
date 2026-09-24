@@ -63,6 +63,12 @@ NOTES := $(shell mktemp)
 # message; and the branch and tags are pushed, the tags one at a time
 # because GitHub creates no events for a push of more than three tags.
 # TRAILER, when set, is appended to the commit message.
+#
+# The changelog is dated through a temp file rather than sed -i, which is
+# a GNU-ism: BSD sed reads the argument after -i as a backup suffix, so
+# the GNU spelling fails outright on macOS, where these releases are cut.
+# The temp file is removed if sed dies, so a failed run leaves nothing
+# untracked behind for the clean-tree gate to trip over next time.
 release:
 	@test -n "$(VERSION)" || { echo "usage: make release VERSION=vX.Y.Z"; exit 1; }
 	@grep -q '^## Unreleased$$' CHANGELOG.md || { echo "CHANGELOG.md has no Unreleased section"; exit 1; }
@@ -72,7 +78,9 @@ release:
 	  for s in $(SUBMODULES); do \
 	    if grep -q "^[[:space:]]*$(MODULE)/$$s " go.mod; then $(GO) mod edit -require=$(MODULE)/$$s@$(VERSION) || exit 1; fi; \
 	  done && $(GO) mod tidy ) || exit 1; done
-	sed -i 's/^## Unreleased$$/## $(VERSION) - '"$$(date +%F)"'/' CHANGELOG.md
+	sed 's/^## Unreleased$$/## $(VERSION) - '"$$(date +%F)"'/' CHANGELOG.md > CHANGELOG.md.tmp \
+	  && mv CHANGELOG.md.tmp CHANGELOG.md \
+	  || { rm -f CHANGELOG.md.tmp; exit 1; }
 	$(MAKE) tidy
 	$(MAKE) check
 	git add -A && git commit -q -m "Release $(VERSION)" $(if $(TRAILER),-m "$(TRAILER)")
