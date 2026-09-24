@@ -48,8 +48,24 @@ With the changelog's *Unreleased* section written:
 make release VERSION=v0.1.0
 ```
 
-dates the changelog, runs `make check`, commits, tags `v0.1.0` with
-the changelog section as the message, and pushes. The release
-workflow publishes a GitHub release per tag, and the Go module proxy
-picks the version up. Before v1.0.0 the API may change between minor
-versions; the changelog records every break.
+dates the changelog, runs `make check`, commits, guards and tags
+`v0.1.0` with the changelog section as the message, and pushes the
+branch and the tag in one atomic push. The release workflow publishes a
+GitHub release per tag, and the Go module proxy picks the version up.
+Before v1.0.0 the API may change between minor versions; the changelog
+records every break.
+
+`make release-guard TAG=<tag>` is what stands between a mistake and a
+permanent one, and `make release` runs it before the tag it writes. It
+refuses a dirty tree, a tag that already exists locally or on origin,
+and a version that does not sort above the current release — the one
+mistake nothing can undo, since the proxy and the checksum database
+keep every published version forever. It runs after the release commit
+and before the tag, while everything is still local, so a refusal costs
+a `git reset --hard HEAD~1`.
+
+`SUBMODULES` in the Makefile is empty, so every tag here is a root tag.
+The sibling repositories with nested modules carry a longer
+`release-guard.sh` that also holds a `<dir>/vX.Y.Z` tag to its module's
+`go.mod`. Adding a nested module means bringing that part over and
+wiring it into `release`, which guards only the root tag today.
