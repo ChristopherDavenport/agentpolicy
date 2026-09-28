@@ -5,6 +5,11 @@ All user-visible changes to this library. The format follows
 uses [Semantic Versioning](https://semver.org/); before v1.0.0 minor
 versions may break the API.
 
+## Unreleased
+
+- Dependencies: agenttool v0.0.7 to v0.0.8 and agentturn v0.0.8 to
+  v0.0.9. No API of this module changes with them.
+
 ## v0.0.3 - 2026-09-24
 
 - **Breaking**: one engine serves every agent of a product. The calls
