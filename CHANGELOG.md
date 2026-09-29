@@ -7,6 +7,18 @@ versions may break the API.
 
 ## Unreleased
 
+- Requires `agentturn` v0.0.11, up from v0.0.10, and `agenttool`
+  v0.0.10, up from v0.0.9. `Engine.Answers` reads the pending states
+  v0.0.11 adds: a call pending as `PendingUndispatched`, which the loop
+  never handed to its tool, is refused as never run with a `not run:
+  the call never started` verdict, where a call an abort cut before its
+  turn read as one that may have run; a call pending as
+  `PendingAnswered` is refused as one that may have run, with a `not
+  reviewed: answered` verdict, and never approved, which `Resume`
+  refuses with `ErrCallAnswered`; and a deferred call held after its
+  dispatch is reviewed when its tool may run it again and refused with
+  a `not reviewed: deferred` verdict when it may not, so an approval
+  never meets `ErrAmbiguousCall`.
 - `WithHooks` folds a product's own before-tool-call hooks into the
   engine's decision before the batch hold, strictest first, as
   `agentturn.ChainBeforeToolCall` folds them. A hook that defers a call
@@ -28,9 +40,10 @@ versions may break the API.
   runs again, with a `run again: replay safe` verdict by the policy,
   where every such call was refused. The tool is the pending call's, or
   the one `WithTools` names for a call from a seeded transcript. A tool
-  that says `ReplayKeyed` is still refused, since it is safe to run
-  again only with its first run's idempotency key and agentturn does
-  not carry one into a second run yet. `WithNeverStarted` tells
+  that says `ReplayKeyed` is approved, with a `run again: replay keyed`
+  verdict, when the pending call carries its first run's idempotency
+  key, and refused as one that may have run when it does not.
+  `WithNeverStarted` tells
   `Answers` which calls the session's record shows never started, and
   those are refused with `The call was cut off before it started; it
   did not run.` and a `not run: the call never started` verdict, where

@@ -458,9 +458,9 @@ func TestAnswersCutOffCallsReadTheirTools(t *testing.T) {
 	end := &agentturn.RunEnd{RunID: "r", Reason: agentturn.ReasonAborted, Pending: []agentturn.PendingCall{
 		// The tool the run resolved the call to.
 		{Call: fc("safe", "read"), Reason: agentturn.PendingAborted, Tool: tools["read"]},
-		// A keyed tool is safe to run again only with its first key,
-		// which the loop does not carry into a second run.
-		{Call: fc("keyed", "remind"), Reason: agentturn.PendingAborted, Tool: tools["remind"]},
+		// A keyed tool is safe to run again only with its first key.
+		{Call: fc("keyed", "remind"), Reason: agentturn.PendingAborted, Tool: tools["remind"], IdempotencyKey: "r/keyed"},
+		{Call: fc("keyless", "remind"), Reason: agentturn.PendingUnknown},
 		{Call: fc("unknown", "bash"), Reason: agentturn.PendingAborted, Tool: tools["bash"]},
 		// A call from a seeded transcript names no tool; WithTools does.
 		{Call: fc("seeded", "read"), Reason: agentturn.PendingUnknown},
@@ -468,6 +468,12 @@ func TestAnswersCutOffCallsReadTheirTools(t *testing.T) {
 		// The record wins over the tool: a call that never started did
 		// not run, whatever running it again would do.
 		{Call: fc("never", "read"), Reason: agentturn.PendingUnknown},
+		// So does the loop's: a call it never handed over did not run.
+		{Call: fc("undispatched", "bash"), Reason: agentturn.PendingUndispatched, Tool: tools["bash"]},
+		// An answered call is owed its output and does not run again.
+		{Call: fc("answered", "read"), Reason: agentturn.PendingAnswered, Tool: tools["read"]},
+		// A call held after its dispatch that may not run again.
+		{Call: fc("held", "bash"), Reason: agentturn.PendingDeferred, Tool: tools["bash"], Dispatched: true},
 	}}
 	reviewer := ReviewerFunc(func(context.Context, agentturn.ToolCallInfo, Verdict) (Review, error) {
 		t.Error("a cut-off call reached the reviewer")
@@ -477,14 +483,21 @@ func TestAnswersCutOffCallsReadTheirTools(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	const cut = "The call was cut off before it finished and may have run; it was not run again."
+	const (
+		cut    = "The call was cut off before it finished and may have run; it was not run again."
+		notRun = "The call was cut off before it started; it did not run."
+	)
 	want := []agentturn.Answer{
 		agentturn.Approve("safe").WithBy(ByPolicy),
-		agentturn.Output(openresponses.NewFunctionCallOutput("keyed", cut)).WithBy(ByPolicy),
+		agentturn.Approve("keyed").WithBy(ByPolicy),
+		agentturn.Output(openresponses.NewFunctionCallOutput("keyless", cut)).WithBy(ByPolicy),
 		agentturn.Output(openresponses.NewFunctionCallOutput("unknown", cut)).WithBy(ByPolicy),
 		agentturn.Approve("seeded").WithBy(ByPolicy),
 		agentturn.Output(openresponses.NewFunctionCallOutput("unnamed", cut)).WithBy(ByPolicy),
-		agentturn.Output(openresponses.NewFunctionCallOutput("never", "The call was cut off before it started; it did not run.")).WithBy(ByPolicy),
+		agentturn.Output(openresponses.NewFunctionCallOutput("never", notRun)).WithBy(ByPolicy),
+		agentturn.Output(openresponses.NewFunctionCallOutput("undispatched", notRun)).WithBy(ByPolicy),
+		agentturn.Output(openresponses.NewFunctionCallOutput("answered", cut)).WithBy(ByPolicy),
+		agentturn.Output(openresponses.NewFunctionCallOutput("held", cut)).WithBy(ByPolicy),
 	}
 	if !reflect.DeepEqual(answers, want) {
 		t.Errorf("answers = %s\nwant %s", dump(answers), dump(want))
@@ -495,14 +508,42 @@ func TestAnswersCutOffCallsReadTheirTools(t *testing.T) {
 	}
 	wantVerdicts := []string{
 		fmt.Sprintf("safe %v run again: replay safe", agentturn.Allow),
-		fmt.Sprintf("keyed %v not reviewed: aborted", agentturn.Block),
+		fmt.Sprintf("keyed %v run again: replay keyed", agentturn.Allow),
+		fmt.Sprintf("keyless %v not reviewed: unknown", agentturn.Block),
 		fmt.Sprintf("unknown %v not reviewed: aborted", agentturn.Block),
 		fmt.Sprintf("seeded %v run again: replay safe", agentturn.Allow),
 		fmt.Sprintf("unnamed %v not reviewed: unknown", agentturn.Block),
 		fmt.Sprintf("never %v not run: the call never started", agentturn.Block),
+		fmt.Sprintf("undispatched %v not run: the call never started", agentturn.Block),
+		fmt.Sprintf("answered %v not reviewed: answered", agentturn.Block),
+		fmt.Sprintf("held %v not reviewed: deferred", agentturn.Block),
 	}
 	if !reflect.DeepEqual(got, wantVerdicts) {
 		t.Errorf("verdicts = %q\nwant %q", got, wantVerdicts)
+	}
+}
+
+// A deferred call held after its dispatch that may run again is the
+// reviewer's to approve, as any deferred call is.
+func TestAnswersReviewsDispatchedHoldThatMayRunAgain(t *testing.T) {
+	ctx := context.Background()
+	run := func(context.Context, agenttool.NoArgs) (string, error) { return "", nil }
+	read := agenttool.New("read", "A tool", run, agenttool.WithReplay(func(context.Context, json.RawMessage) agenttool.Replay { return agenttool.ReplaySafe }))
+	e, err := Build(Policy{Default: Ask()}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	end := &agentturn.RunEnd{RunID: "r", Reason: agentturn.ReasonInputRequired, Pending: []agentturn.PendingCall{
+		{Call: &openresponses.FunctionCall{CallID: "held", Name: "read", Arguments: `{}`}, Reason: agentturn.PendingDeferred, Tool: read, Dispatched: true},
+	}}
+	var reviewed []string
+	reviewer := ReviewerFunc(func(_ context.Context, info agentturn.ToolCallInfo, _ Verdict) (Review, error) {
+		reviewed = append(reviewed, info.Call.CallID)
+		return Review{Outcome: Approved}, nil
+	})
+	answers, err := e.Answers(ctx, reviewer, end)
+	if err != nil || !reflect.DeepEqual(answers, []agentturn.Answer{agentturn.Approve("held").WithBy(ByAgent)}) || strings.Join(reviewed, ",") != "held" {
+		t.Errorf("answers = %s, %v, reviewed %v", dump(answers), err, reviewed)
 	}
 }
 

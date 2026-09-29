@@ -170,15 +170,19 @@ func refusalText(reason, by string) string {
 // answers. A call an abort cut off or one found unanswered in a seeded
 // transcript, whose tool may have run, is not reviewed either, and
 // does not count toward the bound. When its tool says a second run is
-// safe, agenttool.ReplaySafe, it is approved and runs again; the tool
-// is the pending call's, or the one [WithTools] names for a call from
-// a seeded transcript. When the record says it never started, through
-// [WithNeverStarted], it is answered with a refusal that says it did
-// not run. Otherwise it is answered with a refusal that says it may
-// have run, so the model decides whether to ask for it again. A tool
-// that says agenttool.ReplayKeyed is refused as one that may have run:
-// it is safe to run again only with the idempotency key its first run
-// carried, and the loop does not yet carry that key into a second run.
+// safe, agenttool.ReplaySafe, or safe under its first run's key,
+// agenttool.ReplayKeyed, and the pending call carries that key, it is
+// approved and runs again, with that key; the tool is the pending
+// call's, or the one [WithTools] names for a call from a seeded
+// transcript. When it was never handed to its tool, pending as
+// agentturn.PendingUndispatched, or the record says it never started,
+// through [WithNeverStarted], it is answered with a refusal that says
+// it did not run. Otherwise it is answered with a refusal that says it
+// may have run, so the model decides whether to ask for it again, as
+// is a call pending as agentturn.PendingAnswered, which is owed its
+// output and cannot run again. A deferred call held after its dispatch
+// is reviewed when it may run again, and refused as one that may have
+// run when it may not.
 //
 // When the [DenialBound] is reached, every refusal among the answers
 // is built with agentturn.Refuse, so Resume appends the outputs and
@@ -204,7 +208,7 @@ func (e *Engine) Answers(ctx context.Context, r Reviewer, end *agentturn.RunEnd)
 		if call == nil {
 			continue
 		}
-		if p.Reason == agentturn.PendingAborted || p.Reason == agentturn.PendingUnknown {
+		if e.unreviewed(ctx, p) {
 			ans, v := e.cutOff(ctx, end.RunID, p)
 			answers = append(answers, ans)
 			e.observe(ctx, v)
@@ -242,27 +246,57 @@ func (e *Engine) Answers(ctx context.Context, r Reviewer, end *agentturn.RunEnd)
 	return answers, err
 }
 
+// unreviewed reports whether a pending call is answered by cutOff
+// rather than by the reviewer: one that never started or was already
+// answered, and one that may have run, unless it was held after its
+// dispatch and may run again, which is the reviewer's to approve.
+func (e *Engine) unreviewed(ctx context.Context, p agentturn.PendingCall) bool {
+	switch {
+	case p.Reason == agentturn.PendingUndispatched, p.Reason == agentturn.PendingAnswered:
+		return true
+	case p.Reason == agentturn.PendingDeferred && p.Dispatched:
+		_, again := e.replay(ctx, p)
+		return !again
+	}
+	return p.MayHaveRun()
+}
+
 // cutOff answers a call an abort cut off or a seeded transcript left
-// unanswered, without a reviewer: refused as never run when the record
-// says it never started, run again when its tool says a second run is
-// safe, and refused as one that may have run otherwise.
+// unanswered, without a reviewer: refused as never run when it was not
+// handed to its tool, run again when its tool says a second run is
+// safe, or keyed and the loop has the key of its first, and refused as
+// one that may have run otherwise, as is a call already answered.
 func (e *Engine) cutOff(ctx context.Context, runID string, p agentturn.PendingCall) (agentturn.Answer, Verdict) {
 	call := p.Call
 	v := Verdict{RunID: runID, CallID: call.CallID, Tool: call.Name, Action: agentturn.Block, By: ByPolicy}
-	if e.neverStarted != nil && e.neverStarted(ctx, runID, call.CallID) {
-		v.Reason = "not run: the call never started"
-		return agentturn.Output(openresponses.NewFunctionCallOutput(call.CallID, neverStartedText)).WithBy(ByPolicy), v
-	}
-	tool := p.Tool
-	if tool == nil {
-		tool = e.sibling(call.Name)
-	}
-	if tool != nil && agenttool.ReplayOf(ctx, tool, callArgs(call)) == agenttool.ReplaySafe {
-		v.Action, v.Reason = agentturn.Allow, "run again: replay "+agenttool.ReplaySafe.String()
-		return agentturn.Approve(call.CallID).WithBy(ByPolicy), v
+	if p.Reason != agentturn.PendingAnswered {
+		if p.Reason == agentturn.PendingUndispatched || e.neverStarted != nil && e.neverStarted(ctx, runID, call.CallID) {
+			v.Reason = "not run: the call never started"
+			return agentturn.Output(openresponses.NewFunctionCallOutput(call.CallID, neverStartedText)).WithBy(ByPolicy), v
+		}
+		if r, again := e.replay(ctx, p); again {
+			v.Action, v.Reason = agentturn.Allow, "run again: replay "+r.String()
+			return agentturn.Approve(call.CallID).WithBy(ByPolicy), v
+		}
 	}
 	v.Reason = "not reviewed: " + string(p.Reason)
 	return agentturn.Output(openresponses.NewFunctionCallOutput(call.CallID, cutOffText)).WithBy(ByPolicy), v
+}
+
+// replay returns what the call's tool says of running it again, the
+// pending call's tool or the one WithTools names, and whether
+// agentturn's Resume will run it: a safe replay, or a keyed one whose
+// first key the loop carries.
+func (e *Engine) replay(ctx context.Context, p agentturn.PendingCall) (agenttool.Replay, bool) {
+	tool := p.Tool
+	if tool == nil {
+		tool = e.sibling(p.Call.Name)
+	}
+	if tool == nil {
+		return agenttool.ReplayUnknown, false
+	}
+	r := agenttool.ReplayOf(ctx, tool, callArgs(p.Call))
+	return r, r == agenttool.ReplaySafe || r == agenttool.ReplayKeyed && p.IdempotencyKey != ""
 }
 
 // recall returns what the engine remembers of a deferred call of the
