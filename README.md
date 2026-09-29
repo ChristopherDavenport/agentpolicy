@@ -303,11 +303,14 @@ the same outcome by another route; a reviewer that sets `By:
 ByPolicy` is read to the model as `Denied by policy`. A call an abort
 cut off is not the reviewer's to approve, since its tool may have run.
 It runs again when its tool says a second run is safe,
-`agenttool.ReplaySafe`; it is refused as never run when the session
-says it never started, through `WithNeverStarted`; and otherwise it is
-refused with text that says it may have run. A tool that says
-`ReplayKeyed` is refused too until the loop carries the first run's
-idempotency key into the second. After three consecutive refusals, or ten within the
+`agenttool.ReplaySafe`, or safe under its first run's key,
+`ReplayKeyed`, and the loop carries that key; it is refused as never
+run when the loop never handed it over, `PendingUndispatched`, or the
+session says it never started, through `WithNeverStarted`; and
+otherwise it is refused with text that says it may have run, as is a
+call pending as `PendingAnswered`. A deferred call held after its
+dispatch is reviewed when it may run again and refused when it may
+not. After three consecutive refusals, or ten within the
 last fifty reviews, the refusals are built with `agentturn.Refuse`, so
 resuming with them appends the outputs and ends the run without a
 model call, and `ErrDenialBound` tells the front why.
