@@ -325,6 +325,10 @@ The answers `Release` and `Answers` build name their decider through
 `human` for a reviewer's, as `Review.By` says, and `Verdict.By` says
 the same.
 
+Every `WithObserver` adds an observer, called in the order given, so a
+kit that records verdicts and an observer of the product's own both
+see every one.
+
 What the decision entry cannot carry, the rule that fired and its
 note, a guard's verdict, a grant, what confined a call, reaches the
 session as a `custom` entry under `agentpolicy:verdict`, which

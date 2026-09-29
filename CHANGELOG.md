@@ -5,6 +5,18 @@ All user-visible changes to this library. The format follows
 uses [Semantic Versioning](https://semver.org/); before v1.0.0 minor
 versions may break the API.
 
+## Unreleased
+
+- **Breaking**: `WithObserver` adds an observer rather than replacing
+  one. The engine calls every observer it was given, in the order
+  given, with every verdict, where the last `WithObserver` won and
+  silently dropped the others. A kit that records verdicts and a
+  product that passes an observer of its own both see everything,
+  whichever option comes last. A nil observer adds nothing. A product
+  that passed two observers expecting the second to replace the first
+  passes one. The guards' `Chain.Observer` is a single field, as
+  before.
+
 ## v0.0.5 - 2026-09-28
 
 - Dependencies: agenttool v0.0.8 to v0.0.9 and agentturn v0.0.9 to

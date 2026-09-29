@@ -94,8 +94,18 @@ type Option func(*Engine)
 // produces: each decision, each grant and each reviewer answer, exactly
 // once, outside the engine's lock. A hook cannot append to the
 // transcript, so this is how a verdict reaches the session.
+//
+// Each WithObserver adds an observer rather than replacing one, and
+// the observers are called in the order they were given, each with
+// every verdict. A kit that records verdicts and a product that passes
+// an observer of its own therefore both see everything, whichever
+// option comes last. A nil fn adds nothing.
 func WithObserver(fn func(context.Context, Verdict)) Option {
-	return func(e *Engine) { e.observer = fn }
+	return func(e *Engine) {
+		if fn != nil {
+			e.observers = append(e.observers, fn)
+		}
+	}
 }
 
 // WithAliases names the tools a rule name governs, for the rules a
@@ -174,11 +184,14 @@ type Engine struct {
 	matchers map[string]ToolMatcher
 	// aliases names the tools a rule name governs. It is set at Build
 	// and never written after, so it is read without the lock.
-	aliases  map[string][]string
-	observer func(context.Context, Verdict)
-	bound    DenialBound
-	confine  func(context.Context, agenttool.Tool, json.RawMessage) (bool, string)
-	lookup   func(string) (agenttool.Tool, bool)
+	aliases map[string][]string
+	// observers are called in order with every verdict. They are set
+	// at Build and never written after, so they are read without the
+	// lock.
+	observers []func(context.Context, Verdict)
+	bound     DenialBound
+	confine   func(context.Context, agenttool.Tool, json.RawMessage) (bool, string)
+	lookup    func(string) (agenttool.Tool, bool)
 
 	mu     sync.Mutex
 	policy Policy
@@ -893,8 +906,8 @@ func (e *Engine) carvedOut(list []Rule, r Rule, args json.RawMessage) bool {
 }
 
 func (e *Engine) observe(ctx context.Context, v Verdict) {
-	if e.observer != nil {
-		e.observer(ctx, v)
+	for _, fn := range e.observers {
+		fn(ctx, v)
 	}
 }
 
