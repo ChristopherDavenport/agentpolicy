@@ -18,6 +18,16 @@ type Rule struct {
 	// Source is where the rule came from. The zero Source is a rule
 	// the product built itself.
 	Source Source
+	// Note says why the rule exists, "outbound network is proxied; use
+	// fetch", in the words of whoever wrote it. It is not part of the
+	// grammar: [ParseRules] leaves it empty, and a product's settings
+	// parser fills it from a comment or a field beside the rule. When
+	// set it follows the rule in the reason a verdict gives, which is
+	// what the model reads for a denied call and what a prompt shows
+	// for an asked one: "denied by bash(curl:*): outbound network is
+	// proxied; use fetch". Two rules that differ only in their notes
+	// are the same rule to [Engine.GrantOver].
+	Note string
 }
 
 // Source is where a set of rules came from: a settings file, a skill,
@@ -42,12 +52,28 @@ type Source struct {
 }
 
 // String returns the token as it is written: the name, or the name
-// with the specifier in parentheses. The source is not rendered.
+// with the specifier in parentheses. The source and the note are not
+// rendered.
 func (r Rule) String() string {
 	if r.Spec == "" {
 		return r.Tool
 	}
 	return r.Tool + "(" + r.Spec + ")"
+}
+
+// cite is the rule as a reason names it: the token, and the note after
+// it when there is one.
+func (r Rule) cite() string {
+	if r.Note == "" {
+		return r.String()
+	}
+	return r.String() + ": " + r.Note
+}
+
+// same reports whether two rules are one rule: the tool, the specifier
+// and the source, whatever their notes say.
+func (r Rule) same(o Rule) bool {
+	return r.Tool == o.Tool && r.Spec == o.Spec && r.Source == o.Source
 }
 
 // Bare reports whether the rule names a tool without a specifier, so

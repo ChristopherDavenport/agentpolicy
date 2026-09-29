@@ -14,11 +14,11 @@
 //
 // A guard returns the loop's own vocabulary: Allow passes the content,
 // with a rewrite when it sets Items or Instructions, of the input
-// before the call or of a message before the transcript keeps it; Block fails the model
-// call when the subject is the input, withholds a message behind a
-// placeholder when the subject is one, and stops the run as a guard
-// stop, agentturn.ErrGuard on the run's end, when the subject is a
-// finished turn, since the turn's items are already in the transcript.
+// before the call or of a message before the transcript keeps it; Block
+// stops the run as a guard stop, agentturn.ErrGuard on the run's end,
+// when the subject is the input, before the model is called, or a
+// finished turn, whose items are already in the transcript, and
+// withholds a message behind a placeholder when the subject is one.
 // Defer has no meaning for content and is an error. Every verdict
 // reaches the observer as an agentpolicy.Verdict whose Guard names the
 // guard, so a product records it beside the engine's.
@@ -108,11 +108,11 @@ func (g *funcGuard) Check(ctx context.Context, subject any) (Verdict, error) {
 }
 
 // BlockedError is the error a guard's Block becomes on the hooks that
-// return one. From BeforeModelCall the loop ends the run with
-// ReasonError after a ModelBlocked event; from ShouldStopAfterTurn it
-// ends the run with ReasonStopped and StopGuard, the error on
-// RunEnd.Err. It wraps agentturn.ErrGuard either way, so errors.Is
-// tells a guard's refusal from a failure, and errors.As finds it.
+// return one. From BeforeModelCall and from ShouldStopAfterTurn the
+// loop ends the run with ReasonStopped and StopGuard, the error on
+// RunEnd.Err, after a ModelBlocked event from the first. It wraps
+// agentturn.ErrGuard, so errors.Is tells a guard's refusal from a
+// failure, and errors.As finds it.
 type BlockedError struct {
 	Guard string
 	// Subject is "input" or "output".
@@ -141,7 +141,8 @@ type Chain struct {
 }
 
 // BeforeModelCall returns the hook value for agentturn.Config. A Block
-// fails the call with a [BlockedError]; a rewrite replaces the
+// returns a [BlockedError], which stops the run as a guard stop before
+// the model is called; a rewrite replaces the
 // request's input, and its instructions when the verdict carries
 // them, which the loop documents affects session verification as a
 // Transform does; a guard that errs or defers fails the call with its

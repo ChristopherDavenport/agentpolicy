@@ -123,4 +123,32 @@ func TestFilterRemovesDeniedTools(t *testing.T) {
 	if got := names(e.ToolProvider(nil)(ctx)); got != "" {
 		t.Errorf("a nil base = %q", got)
 	}
+
+	// A grant set's bare deny, a skill's disallowed-tools, removes the
+	// tool while the set is active, trusted or not, and a revoke gives
+	// it back; its deny with a specifier leaves the tool offered.
+	skill := Source{Name: "skill:review", Rank: 1}
+	if granted, refused := e.GrantSet(ctx, RuleSet{Source: skill, Deny: rules(t, "read(/secrets:*)")}); len(granted)+len(refused) != 0 {
+		t.Fatalf("GrantSet = %v, %v", granted, refused)
+	}
+	if got := names(provider(ctx)); got != "read edit" {
+		t.Errorf("provider under a deny with a specifier = %q", got)
+	}
+	e.GrantSet(ctx, RuleSet{Source: skill, Deny: rules(t, "edit")})
+	if got := names(provider(ctx)); got != "read" {
+		t.Errorf("provider under the skill = %q", got)
+	}
+	if r, ok := e.Removes("edit"); !ok || r.String() != "edit" || r.Source != skill {
+		t.Errorf("Removes(edit) under the skill = %+v, %v", r, ok)
+	}
+	if d, _ := e.Decide(ctx, call("call_1", "edit", `{"path":"x"}`)); d.Action != agentturn.Block || d.Reason != "denied by edit" {
+		t.Errorf("Decide(edit) under the skill = %+v", d)
+	}
+	e.Revoke(ctx, skill.Name)
+	if got := names(provider(ctx)); got != "read edit" {
+		t.Errorf("provider after the revoke = %q", got)
+	}
+	if _, ok := e.Removes("edit"); ok {
+		t.Error("Removes(edit) after the revoke")
+	}
 }

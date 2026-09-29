@@ -72,13 +72,13 @@ func TestAnswers(t *testing.T) {
 		}
 	}
 	want := []agentturn.Answer{
-		agentturn.Approve("approve").WithNote("keep it read-only"),
-		agentturn.ApproveWith("approve-args", json.RawMessage(`{"command":"git status --short"}`)),
-		agentturn.Output(openresponses.NewFunctionCallOutput("refuse", "Denied by reviewer: exfiltrates a token. Do not pursue the same outcome through a workaround, indirect execution or policy circumvention.")).WithNote("use the vault instead"),
-		agentturn.Output(openresponses.NewFunctionCallOutput("refuse-bare", "Denied by reviewer. Do not pursue the same outcome through a workaround, indirect execution or policy circumvention.")),
-		agentturn.Output(openresponses.NewFunctionCallOutput("timeout", "The reviewer did not answer in time; the call did not run.")),
-		agentturn.Output(openresponses.NewFunctionCallOutput("fail", "The reviewer could not evaluate the call; the call did not run.")),
-		agentturn.Output(openresponses.NewFunctionCallOutput("zero", "Denied by reviewer. Do not pursue the same outcome through a workaround, indirect execution or policy circumvention.")),
+		agentturn.Approve("approve").WithNote("keep it read-only").WithBy(ByAgent),
+		agentturn.ApproveWith("approve-args", json.RawMessage(`{"command":"git status --short"}`)).WithBy(ByAgent),
+		agentturn.Output(openresponses.NewFunctionCallOutput("refuse", "Denied by reviewer: exfiltrates a token. Do not pursue the same outcome through a workaround, indirect execution or policy circumvention.")).WithNote("use the vault instead").WithBy(ByAgent),
+		agentturn.Output(openresponses.NewFunctionCallOutput("refuse-bare", "Denied by reviewer. Do not pursue the same outcome through a workaround, indirect execution or policy circumvention.")).WithBy(ByAgent),
+		agentturn.Output(openresponses.NewFunctionCallOutput("timeout", "The reviewer did not answer in time; the call did not run.")).WithBy(ByPolicy),
+		agentturn.Output(openresponses.NewFunctionCallOutput("fail", "The reviewer could not evaluate the call; the call did not run.")).WithBy(ByPolicy),
+		agentturn.Output(openresponses.NewFunctionCallOutput("zero", "Denied by reviewer. Do not pursue the same outcome through a workaround, indirect execution or policy circumvention.")).WithBy(ByAgent),
 	}
 	if !reflect.DeepEqual(answers, want) {
 		t.Errorf("answers = %s\nwant %s", dump(answers), dump(want))
@@ -358,9 +358,9 @@ func TestAnswersCutOffCalls(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := []agentturn.Answer{
-		agentturn.Output(openresponses.NewFunctionCallOutput("aborted", "The call was cut off before it finished and may have run; it was not run again.")),
-		agentturn.Approve("deferred"),
-		agentturn.Output(openresponses.NewFunctionCallOutput("unknown", "The call was cut off before it finished and may have run; it was not run again.")),
+		agentturn.Output(openresponses.NewFunctionCallOutput("aborted", "The call was cut off before it finished and may have run; it was not run again.")).WithBy(ByPolicy),
+		agentturn.Approve("deferred").WithBy(ByAgent),
+		agentturn.Output(openresponses.NewFunctionCallOutput("unknown", "The call was cut off before it finished and may have run; it was not run again.")).WithBy(ByPolicy),
 	}
 	if !reflect.DeepEqual(answers, want) || reviewed != 1 {
 		t.Errorf("answers = %s (reviewed %d)\nwant %s", dump(answers), reviewed, dump(want))
@@ -408,7 +408,7 @@ func TestAnswersReleasesHeldCalls(t *testing.T) {
 	// The reviewer sees only the asked call; the held one is released
 	// with its approval.
 	answers, err := e.Answers(ctx, reviewer(Approved), hold())
-	if err != nil || !reflect.DeepEqual(answers, []agentturn.Answer{agentturn.Approve("call_a"), agentturn.Approve("call_b")}) || strings.Join(reviewedIDs, ",") != "call_b" {
+	if err != nil || !reflect.DeepEqual(answers, []agentturn.Answer{agentturn.Approve("call_a").WithBy(ByPolicy), agentturn.Approve("call_b").WithBy(ByAgent)}) || strings.Join(reviewedIDs, ",") != "call_b" {
 		t.Errorf("approved: %s, %v, reviewed %v", dump(answers), err, reviewedIDs)
 	}
 	// A refusal at the bound ends the run, so the held call is refused
@@ -416,8 +416,8 @@ func TestAnswersReleasesHeldCalls(t *testing.T) {
 	reviewedIDs = nil
 	answers, err = e.Answers(ctx, reviewer(Refused), hold())
 	want := []agentturn.Answer{
-		agentturn.Output(openresponses.NewFunctionCallOutput("call_a", "The call was held for an approval and the turn was stopped; the call did not run.")),
-		agentturn.Refuse(openresponses.NewFunctionCallOutput("call_b", "Denied by reviewer. Do not pursue the same outcome through a workaround, indirect execution or policy circumvention.")),
+		agentturn.Output(openresponses.NewFunctionCallOutput("call_a", "The call was held for an approval and the turn was stopped; the call did not run.")).WithBy(ByPolicy),
+		agentturn.Refuse(openresponses.NewFunctionCallOutput("call_b", "Denied by reviewer. Do not pursue the same outcome through a workaround, indirect execution or policy circumvention.")).WithBy(ByAgent),
 	}
 	if !errors.Is(err, ErrDenialBound) || !reflect.DeepEqual(answers, want) || strings.Join(reviewedIDs, ",") != "call_b" {
 		t.Errorf("refused: %s, %v, reviewed %v", dump(answers), err, reviewedIDs)

@@ -5,6 +5,100 @@ All user-visible changes to this library. The format follows
 uses [Semantic Versioning](https://semver.org/); before v1.0.0 minor
 versions may break the API.
 
+## Unreleased
+
+- Dependencies: agenttool v0.0.8 to v0.0.9 and agentturn v0.0.9 to
+  v0.0.10. A guard's Block from `Chain.BeforeModelCall` now stops the
+  run as a guard stop, `ReasonStopped` with `StopGuard` and the
+  `BlockedError` on `RunEnd.Err`, where it ended the run with
+  `ReasonError`, since agentturn#116 treats an `ErrGuard` from that
+  hook as it treats one from `ShouldStopAfterTurn`. A front that told
+  a blocked input from a failure by `errors.Is(err, agentturn.ErrGuard)`
+  on `Prompt`'s error reads `RunEnd.Err` instead. The guard docs and
+  the README say so.
+- **Breaking**: the engine reads confinement. A call whose tool says
+  it runs confined, through `agenttool.Confined`, is not asked about by
+  an ask rule with no specifier that names the called tool, as both
+  references skip a bare `Bash` ask for a sandboxed command: it is
+  allowed with `confined by landlock+seccomp, so bash does not ask`,
+  and `Verdict.Rule` names the ask rule it skipped. A deny rule applies
+  whatever the confinement, and so does an ask rule with a specifier,
+  which is how a policy asks about a call that leaves the sandbox; the
+  default applies as to any call, so a confined call no rule names
+  still asks under `Ask()`. A subject a splitter checks against another
+  tool's rules is not skipped for the shell's sandbox. A tool that
+  does not implement `Confined` reads as unconfined, so nothing changes
+  for it; a product whose tools do and that wants every ask to ask
+  passes `WithConfinement(nil)`. `WithConfinement(fn)` replaces the
+  reading, which is `agenttool.ConfinedBy` by default, and
+  `Verdict.Confined` names what confined a call, on every verdict, for
+  the prompt and the record. The batch hold reads the siblings'
+  confinement too, so a confined `ls` beside a `read` the policy
+  allows holds nothing: a sibling the hook has already been handed is
+  read with its own tool, and `WithTools(set.Lookup)` names the tools
+  of the ones it has not, which otherwise read as unconfined. A tool
+  that says a call is confined and names nothing gives `confined, so
+  bash does not ask`. The presets' docs say what a confined call does
+  under them. (#25, #32)
+- The batch hold keeps one reading per call of the batch, by its
+  position, under a key naming the run, the turn and every call's ID,
+  name and arguments, and a reading only moves toward asking. The
+  count it kept before was keyed by the call IDs alone, so a provider
+  that numbers its calls by position, `call_0` every turn, or another
+  run on the same engine with the same IDs, could reuse a batch with no
+  ask and run a call beside one that asked; a call whose ID was empty
+  or repeated in its batch was read as its own sibling. Each call of a
+  batch is still decided at most twice. `Release` answers a held call
+  that `end.Pending` lists twice once.
+- A grant set's bare deny takes the tool out of the offer.
+  `Engine.Removes` and `Engine.Filter`, and `ToolProvider` over them,
+  read the deny rules a decision reads, the policy's and every active
+  grant set's, where they read the policy's alone and a skill's
+  `disallowed-tools` refused the tool's calls one at a time while the
+  model was still offered it. The tool leaves the request on the turn
+  after `GrantSet` and comes back on the turn after `Revoke`. (#26, #33)
+- `Engine.Release` forgets nothing when it returns `ErrUnanswered`.
+  The answers returned with the error are a preview: no held call is
+  forgotten and no verdict reaches the observer, so a front that
+  released before every asked call was answered answers the missing
+  one and releases again, where the second release found the held
+  calls gone and failed naming them. (#30)
+- Every answer the engine builds names its decider through
+  `agentturn.Answer.By`, which the session recorder writes as the
+  decision's `by`: `Release`'s approvals and refusals of held calls and
+  `Answers`' refusals of cut-off calls, timeouts and failed reviews are
+  `ByPolicy`, and a reviewer's approval or refusal is `Review.By`,
+  `ByAgent` when unset. They were written with no decider. `Verdict.By`
+  is unchanged. The README's record section says so. (#27)
+- `VerdictNS`, `agentpolicy:verdict`, and `Verdict.Record() (ns
+  string, data []byte)`, as `agentmemory.Manifest.Record` is, so
+  agentkit and every product write a verdict under one namespace in
+  one shape: a JSON object with the action as `allow`, `block` or
+  `defer`, the rule as its token with its source's name and its note,
+  and every empty member left out. The README showed a custom entry
+  under `agentpolicy`, which no code wrote. (#31)
+- `Rule.Note` says why a rule exists. `ParseRules` leaves it empty and
+  the grammar is unchanged; a product's settings parser fills it. When
+  set it follows the rule in the reason a decision gives, which the
+  model reads for a denied call: `denied by bash(curl:*): outbound
+  network is proxied; use fetch`, and likewise `approval required by`
+  and `allowed by`. An alias keeps the note on every rule it expands
+  to, and `GrantOver` finds the ask rule behind a verdict by its tool,
+  specifier and source, so a note does not make a rule a different
+  one. (#28)
+- `GlobMatcher(field)` is the reference's pattern over one string
+  field, beside `PrefixMatcher`: a `*` anywhere stands for any run of
+  characters, `git log * main` and `* --version` match as documented,
+  the space is part of the pattern so `ls *` does not match `lsof`
+  while `ls*` does, and a trailing `:*` is a wildcard at a word
+  boundary, a space, so `ls:*` does not match `lsof`; `:*` alone
+  matches everything. Its test is the
+  reference's table, on which `PrefixMatcher` still diverges in four
+  rows; `PrefixMatcher` is unchanged and its doc says a settings file
+  copied from the reference needs `GlobMatcher`. The path matcher's
+  source-relative anchor needs the rule's source on `Matcher`'s
+  signature, which is a separate change. (#29)
+
 ## v0.0.4 - 2026-09-28
 
 - Dependencies: agenttool v0.0.7 to v0.0.8 and agentturn v0.0.8 to

@@ -162,8 +162,8 @@ func TestRelease(t *testing.T) {
 	e, j, end := setup(t)
 	got := released(ctx, t, e, end, agentturn.Approve("call_c").WithNote("ok, once"))
 	want := []agentturn.Answer{
-		agentturn.Approve("call_a"),
-		agentturn.Approve("call_b"),
+		agentturn.Approve("call_a").WithBy(ByPolicy),
+		agentturn.Approve("call_b").WithBy(ByPolicy),
 		agentturn.Approve("call_c").WithNote("ok, once"),
 	}
 	if !reflect.DeepEqual(got, want) {
@@ -182,7 +182,7 @@ func TestRelease(t *testing.T) {
 	// allowed them, and the model sees the one refusal.
 	e, j, end = setup(t)
 	refusal := agentturn.Output(openresponses.NewFunctionCallOutput("call_c", "no"))
-	if got := released(ctx, t, e, end, refusal); !reflect.DeepEqual(got, []agentturn.Answer{agentturn.Approve("call_a"), agentturn.Approve("call_b"), refusal}) {
+	if got := released(ctx, t, e, end, refusal); !reflect.DeepEqual(got, []agentturn.Answer{agentturn.Approve("call_a").WithBy(ByPolicy), agentturn.Approve("call_b").WithBy(ByPolicy), refusal}) {
 		t.Errorf("released after a refusal = %s", dump(got))
 	}
 	if r := reasons(j); r != "call_a released: allowed by bash(git add:*)|call_b released: allowed by bash(git commit:*)" {
@@ -195,8 +195,8 @@ func TestRelease(t *testing.T) {
 	stop := agentturn.Refuse(openresponses.NewFunctionCallOutput("call_c", "no, stop"))
 	got = released(ctx, t, e, end, stop)
 	want = []agentturn.Answer{
-		agentturn.Output(openresponses.NewFunctionCallOutput("call_a", "The call was held for an approval and the turn was stopped; the call did not run.")),
-		agentturn.Output(openresponses.NewFunctionCallOutput("call_b", "The call was held for an approval and the turn was stopped; the call did not run.")),
+		agentturn.Output(openresponses.NewFunctionCallOutput("call_a", "The call was held for an approval and the turn was stopped; the call did not run.")).WithBy(ByPolicy),
+		agentturn.Output(openresponses.NewFunctionCallOutput("call_b", "The call was held for an approval and the turn was stopped; the call did not run.")).WithBy(ByPolicy),
 		stop,
 	}
 	if !reflect.DeepEqual(got, want) {
@@ -217,7 +217,7 @@ func TestRelease(t *testing.T) {
 	e, j, end = setup(t)
 	own := agentturn.Output(openresponses.NewFunctionCallOutput("call_a", "I ran it myself"))
 	stray := agentturn.Approve("call_z")
-	if got := released(ctx, t, e, end, stray, agentturn.Approve("call_c"), own); !reflect.DeepEqual(got, []agentturn.Answer{own, agentturn.Approve("call_b"), agentturn.Approve("call_c"), stray}) {
+	if got := released(ctx, t, e, end, stray, agentturn.Approve("call_c"), own); !reflect.DeepEqual(got, []agentturn.Answer{own, agentturn.Approve("call_b").WithBy(ByPolicy), agentturn.Approve("call_c"), stray}) {
 		t.Errorf("own answer kept = %s", dump(got))
 	}
 	if len(j.all()) != 1 {
@@ -232,6 +232,42 @@ func TestRelease(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got, []agentturn.Answer{agentturn.Approve("call_c")}) {
 		t.Errorf("second release = %s", dump(got))
+	}
+
+	// A release missing an answer is a preview: it names the call,
+	// forgets nothing and journals nothing, so the front answers the
+	// call and releases again.
+	e, j, end = setup(t)
+	preview, err := e.Release(ctx, end)
+	if !errors.Is(err, ErrUnanswered) || err.Error() != "agentpolicy: pending call has no answer: call_c (bash)" {
+		t.Errorf("release with no answers: err = %v", err)
+	}
+	if !reflect.DeepEqual(preview, []agentturn.Answer{agentturn.Approve("call_a").WithBy(ByPolicy), agentturn.Approve("call_b").WithBy(ByPolicy)}) {
+		t.Errorf("preview = %s", dump(preview))
+	}
+	if len(j.all()) != 0 {
+		t.Errorf("a preview journalled %+v", j.all())
+	}
+	for _, id := range []string{"call_a", "call_b", "call_c"} {
+		if _, ok := e.Deferred("run_1", id); !ok {
+			t.Errorf("a preview forgot %s", id)
+		}
+	}
+	if got := released(ctx, t, e, end, agentturn.Approve("call_c")); len(got) != 3 {
+		t.Errorf("release after the preview = %s", dump(got))
+	}
+	if r := reasons(j); r != "call_a released: allowed by bash(git add:*)|call_b released: allowed by bash(git commit:*)" {
+		t.Errorf("verdicts after the preview = %q", r)
+	}
+	if runs := e.Runs(); len(runs) != 0 {
+		t.Errorf("runs after the release = %v", runs)
+	}
+
+	// A held call listed twice is answered and journalled once.
+	e, j, end = setup(t)
+	end.Pending = append(end.Pending, end.Pending[0])
+	if got := released(ctx, t, e, end, agentturn.Approve("call_c")); len(got) != 3 || len(j.all()) != 2 {
+		t.Errorf("a duplicate held call = %s, %d verdicts", dump(got), len(j.all()))
 	}
 
 	// A pending call the engine never deferred is named too, and a nil
@@ -384,5 +420,58 @@ func TestBatchIsDecidedOnce(t *testing.T) {
 		if d.Action != agentturn.Defer {
 			t.Errorf("held[%d] = %+v", i, d)
 		}
+	}
+}
+
+// The batch cache never carries a reading across batches or between
+// calls that share an ID: a provider that numbers its calls by position
+// reuses call_0 every turn, and nothing validates that IDs are unique
+// or set.
+func TestBatchCacheIsTheBatchs(t *testing.T) {
+	ctx := context.Background()
+	mk := func(runID string, turn int, ids []string, names ...string) []agentturn.ToolCallInfo {
+		calls := make([]*openresponses.FunctionCall, len(names))
+		for i, n := range names {
+			calls[i] = &openresponses.FunctionCall{CallID: ids[i], Name: n, Arguments: "{}"}
+		}
+		infos := make([]agentturn.ToolCallInfo, len(calls))
+		for i, c := range calls {
+			infos[i] = agentturn.ToolCallInfo{RunID: runID, Turn: turn, Call: c, Args: json.RawMessage("{}"), Batch: calls, Index: i}
+		}
+		return infos
+	}
+	tests := []struct {
+		name    string
+		batches [][]agentturn.ToolCallInfo
+	}{
+		{name: "positional IDs in the next turn", batches: [][]agentturn.ToolCallInfo{
+			mk("run_1", 1, []string{"call_0", "call_1"}, "bash", "read"),
+			mk("run_1", 2, []string{"call_0", "call_1"}, "read", "bash"),
+		}},
+		{name: "positional IDs in another run", batches: [][]agentturn.ToolCallInfo{
+			mk("run_1", 1, []string{"call_0", "call_1"}, "bash", "read"),
+			mk("run_2", 1, []string{"call_0", "call_1"}, "read", "bash"),
+		}},
+		{name: "empty IDs", batches: [][]agentturn.ToolCallInfo{
+			mk("run_1", 1, []string{"", ""}, "read", "bash"),
+		}},
+		{name: "duplicate IDs", batches: [][]agentturn.ToolCallInfo{
+			mk("run_1", 1, []string{"x", "x"}, "read", "bash"),
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			e, err := Build(Policy{Allow: rules(t, "read"), Ask: rules(t, "bash"), Default: Allow()}, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, infos := range tt.batches {
+				for _, info := range infos {
+					if d, _ := e.Decide(ctx, info); d.Action != agentturn.Defer {
+						t.Errorf("turn %d %s %s: %+v, want it held or asked", info.Turn, info.Call.CallID, info.Call.Name, d)
+					}
+				}
+			}
+		})
 	}
 }

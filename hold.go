@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/ChristopherDavenport/agentturn"
@@ -98,17 +99,23 @@ func (e *Engine) answered(runID, callID string) {
 // call that is not pending is returned after the rest. Every release
 // is a Verdict through the observer with Held set: Allow with the rule
 // that allowed the call, or Block when the turn was stopped.
+// Every answer the engine builds names the policy as its decider,
+// through agentturn.Answer.By; the caller's answers are returned as
+// given.
 //
 // A pending call neither the caller nor the engine answers is
 // [ErrUnanswered], returned with the answers and naming the call,
 // since Resume would otherwise fail with the loop's own error and
 // nothing would say which call was missed. It is what a front sees
-// when it answers the wrong run, or when another hook deferred a call
-// the engine never saw.
+// when it answers the wrong run, when another hook deferred a call
+// the engine never saw, or when it releases before every asked call is
+// answered. The answers returned with the error are a preview: nothing
+// is forgotten and nothing reaches the observer, so the front answers
+// the missing call and releases again with every answer.
 //
-// The calls it answers are forgotten: the run's entry is dropped as
-// its last deferred call is answered, so an engine shared by several
-// agents does not grow with the runs they finish.
+// The calls a release answers are forgotten: the run's entry is
+// dropped as its last deferred call is answered, so an engine shared
+// by several agents does not grow with the runs they finish.
 func (e *Engine) Release(ctx context.Context, end *agentturn.RunEnd, answers ...agentturn.Answer) ([]agentturn.Answer, error) {
 	if end == nil {
 		return answers, nil
@@ -121,7 +128,11 @@ func (e *Engine) Release(ctx context.Context, end *agentturn.RunEnd, answers ...
 	}
 	out := make([]agentturn.Answer, 0, len(end.Pending))
 	placed := make(map[string]bool, len(answers))
-	var missed []string
+	var (
+		missed   []string
+		answered []string
+		releases []Verdict
+	)
 	for _, p := range end.Pending {
 		if p.Call == nil {
 			continue
@@ -130,7 +141,11 @@ func (e *Engine) Release(ctx context.Context, end *agentturn.RunEnd, answers ...
 		if i, ok := given[id]; ok {
 			out = append(out, answers[i])
 			placed[id] = true
-			e.answered(end.RunID, id)
+			answered = append(answered, id)
+			continue
+		}
+		if slices.Contains(answered, id) {
+			// A call listed twice is answered once.
 			continue
 		}
 		d, ok := e.held(end.RunID, id)
@@ -138,16 +153,16 @@ func (e *Engine) Release(ctx context.Context, end *agentturn.RunEnd, answers ...
 			missed = append(missed, id+" ("+p.Call.Name+")")
 			continue
 		}
-		v := Verdict{RunID: d.info.RunID, Turn: d.info.Turn, CallID: id, Tool: p.Call.Name, Action: agentturn.Allow, Held: true, By: ByPolicy}
+		v := Verdict{RunID: d.info.RunID, Turn: d.info.Turn, CallID: id, Tool: p.Call.Name, Action: agentturn.Allow, Held: true, By: ByPolicy, Confined: d.verdict.Confined}
 		if stopped {
 			v.Action, v.Reason = agentturn.Block, "not released: the turn was stopped"
-			out = append(out, agentturn.Output(openresponses.NewFunctionCallOutput(id, heldStoppedText)))
+			out = append(out, agentturn.Output(openresponses.NewFunctionCallOutput(id, heldStoppedText)).WithBy(ByPolicy))
 		} else {
 			v.Rule, v.Reason = d.verdict.Rule, "released: "+d.allowed
-			out = append(out, agentturn.Approve(id))
+			out = append(out, agentturn.Approve(id).WithBy(ByPolicy))
 		}
-		e.answered(end.RunID, id)
-		e.observe(ctx, v)
+		answered = append(answered, id)
+		releases = append(releases, v)
 	}
 	for _, a := range answers {
 		if !placed[a.CallID] {
@@ -156,6 +171,12 @@ func (e *Engine) Release(ctx context.Context, end *agentturn.RunEnd, answers ...
 	}
 	if len(missed) > 0 {
 		return out, fmt.Errorf("%w: %s", ErrUnanswered, strings.Join(missed, ", "))
+	}
+	for _, id := range answered {
+		e.answered(end.RunID, id)
+	}
+	for _, v := range releases {
+		e.observe(ctx, v)
 	}
 	return out, nil
 }

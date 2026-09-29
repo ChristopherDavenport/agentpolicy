@@ -27,9 +27,19 @@ rules, err := agentpolicy.ParseRules("read bash(git status:*) bash(npm test:*)")
 ```
 
 What a specifier means belongs to the tool. A product registers a
-matcher per tool that takes specifiers; `PrefixMatcher` covers the
-common case, `<prefix>:*` or an exact value over one string argument.
+matcher per tool that takes specifiers. `GlobMatcher` is the
+reference's pattern over one string argument, the one a settings file
+copied from its documentation needs: a `*` anywhere stands for any run
+of characters, so `git log * main` matches `git log --oneline main`,
+and a trailing `:*` is a wildcard at a word boundary, so `ls:*`
+matches `ls -la` and not `lsof`. `PrefixMatcher` is the simpler
+`<prefix>:*` or an exact value, and reads those patterns differently.
 A rule with a specifier for a tool without a matcher does not build.
+
+A rule may say why it exists. `Rule.Note` is not part of the grammar;
+a product's settings parser fills it from a comment or a field beside
+the rule, and it follows the rule in the reason the model reads:
+`denied by bash(curl:*): outbound network is proxied; use fetch`.
 
 A rule's tool name may be a glob, `mcp__*`, which the deny and ask
 lists honour: a `*` stands for any run of characters, and nothing
@@ -133,6 +143,25 @@ verdict was made on, so a prompt about
 `npm run build && ./scripts/deploy.sh --prod` says that the deploy
 script is what it is asking about.
 
+A call its tool says runs confined is not asked about by a bare ask
+rule naming that tool, as both references skip a bare `Bash` ask for
+a sandboxed command. The engine reads `agenttool.ConfinedBy` over the
+call's tool and arguments, allows the call with `confined by
+landlock+seccomp, so bash does not ask`, and puts what confined it on
+`Verdict.Confined`. A deny rule applies whatever the sandbox, and so
+does an ask rule with a specifier, which is how a policy still asks
+about a call that leaves it: `bash(sandbox:escalated)` for a shell
+whose escape hatch is an argument. A tool that claims no sandbox asks,
+since the safe mistake is to ask. `WithConfinement` replaces the
+reading or turns it off, and `WithTools(set.Lookup)` lets the hold see
+the confinement of a call later in the batch than the one being
+decided:
+
+```go
+eng, err := agentpolicy.Build(agentpolicy.AutoEdit(split), matchers,
+	agentpolicy.WithTools(tools.Lookup))
+```
+
 ## Where rules come from
 
 Settings files merge rather than override:
@@ -215,6 +244,12 @@ and granting the tools of skills the model never opened.
 `Engine.Grants` reports the sets in force; `Engine.Policy` holds only
 what a product persists.
 
+A set's bare deny, a skill's `disallowed-tools`, takes the tool out of
+the offer as the policy's does: `Engine.Removes` and `Engine.Filter`
+read the deny rules a decision reads, so under `ToolProvider` the tool
+leaves the request on the turn after the set is activated and comes
+back on the turn after `Revoke`.
+
 ## A reviewer instead of a human
 
 ```go
@@ -258,7 +293,8 @@ cfg.ShouldStopAfterTurn = chain.ShouldStopAfterTurn()
 An input guard sees the request's instructions beside its items, which
 is where most of what enters an agent's window is: an AGENTS.md chain
 read out of a checkout, a skill catalogue, a memory block the model
-wrote. It may block, which fails the model call, or rewrite, which
+wrote. It may block, which stops the run as a guard stop before the
+model is called, or rewrite, which
 replaces the request's input for that call, and its instructions when
 the verdict carries them. An output guard sees
 each assistant message as the stream completes it, before the
@@ -284,16 +320,22 @@ loop's recorder writes as the session format's `decision` entry on the
 call, Block as `reject` with the reason and Defer as `hold`, and the
 engine names itself there, so those entries read `by: policy`.
 
-An answer on resume names nobody: `agentturn.Answer` carries no
-decider, so the `proceed` entry a recorder writes for an approval has
-no `by` of its own. Who answered is on the verdict instead:
-`Verdict.By` is `policy` for a rule the engine evaluated, `agent` for
-a model-backed reviewer and `human` for a person, which a `Reviewer`
-says through `Review.By`. A product records it beside the decision.
+The answers `Release` and `Answers` build name their decider through
+`agentturn.Answer.By`, `policy` for the engine's own and `agent` or
+`human` for a reviewer's, as `Review.By` says, and `Verdict.By` says
+the same.
 
-What the decision entry cannot carry, the rule that fired, a guard's
-verdict, a grant, reaches the session the same way, as a `custom`
-entry under `agentpolicy`.
+What the decision entry cannot carry, the rule that fired and its
+note, a guard's verdict, a grant, what confined a call, reaches the
+session as a `custom` entry under `agentpolicy:verdict`, which
+`Verdict.Record` writes:
+
+```go
+agentpolicy.WithObserver(func(ctx context.Context, v agentpolicy.Verdict) {
+	ns, data := v.Record()
+	recorder.Annotate(ctx, ns, json.RawMessage(data))
+})
+```
 
 ## Development
 

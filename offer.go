@@ -14,12 +14,20 @@ import (
 // deny rule with a specifier denies some calls and leaves the tool
 // offered.
 //
-// It is the engine's own tool-name test, so a front that lists what a
-// policy withholds and the list the model is offered cannot disagree.
+// It reads the deny rules a decision reads: the policy's, and those of
+// every rule set [Engine.GrantSet] activated, so a grant set's bare
+// deny, a skill's disallowed-tools, removes the tool as the policy's
+// does for as long as the set is active, and [Engine.Revoke] gives it
+// back. It is the engine's own tool-name test, so a front that lists
+// what a policy withholds and the list the model is offered cannot
+// disagree.
 func (e *Engine) Removes(tool string) (Rule, bool) {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	for _, r := range e.policy.Deny {
+	return removes(e.active().policy.Deny, tool)
+}
+
+// removes returns the first bare deny rule of list that names the tool.
+func removes(deny []Rule, tool string) (Rule, bool) {
+	for _, r := range deny {
 		if r.Bare() && r.MatchesTool(tool) {
 			return r, true
 		}
@@ -30,19 +38,21 @@ func (e *Engine) Removes(tool string) (Rule, bool) {
 // Filter returns the tools of the list the policy does not remove, in
 // order. It is the Offer the round 1 study asked for: a bare-name deny,
 // or a deny whose tool-name glob matches, withholds the tool from the
-// model rather than refusing its calls one at a time.
+// model rather than refusing its calls one at a time. The rules are
+// read once for the list, as [Engine.Removes] reads them.
 //
 // The filtering is not journalled. It answers what the model is
 // offered, once per turn, not what was decided about a call, and a
 // front that shows the user what a policy withheld reads
 // [Engine.Removes] for the rule.
 func (e *Engine) Filter(tools []agenttool.Tool) []agenttool.Tool {
+	deny := e.active().policy.Deny
 	out := make([]agenttool.Tool, 0, len(tools))
 	for _, t := range tools {
 		if t == nil {
 			continue
 		}
-		if _, removed := e.Removes(t.Name()); !removed {
+		if _, removed := removes(deny, t.Name()); !removed {
 			out = append(out, t)
 		}
 	}
@@ -52,9 +62,10 @@ func (e *Engine) Filter(tools []agenttool.Tool) []agenttool.Tool {
 // ToolProvider returns the hook value for agentturn.Config.
 // ToolProvider: base's tools with the ones the policy removes taken
 // out. The loop consults it once per turn, before the model call, so a
-// deny added by [Engine.SetPolicy] or a grant takes the tool away on
-// the next turn and a tool a server announces mid-session is filtered
-// as it appears.
+// deny added by [Engine.SetPolicy] or [Engine.GrantSet] takes the tool
+// away on the next turn, [Engine.Revoke] gives it back on the next
+// turn, and a tool a server announces mid-session is filtered as it
+// appears.
 //
 // base is a provider rather than a list because the list is what
 // changes; a product whose list is fixed passes one that returns it,
