@@ -169,13 +169,22 @@ func refusalText(reason, by string) string {
 // allowed it, and [Engine.Release] answers it from the asked calls'
 // answers. A call an abort cut off or one found unanswered in a seeded
 // transcript, whose tool may have run, is not reviewed either, and
-// does not count toward the bound. When its tool says a second run is
+// does not count toward the bound, unless the policy asks about
+// running it again. When its tool says a second run is
 // safe, agenttool.ReplaySafe, or safe under its first run's key,
 // agenttool.ReplayKeyed, and the pending call carries that key, it is
-// approved and runs again, with that key; the tool is the pending
-// call's, or the one [WithTools] names for a call from a seeded
-// transcript. When it was never handed to its tool, pending as
-// agentturn.PendingUndispatched, or the record says it never started,
+// decided under the policy of the moment, as [Engine.Decide] decides
+// it with its tool's confinement and the [WithHooks] fold but no hold:
+// allowed, it is approved and runs again, with that key and any
+// arguments a hook rewrote; asked about, it goes to the reviewer with
+// that verdict, and counts toward the bound as any review does; and
+// denied, it is refused with text that says it may have run and names
+// the rule. A call a seeded transcript left may never have been
+// decided, since it may have been waiting on the user when the product
+// stopped, so a replay is never approved on the tool's word alone. The
+// tool is the pending call's, or the one [WithTools] names for a call
+// from a seeded transcript. When it was never handed to its tool,
+// pending as agentturn.PendingUndispatched, or the record says it never started,
 // through [WithNeverStarted], it is answered with a refusal that says
 // it did not run. Otherwise it is answered with a refusal that says it
 // may have run, so the model decides whether to ask for it again, as
@@ -208,19 +217,31 @@ func (e *Engine) Answers(ctx context.Context, r Reviewer, end *agentturn.RunEnd)
 		if call == nil {
 			continue
 		}
+		var (
+			info agentturn.ToolCallInfo
+			v    Verdict
+			args json.RawMessage
+		)
 		if e.unreviewed(ctx, p) {
-			ans, v := e.cutOff(ctx, end.RunID, p)
-			answers = append(answers, ans)
-			e.observe(ctx, v)
-			continue
-		}
-		info, v := e.recall(end.RunID, call)
-		if v.Held {
-			continue
+			ans, cv, ask := e.cutOff(ctx, end.RunID, p)
+			if ask == nil {
+				answers = append(answers, ans)
+				e.observe(ctx, cv)
+				continue
+			}
+			info, v, args = ask.info, cv, ask.args
+		} else {
+			info, v = e.recall(end.RunID, call)
+			if v.Held {
+				continue
+			}
 		}
 		rev, err := r.Review(ctx, info, v)
 		if cerr := ctx.Err(); cerr != nil {
 			return nil, cerr
+		}
+		if err == nil && rev.Outcome == Approved && rev.Args == nil {
+			rev.Args = args
 		}
 		ans, verdict := answer(call, info, rev, err)
 		answers = append(answers, ans)
@@ -263,24 +284,67 @@ func (e *Engine) unreviewed(ctx context.Context, p agentturn.PendingCall) bool {
 
 // cutOff answers a call an abort cut off or a seeded transcript left
 // unanswered, without a reviewer: refused as never run when it was not
-// handed to its tool, run again when its tool says a second run is
-// safe, or keyed and the loop has the key of its first, and refused as
-// one that may have run otherwise, as is a call already answered.
-func (e *Engine) cutOff(ctx context.Context, runID string, p agentturn.PendingCall) (agentturn.Answer, Verdict) {
+// handed to its tool, and refused as one that may have run when its
+// tool does not say a second run is safe, or keyed with the key of its
+// first, or when it was already answered.
+//
+// A call that may run again is decided first under the policy of the
+// moment, as [Engine.Decide] decides it without the hold, since a call
+// a seeded transcript left may never have been decided at all: it runs
+// again when the policy allows it, is refused as one that may have run
+// when the policy denies it, and when the policy asks it is returned
+// as a review, for the reviewer to answer with the verdict. A hook
+// that fails reads as asking. Each answer carries the verdict's reason,
+// which the session recorder writes on its decision.
+func (e *Engine) cutOff(ctx context.Context, runID string, p agentturn.PendingCall) (agentturn.Answer, Verdict, *review) {
 	call := p.Call
 	v := Verdict{RunID: runID, CallID: call.CallID, Tool: call.Name, Action: agentturn.Block, By: ByPolicy}
+	refuse := func(text string) (agentturn.Answer, Verdict, *review) {
+		return agentturn.Output(openresponses.NewFunctionCallOutput(call.CallID, text)).WithBy(ByPolicy).WithReason(v.Reason), v, nil
+	}
 	if p.Reason != agentturn.PendingAnswered {
 		if p.Reason == agentturn.PendingUndispatched || e.neverStarted != nil && e.neverStarted(ctx, runID, call.CallID) {
 			v.Reason = "not run: the call never started"
-			return agentturn.Output(openresponses.NewFunctionCallOutput(call.CallID, neverStartedText)).WithBy(ByPolicy), v
+			return refuse(neverStartedText)
 		}
 		if r, again := e.replay(ctx, p); again {
-			v.Action, v.Reason = agentturn.Allow, "run again: replay "+r.String()
-			return agentturn.Approve(call.CallID).WithBy(ByPolicy), v
+			tool := p.Tool
+			if tool == nil {
+				tool = e.sibling(call.Name)
+			}
+			info := agentturn.ToolCallInfo{RunID: runID, Call: call, Tool: tool, Args: callArgs(call), Index: -1}
+			out, err := e.judge(ctx, e.active(), info, &v)
+			if err != nil {
+				v.Action, v.Rule, v.Subject, v.By = agentturn.Defer, nil, "", ByPolicy
+				v.Reason = call.Name + " hook failed: " + err.Error()
+			}
+			switch v.Action {
+			case agentturn.Block:
+				text := cutOffText + " " + refusalText(v.Reason, ByPolicy)
+				ans := agentturn.Output(openresponses.NewFunctionCallOutput(call.CallID, text)).WithBy(v.By).WithReason(v.Reason)
+				return ans, v, nil
+			case agentturn.Defer:
+				return agentturn.Answer{}, v, &review{info: info, args: out.Args}
+			}
+			v.Reason = "run again: replay " + r.String() + "; " + v.Reason
+			ans := agentturn.Approve(call.CallID)
+			if out.Args != nil {
+				ans = agentturn.ApproveWith(call.CallID, out.Args)
+			}
+			return ans.WithNote(out.Note).WithBy(v.By).WithReason(v.Reason), v, nil
 		}
 	}
 	v.Reason = "not reviewed: " + string(p.Reason)
-	return agentturn.Output(openresponses.NewFunctionCallOutput(call.CallID, cutOffText)).WithBy(ByPolicy), v
+	return refuse(cutOffText)
+}
+
+// review is a cut-off call the policy asks about, for the reviewer:
+// the call as the policy decided it, and the arguments a hook
+// rewrote, which an approval runs with unless the reviewer gives
+// others.
+type review struct {
+	info agentturn.ToolCallInfo
+	args json.RawMessage
 }
 
 // replay returns what the call's tool says of running it again, the

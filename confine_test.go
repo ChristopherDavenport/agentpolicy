@@ -187,3 +187,70 @@ func TestConfinedSiblingHoldsNothing(t *testing.T) {
 		})
 	}
 }
+
+// Arguments a hook rewrites are decided again, their confinement read
+// afresh, so the verdict describes the call that runs: a hook that
+// takes a call out of its sandbox is asked about, and a path a hook
+// resolves meets the deny rule for it. The stricter action stands.
+// (#47)
+func TestHookRewriteIsDecidedAgain(t *testing.T) {
+	ctx := context.Background()
+	rewrite := func(args string) func(context.Context, agentturn.ToolCallInfo) (*agentturn.ToolDecision, error) {
+		return func(context.Context, agentturn.ToolCallInfo) (*agentturn.ToolDecision, error) {
+			return &agentturn.ToolDecision{Args: json.RawMessage(args)}, nil
+		}
+	}
+	matchers := map[string]ToolMatcher{"bash": {Match: PrefixMatcher("command")}, "read": {Match: PrefixMatcher("path")}}
+	tests := []struct {
+		name     string
+		policy   Policy
+		tool     agenttool.Tool
+		callTool string
+		args     string
+		hook     string
+		action   agentturn.ToolAction
+		reason   string
+		confined string
+	}{
+		{name: "a hook that leaves the sandbox is asked about", policy: Policy{Ask: rules(t, "bash"), Default: Allow()}, tool: sandboxedBash(),
+			args: `{"command":"npm install left-pad"}`, hook: `{"command":"npm install left-pad","sandbox":"escalated"}`,
+			action: agentturn.Defer, reason: "approval required by bash"},
+		{name: "a hook that enters the sandbox is confined", policy: Policy{Ask: rules(t, "bash"), Default: Allow()}, tool: sandboxedBash(),
+			args: `{"command":"ls","sandbox":"escalated"}`, hook: `{"command":"ls"}`,
+			action: agentturn.Defer, reason: "approval required by bash", confined: "landlock+seccomp"},
+		{name: "a resolved path meets its deny rule", policy: Policy{Deny: rules(t, "read(/etc:*)"), Default: Allow()}, callTool: "read",
+			args: `{"path":"../../etc/shadow"}`, hook: `{"path":"/etc/shadow"}`,
+			action: agentturn.Block, reason: "denied by read(/etc:*)"},
+		{name: "an allowed rewrite is allowed by its own rule", policy: Policy{Allow: rules(t, "bash(git status:*) bash(git log:*)"), Default: Ask()},
+			args: `{"command":"git status"}`, hook: `{"command":"git log"}`,
+			action: agentturn.Allow, reason: "allowed by bash(git log:*)"},
+		{name: "a rewrite the policy allows does not undo an ask", policy: Policy{Ask: rules(t, "bash(git push:*)"), Default: Allow()},
+			args: `{"command":"git push"}`, hook: `{"command":"git status"}`,
+			action: agentturn.Defer, reason: "approval required by bash(git push:*)"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			j := &journal{}
+			e, err := Build(tt.policy, matchers, WithObserver(j.observe), WithHooks(rewrite(tt.hook)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			name := tt.callTool
+			if name == "" {
+				name = "bash"
+			}
+			info := call("c", name, tt.args)
+			info.Tool = tt.tool
+			d, err := e.Decide(ctx, info)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if d.Action != tt.action || d.Reason != tt.reason || string(d.Args) != tt.hook {
+				t.Errorf("decision = %v %q %s, want %v %q %s", d.Action, d.Reason, d.Args, tt.action, tt.reason, tt.hook)
+			}
+			if v := j.all()[0]; v.Confined != tt.confined || v.Reason != tt.reason {
+				t.Errorf("verdict confined %q reason %q, want %q %q", v.Confined, v.Reason, tt.confined, tt.reason)
+			}
+		})
+	}
+}

@@ -197,6 +197,12 @@ func WithTools(lookup func(name string) (agenttool.Tool, bool)) Option {
 // note stands, Terminate is set when any hook sets it, and arguments a
 // hook rewrites are passed to the hooks after it and are what the call
 // runs with, a held call's included when [Engine.Release] releases it.
+// Rewritten arguments are decided again, their confinement read from
+// them: the stricter of the two actions stands, a verdict the policy
+// still owns takes the rewrite's rule and reason, and
+// Verdict.Confined is the rewrite's, so a hook that takes a call out
+// of its sandbox is asked about and the verdict does not say it ran
+// confined.
 // The first error fails the call's decision, and the turn with it.
 //
 // The engine reads a call's siblings to decide whether to hold it, so
@@ -623,10 +629,7 @@ func (e *Engine) Decide(ctx context.Context, info agentturn.ToolCallInfo) (*agen
 
 	a := e.active()
 
-	c := e.confinement(ctx, info.Tool, info.Args)
-	v.Action, v.Rule, v.Reason, v.Subject = e.decide(a, name, c, info.Args)
-	v.Confined = c.by
-	out, err := e.foldHooks(ctx, info, &v)
+	out, err := e.judge(ctx, a, info, &v)
 	if err != nil {
 		return nil, err
 	}
@@ -644,12 +647,31 @@ func (e *Engine) Decide(ctx context.Context, info agentturn.ToolCallInfo) (*agen
 	return &out, nil
 }
 
+// judge decides info's call as Decide does before the hold: the
+// policy on its arguments, read with its tool's confinement, and then
+// the hooks folded in. v carries the call's identity in and the
+// verdict out.
+func (e *Engine) judge(ctx context.Context, a active, info agentturn.ToolCallInfo, v *Verdict) (agentturn.ToolDecision, error) {
+	name := ""
+	if info.Call != nil {
+		name = info.Call.Name
+	}
+	c := e.confinement(ctx, info.Tool, info.Args)
+	v.Action, v.Rule, v.Reason, v.Subject = e.decide(a, name, c, info.Args)
+	v.Confined = c.by
+	return e.foldHooks(ctx, a, name, info, v)
+}
+
 // foldHooks folds the hooks' decisions into v, the policy's, as
 // [WithHooks] describes, and returns what the hooks add to the
 // decision besides its action: the note, Terminate and the rewritten
-// arguments.
-func (e *Engine) foldHooks(ctx context.Context, info agentturn.ToolCallInfo, v *Verdict) (agentturn.ToolDecision, error) {
+// arguments. Arguments a hook rewrites are decided again, their
+// confinement read afresh: the stricter action stands, and a verdict
+// still the policy's takes the rewrite's rule and reason, so it
+// describes the arguments the call runs with.
+func (e *Engine) foldHooks(ctx context.Context, a active, name string, info agentturn.ToolCallInfo, v *Verdict) (agentturn.ToolDecision, error) {
 	var out agentturn.ToolDecision
+	policy := true
 	for _, fn := range e.hooks {
 		if v.Action == agentturn.Block {
 			break
@@ -666,6 +688,7 @@ func (e *Engine) foldHooks(ctx context.Context, info agentturn.ToolCallInfo, v *
 			if v.By == "" {
 				v.By = ByPolicy
 			}
+			policy = false
 		}
 		if out.Note == "" {
 			out.Note = d.Note
@@ -673,6 +696,13 @@ func (e *Engine) foldHooks(ctx context.Context, info agentturn.ToolCallInfo, v *
 		out.Terminate = out.Terminate || d.Terminate
 		if d.Args != nil {
 			out.Args, info.Args = d.Args, d.Args
+			c := e.confinement(ctx, info.Tool, d.Args)
+			act, rule, reason, subject := e.decide(a, name, c, d.Args)
+			if r, cur := restrictiveness(act), restrictiveness(v.Action); r > cur || policy && r == cur {
+				v.Action, v.Rule, v.Reason, v.Subject, v.By = act, rule, reason, subject, ByPolicy
+				policy = true
+			}
+			v.Confined = c.by
 		}
 	}
 	return out, nil
@@ -781,11 +811,9 @@ func (e *Engine) batchAsks(ctx context.Context, a active, info agentturn.ToolCal
 func (e *Engine) siblingAsks(ctx context.Context, a active, info agentturn.ToolCallInfo, i int) bool {
 	c := info.Batch[i]
 	args := callArgs(c)
-	tool := e.sibling(c.Name)
+	sib := agentturn.ToolCallInfo{RunID: info.RunID, Turn: info.Turn, Call: c, Tool: e.sibling(c.Name), Args: args, Batch: info.Batch, Index: i}
 	v := Verdict{}
-	v.Action, _, _, _ = e.decide(a, c.Name, e.confinement(ctx, tool, args), args)
-	sib := agentturn.ToolCallInfo{RunID: info.RunID, Turn: info.Turn, Call: c, Tool: tool, Args: args, Batch: info.Batch, Index: i}
-	if _, err := e.foldHooks(ctx, sib, &v); err != nil {
+	if _, err := e.judge(ctx, a, sib, &v); err != nil {
 		return true
 	}
 	return v.Action == agentturn.Defer
@@ -862,14 +890,16 @@ func (e *Engine) split(name string, args json.RawMessage) ([]Subject, error) {
 
 // fold decides every subject and keeps the most restrictive verdict,
 // the first of equals. A block of a call split into several subjects
-// names the subject it was for and says the whole call did not run, so
-// the model does not report the other half as having succeeded.
+// names the subject it was for, says nothing in the command ran and
+// names the other subjects, so the model does not report the other
+// half as having succeeded.
 func (e *Engine) fold(a active, name string, c confinement, subjects []Subject) (agentturn.ToolAction, *Rule, string, string) {
 	var (
 		action  agentturn.ToolAction
 		rule    *Rule
 		reason  string
 		subject string
+		at      int
 	)
 	for i, s := range subjects {
 		tool := s.Tool
@@ -884,13 +914,30 @@ func (e *Engine) fold(a active, name string, c confinement, subjects []Subject) 
 		}
 		act, r, why := e.decideSubject(a, tool, sc, s.Args)
 		if i == 0 || restrictiveness(act) > restrictiveness(action) {
-			action, rule, reason, subject = act, r, why, s.Text
+			action, rule, reason, subject, at = act, r, why, s.Text, i
 		}
 	}
 	if action == agentturn.Block && len(subjects) > 1 && subject != "" {
-		reason += " on " + strconv.Quote(subject) + "; the call did not run"
+		reason += " on " + strconv.Quote(subject) + "; nothing in this command ran"
+		var rest []string
+		for i, s := range subjects {
+			if i != at && s.Text != "" && s.Text != subject && !slices.Contains(rest, strconv.Quote(s.Text)) {
+				rest = append(rest, strconv.Quote(s.Text))
+			}
+		}
+		if len(rest) > 0 {
+			reason += ", including " + series(rest)
+		}
 	}
 	return action, rule, reason, subject
+}
+
+// series joins items as prose: "a", "a and b", "a, b and c".
+func series(items []string) string {
+	if len(items) < 2 {
+		return strings.Join(items, "")
+	}
+	return strings.Join(items[:len(items)-1], ", ") + " and " + items[len(items)-1]
 }
 
 func restrictiveness(a agentturn.ToolAction) int {
