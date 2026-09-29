@@ -5,11 +5,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"strconv"
 	"strings"
 	"sync"
 
+	"github.com/ChristopherDavenport/agenttool"
 	"github.com/ChristopherDavenport/agentturn"
 	"github.com/ChristopherDavenport/openresponses"
 )
@@ -48,8 +50,10 @@ type Verdict struct {
 	Guard string
 	// Action is Allow, Block or Defer.
 	Action agentturn.ToolAction
-	// Rule is the rule that fired, or the rule granted. It is nil when
-	// the default applied and for a guard's or a reviewer's verdict.
+	// Rule is the rule that fired, or the rule granted. On a call
+	// allowed because it runs confined it is the ask rule the
+	// confinement skipped. It is nil when the default applied and for a
+	// guard's or a reviewer's verdict.
 	Rule *Rule
 	// Reason is the stable text behind the action, the same text the
 	// model reads when the action blocks a call.
@@ -73,6 +77,14 @@ type Verdict struct {
 	// splitter split, since the splitter is what writes the text, and
 	// for a splitter that writes none.
 	Subject string
+	// Confined names what confines the call, as the tool's
+	// agenttool.Confined reported it, "landlock+seccomp",
+	// "container:agent-sandbox", when the tool says the call runs
+	// confined, whatever the action: a prompt shows it beside the
+	// question, and on an Allow it says why nobody was asked. It is
+	// empty for a call that is not confined and for a tool that says it
+	// is and names nothing.
+	Confined string
 }
 
 // Option configures an [Engine].
@@ -113,6 +125,46 @@ func WithAliases(aliases map[string][]string) Option {
 	return func(e *Engine) { e.aliases = aliases }
 }
 
+// WithConfinement replaces how the engine reads whether a call runs
+// confined, which is agenttool.ConfinedBy over the call's tool and
+// arguments by default. A call that runs confined is not asked about
+// by an ask rule with no specifier that names the called tool, as both
+// references skip a bare Bash ask for a sandboxed command: it is
+// allowed, with a reason naming what confined it and the rule it
+// skipped. A deny rule applies whatever the confinement, and so does
+// an ask rule with a specifier, which is how a policy still asks about
+// a call that leaves the sandbox, bash(sandbox:escalated) for a tool
+// whose escape hatch is an argument. The default applies as it does to
+// any call no rule names: a confined call to a tool no rule names
+// still asks under an Ask() default.
+//
+// A tool that does not implement agenttool.Confined reads as
+// unconfined, and so does a call whose tool the loop could not
+// resolve, since the safe mistake is to ask. The annotations are never
+// read this way: a server's hints are not the tool's own claim. nil
+// turns the reading off, so every ask rule asks.
+func WithConfinement(fn func(ctx context.Context, tool agenttool.Tool, args json.RawMessage) (bool, string)) Option {
+	return func(e *Engine) { e.confine = fn }
+}
+
+// WithTools names the tools the engine reads confinement from for the
+// other calls of a batch. The hook is handed its own call's tool, not
+// its siblings', and whether a call is held depends on whether a
+// sibling asks, which depends on whether the sibling runs confined.
+// agenttool.Set's Lookup is the usual value.
+//
+// Without it the engine knows a sibling's tool once the loop has
+// handed it that sibling's own call, which it does in the model's
+// order: a sibling decided earlier in the batch is read as it was
+// decided, and one later in the batch reads as unconfined, so a call
+// before a confined command that a bare ask rule names is held for it,
+// and [Engine.Release] with no answers releases it. The first reading
+// of a sibling is kept for the batch, so a call decided twice is
+// decided the same way.
+func WithTools(lookup func(name string) (agenttool.Tool, bool)) Option {
+	return func(e *Engine) { e.lookup = lookup }
+}
+
 // Engine is the runtime form of a [Policy]: the policy in force, the
 // matchers it is evaluated with, the grants made since it was built
 // and the calls it has deferred. It is safe for concurrent use.
@@ -123,6 +175,8 @@ type Engine struct {
 	aliases  map[string][]string
 	observer func(context.Context, Verdict)
 	bound    DenialBound
+	confine  func(context.Context, agenttool.Tool, json.RawMessage) (bool, string)
+	lookup   func(string) (agenttool.Tool, bool)
 
 	mu     sync.Mutex
 	policy Policy
@@ -182,6 +236,7 @@ func Build(p Policy, matchers map[string]ToolMatcher, opts ...Option) (*Engine, 
 	e := &Engine{
 		matchers: matchers,
 		bound:    DefaultDenialBound,
+		confine:  agenttool.ConfinedBy,
 		deferred: make(map[string]map[string]deferredCall),
 		withheld: make(map[string][]Rule),
 	}
@@ -478,6 +533,9 @@ func (e *Engine) BeforeToolCall() func(context.Context, agentturn.ToolCallInfo) 
 // answers the held calls once the asked ones are answered. A blocked
 // call is blocked whatever its batch holds.
 //
+// A call the tool says runs confined is not asked about by a bare ask
+// rule naming its tool; [WithConfinement] says how that is read.
+//
 // The decision names the policy as its decider. The verdict reaches
 // the observer before Decide returns, and the same policy and the same
 // call in the same batch always give the same verdict.
@@ -494,9 +552,11 @@ func (e *Engine) Decide(ctx context.Context, info agentturn.ToolCallInfo) (*agen
 
 	a := e.active()
 
-	v.Action, v.Rule, v.Reason, v.Subject = e.decide(a, name, info.Args)
+	c := e.confinement(ctx, info.Tool, info.Args)
+	v.Action, v.Rule, v.Reason, v.Subject = e.decide(a, name, c, info.Args)
+	v.Confined = c.by
 	d := deferredCall{info: info}
-	if v.Action == agentturn.Allow && e.batchAsks(a, info) {
+	if e.batchAsks(ctx, a, info, v.Action) {
 		d.allowed = v.Reason
 		v.Action, v.Held, v.Reason = agentturn.Defer, true, "held for approval: "+v.Reason
 	}
@@ -508,57 +568,110 @@ func (e *Engine) Decide(ctx context.Context, info agentturn.ToolCallInfo) (*agen
 	return &agentturn.ToolDecision{Action: v.Action, Reason: v.Reason, By: v.By}, nil
 }
 
+// confinement is what a call's tool says of where it runs.
+type confinement struct {
+	ok bool
+	by string
+}
+
+// confinement reads whether a call of tool with args runs confined.
+func (e *Engine) confinement(ctx context.Context, tool agenttool.Tool, args json.RawMessage) confinement {
+	if e.confine == nil || tool == nil {
+		return confinement{}
+	}
+	ok, by := e.confine(ctx, tool, args)
+	if !ok {
+		return confinement{}
+	}
+	return confinement{ok: true, by: by}
+}
+
 // decide evaluates one call as Decide does, without recording it.
-func (e *Engine) decide(a active, name string, args json.RawMessage) (agentturn.ToolAction, *Rule, string, string) {
+func (e *Engine) decide(a active, name string, c confinement, args json.RawMessage) (agentturn.ToolAction, *Rule, string, string) {
 	subjects, err := e.split(name, args)
 	if err != nil {
 		return agentturn.Block, nil, name + " call could not be evaluated: " + err.Error(), ""
 	}
-	return e.fold(a, name, subjects)
+	return e.fold(a, name, c, subjects)
 }
 
-// batchCache is the number of calls of one batch that ask, kept for
-// the rest of that batch's decisions. key names the batch and the
-// rules it was decided under, so a batch is never read against
-// another's calls or against a policy that has changed since.
+// batchCache is whether each call of one batch asks, kept for the rest
+// of that batch's decisions. key names the batch and the rules it was
+// decided under, so a batch is never read against another's calls or
+// against a policy that has changed since.
 type batchCache struct {
 	key  string
-	asks int
+	asks map[string]bool
 }
 
-// batchAsks reports whether a call of info's batch other than info's
-// own asks. It is asked only of a call the policy allows, so any ask
-// in the batch is another call's.
+// batchAsks reports whether a call the policy allowed is held: whether
+// a call of its batch other than its own asks. own is what the policy
+// made of info's own call, which is kept for its siblings whatever it
+// is; the siblings are read only for a call the policy allows.
 //
-// The batch is decided once, on the first call of it the engine sees,
-// and the count is kept for the rest: the loop hands the hook every
-// call of the batch before any executes, so deciding the whole batch
-// per call ran the product's splitter once per pair, ninety times over
-// on a batch of ten.
-func (e *Engine) batchAsks(a active, info agentturn.ToolCallInfo) bool {
-	if len(info.Batch) < 2 {
+// Each call of the batch is decided once for the batch and kept: the
+// loop hands the hook every call of the batch before any executes, so
+// deciding the whole batch per call ran the product's splitter once
+// per pair, ninety times over on a batch of ten. A call the hook has
+// been handed is kept as it was decided, with its own tool; a sibling
+// it has not is decided with the tool [WithTools] names, or none.
+func (e *Engine) batchAsks(ctx context.Context, a active, info agentturn.ToolCallInfo, own agentturn.ToolAction) bool {
+	if len(info.Batch) < 2 || info.Call == nil {
 		return false
 	}
 	key := batchKey(info.Batch, a.gen)
 	e.mu.Lock()
-	cached := e.batch
-	e.mu.Unlock()
-	if cached.key == key {
-		return cached.asks > 0
+	if e.batch.key != key {
+		e.batch = batchCache{key: key, asks: make(map[string]bool, len(info.Batch))}
 	}
-	asks := 0
+	if _, ok := e.batch.asks[info.Call.CallID]; !ok {
+		e.batch.asks[info.Call.CallID] = own == agentturn.Defer
+	}
+	if own != agentturn.Allow {
+		e.mu.Unlock()
+		return false
+	}
+	known := maps.Clone(e.batch.asks)
+	e.mu.Unlock()
+
+	asks, decided := false, map[string]bool{}
 	for _, c := range info.Batch {
-		if c == nil {
+		if c == nil || c.CallID == info.Call.CallID {
 			continue
 		}
-		if action, _, _, _ := e.decide(a, c.Name, callArgs(c)); action == agentturn.Defer {
-			asks++
+		ask, ok := known[c.CallID]
+		if !ok {
+			args := callArgs(c)
+			action, _, _, _ := e.decide(a, c.Name, e.confinement(ctx, e.sibling(c.Name), args), args)
+			ask = action == agentturn.Defer
+			decided[c.CallID] = ask
 		}
+		asks = asks || ask
 	}
-	e.mu.Lock()
-	e.batch = batchCache{key: key, asks: asks}
-	e.mu.Unlock()
-	return asks > 0
+	if len(decided) > 0 {
+		e.mu.Lock()
+		if e.batch.key == key {
+			for id, ask := range decided {
+				if _, ok := e.batch.asks[id]; !ok {
+					e.batch.asks[id] = ask
+				}
+			}
+		}
+		e.mu.Unlock()
+	}
+	return asks
+}
+
+// sibling returns the tool [WithTools] names, or nil.
+func (e *Engine) sibling(name string) agenttool.Tool {
+	if e.lookup == nil {
+		return nil
+	}
+	t, ok := e.lookup(name)
+	if !ok {
+		return nil
+	}
+	return t
 }
 
 // batchKey names a batch by its calls and the rules of the moment.
@@ -603,7 +716,7 @@ func (e *Engine) split(name string, args json.RawMessage) ([]Subject, error) {
 
 // fold decides every subject and keeps the most restrictive verdict,
 // the first of equals.
-func (e *Engine) fold(a active, name string, subjects []Subject) (agentturn.ToolAction, *Rule, string, string) {
+func (e *Engine) fold(a active, name string, c confinement, subjects []Subject) (agentturn.ToolAction, *Rule, string, string) {
 	var (
 		action  agentturn.ToolAction
 		rule    *Rule
@@ -615,7 +728,13 @@ func (e *Engine) fold(a active, name string, subjects []Subject) (agentturn.Tool
 		if tool == "" {
 			tool = name
 		}
-		act, r, why := e.decideSubject(a, tool, s.Args)
+		// The call's confinement is its tool's: a subject checked
+		// against another tool's rules is not skipped for it.
+		sc := c
+		if tool != name {
+			sc = confinement{}
+		}
+		act, r, why := e.decideSubject(a, tool, sc, s.Args)
 		if i == 0 || restrictiveness(act) > restrictiveness(action) {
 			action, rule, reason, subject = act, r, why, s.Text
 		}
@@ -633,14 +752,20 @@ func restrictiveness(a agentturn.ToolAction) int {
 	return 0
 }
 
-// decideSubject applies the precedence to one subject.
-func (e *Engine) decideSubject(a active, tool string, args json.RawMessage) (agentturn.ToolAction, *Rule, string) {
+// decideSubject applies the precedence to one subject. A bare ask rule
+// the confinement skips allows the subject, since the rule was what
+// would have asked.
+func (e *Engine) decideSubject(a active, tool string, c confinement, args json.RawMessage) (agentturn.ToolAction, *Rule, string) {
 	p := a.policy
 	if r, ok := e.match(p.Deny, tool, args); ok {
 		return agentturn.Block, &r, "denied by " + r.String()
 	}
-	if r, ok := e.matchAsk(a, tool, args); ok {
+	r, skipped, ok := e.matchAsk(a, tool, args, c.ok)
+	if ok {
 		return agentturn.Defer, &r, "approval required by " + r.String()
+	}
+	if skipped {
+		return agentturn.Allow, &r, confinedReason(c.by, r)
 	}
 	if r, ok := e.match(p.Allow, tool, args); ok {
 		return agentturn.Allow, &r, "allowed by " + r.String()
@@ -687,17 +812,35 @@ func (e *Engine) fires(list []Rule, r Rule, tool string, args json.RawMessage) b
 // rule it covers, since precedence alone would let the rule ask again
 // for the very calls the grant was made for; the allow list then
 // carries the grant's own rule, so the subject is decided by it.
-func (e *Engine) matchAsk(a active, tool string, args json.RawMessage) (Rule, bool) {
-	for _, r := range a.policy.Ask {
-		if !e.fires(a.policy.Ask, r, tool, args) {
+//
+// For a confined subject a bare rule is skipped rather than fired, and
+// when no rule with a specifier fires the first skipped one is
+// returned with skipped set, so the verdict names it.
+func (e *Engine) matchAsk(a active, tool string, args json.RawMessage, confined bool) (r Rule, skipped, ok bool) {
+	for _, rule := range a.policy.Ask {
+		if !e.fires(a.policy.Ask, rule, tool, args) {
 			continue
 		}
-		if _, shadowed := e.shadowedBy(a, r, tool, args); shadowed {
+		if _, shadowed := e.shadowedBy(a, rule, tool, args); shadowed {
 			continue
 		}
-		return r, true
+		if confined && rule.Bare() {
+			if !skipped {
+				r, skipped = rule, true
+			}
+			continue
+		}
+		return rule, false, true
 	}
-	return Rule{}, false
+	return r, skipped, false
+}
+
+// confinedReason is the reason a confined call was allowed.
+func confinedReason(by string, r Rule) string {
+	if by == "" {
+		return "confined, so " + r.String() + " does not ask"
+	}
+	return "confined by " + by + ", so " + r.String() + " does not ask"
 }
 
 // matches runs the tool's matcher over one specifier.

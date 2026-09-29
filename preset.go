@@ -5,7 +5,11 @@ package agentpolicy
 // policy and a network policy, and this module decides without
 // confining: it has no sandbox, no filesystem scope and no network
 // rule, so a preset carries the approval half and the product carries
-// the rest. They are kept here as worked examples of the grammar, so
+// the rest. The halves meet where a tool says so: a call whose tool
+// reports it runs confined, through agenttool.Confined, is not asked
+// about by a preset's bare ask rule, as the reference does not ask
+// about a sandboxed command, and a call that leaves the sandbox still
+// asks. See [WithConfinement]. They are kept here as worked examples of the grammar, so
 // two products do not write three slightly different versions of the
 // same three policies, and a product that needs the reference's
 // behaviour exactly writes its own rules.
@@ -20,9 +24,10 @@ type Tools struct {
 }
 
 // Suggest approximates Codex's most conservative mode: reads run,
-// everything that changes the world asks, and so does a tool the split
-// does not name. The reference also confines the run to a read-only
-// sandbox, which is the product's to arrange.
+// everything that changes the world asks unless its tool says the call
+// runs confined, and a tool the split does not name asks. The
+// reference also confines the run to a read-only sandbox, which is the
+// product's to arrange.
 func Suggest(t Tools) Policy {
 	return Policy{
 		Allow:   bare(t.Read),
@@ -32,9 +37,9 @@ func Suggest(t Tools) Policy {
 }
 
 // AutoEdit approximates Codex's middle mode: reads and edits run,
-// commands ask, and so does a tool the split does not name. The
-// reference confines the edits to the workspace, which is the
-// product's to arrange.
+// commands ask unless their tool says they run confined, and a tool
+// the split does not name asks. The reference confines the edits to
+// the workspace, which is the product's to arrange.
 func AutoEdit(t Tools) Policy {
 	return Policy{
 		Allow:   bare(t.Read, t.Edit),

@@ -133,6 +133,25 @@ verdict was made on, so a prompt about
 `npm run build && ./scripts/deploy.sh --prod` says that the deploy
 script is what it is asking about.
 
+A call its tool says runs confined is not asked about by a bare ask
+rule naming that tool, as both references skip a bare `Bash` ask for
+a sandboxed command. The engine reads `agenttool.ConfinedBy` over the
+call's tool and arguments, allows the call with `confined by
+landlock+seccomp, so bash does not ask`, and puts what confined it on
+`Verdict.Confined`. A deny rule applies whatever the sandbox, and so
+does an ask rule with a specifier, which is how a policy still asks
+about a call that leaves it: `bash(sandbox:escalated)` for a shell
+whose escape hatch is an argument. A tool that claims no sandbox asks,
+since the safe mistake is to ask. `WithConfinement` replaces the
+reading or turns it off, and `WithTools(set.Lookup)` lets the hold see
+the confinement of a call later in the batch than the one being
+decided:
+
+```go
+eng, err := agentpolicy.Build(agentpolicy.AutoEdit(split), matchers,
+	agentpolicy.WithTools(tools.Lookup))
+```
+
 ## Where rules come from
 
 Settings files merge rather than override:

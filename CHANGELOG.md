@@ -16,6 +16,30 @@ versions may break the API.
   a blocked input from a failure by `errors.Is(err, agentturn.ErrGuard)`
   on `Prompt`'s error reads `RunEnd.Err` instead. The guard docs and
   the README say so.
+- **Breaking**: the engine reads confinement. A call whose tool says
+  it runs confined, through `agenttool.Confined`, is not asked about by
+  an ask rule with no specifier that names the called tool, as both
+  references skip a bare `Bash` ask for a sandboxed command: it is
+  allowed with `confined by landlock+seccomp, so bash does not ask`,
+  and `Verdict.Rule` names the ask rule it skipped. A deny rule applies
+  whatever the confinement, and so does an ask rule with a specifier,
+  which is how a policy asks about a call that leaves the sandbox; the
+  default applies as to any call, so a confined call no rule names
+  still asks under `Ask()`. A subject a splitter checks against another
+  tool's rules is not skipped for the shell's sandbox. A tool that
+  does not implement `Confined` reads as unconfined, so nothing changes
+  for it; a product whose tools do and that wants every ask to ask
+  passes `WithConfinement(nil)`. `WithConfinement(fn)` replaces the
+  reading, which is `agenttool.ConfinedBy` by default, and
+  `Verdict.Confined` names what confined a call, on every verdict, for
+  the prompt and the record. The batch hold reads the siblings'
+  confinement too, so a confined `ls` beside a `read` the policy
+  allows holds nothing: a sibling the hook has already been handed is
+  read with its own tool, and `WithTools(set.Lookup)` names the tools
+  of the ones it has not, which otherwise read as unconfined. Each call
+  of a batch is still decided once for the batch, and the first
+  reading is kept, so a call decided twice is decided the same way. The
+  presets' docs say what a confined call does under them. (#25, #32)
 
 ## v0.0.4 - 2026-09-28
 
