@@ -40,6 +40,42 @@ versions may break the API.
   of a batch is still decided once for the batch, and the first
   reading is kept, so a call decided twice is decided the same way. The
   presets' docs say what a confined call does under them. (#25, #32)
+- A grant set's bare deny takes the tool out of the offer.
+  `Engine.Removes` and `Engine.Filter`, and `ToolProvider` over them,
+  read the deny rules a decision reads, the policy's and every active
+  grant set's, where they read the policy's alone and a skill's
+  `disallowed-tools` refused the tool's calls one at a time while the
+  model was still offered it. The tool leaves the request on the turn
+  after `GrantSet` and comes back on the turn after `Revoke`. (#26, #33)
+- `Engine.Release` forgets nothing when it returns `ErrUnanswered`.
+  The answers returned with the error are a preview: no held call is
+  forgotten and no verdict reaches the observer, so a front that
+  released before every asked call was answered answers the missing
+  one and releases again, where the second release found the held
+  calls gone and failed naming them. (#30)
+- Every answer the engine builds names its decider through
+  `agentturn.Answer.By`, which the session recorder writes as the
+  decision's `by`: `Release`'s approvals and refusals of held calls and
+  `Answers`' refusals of cut-off calls, timeouts and failed reviews are
+  `ByPolicy`, and a reviewer's approval or refusal is `Review.By`,
+  `ByAgent` when unset. They were written with no decider. `Verdict.By`
+  is unchanged. The README's record section says so. (#27)
+- `VerdictNS`, `agentpolicy:verdict`, and `Verdict.Record() (ns
+  string, data []byte)`, as `agentmemory.Manifest.Record` is, so
+  agentkit and every product write a verdict under one namespace in
+  one shape: a JSON object with the action as `allow`, `block` or
+  `defer`, the rule as its token with its source's name and its note,
+  and every empty member left out. The README showed a custom entry
+  under `agentpolicy`, which no code wrote. (#31)
+- `Rule.Note` says why a rule exists. `ParseRules` leaves it empty and
+  the grammar is unchanged; a product's settings parser fills it. When
+  set it follows the rule in the reason a decision gives, which the
+  model reads for a denied call: `denied by bash(curl:*): outbound
+  network is proxied; use fetch`, and likewise `approval required by`
+  and `allowed by`. An alias keeps the note on every rule it expands
+  to, and `GrantOver` finds the ask rule behind a verdict by its tool,
+  specifier and source, so a note does not make a rule a different
+  one. (#28)
 
 ## v0.0.4 - 2026-09-28
 

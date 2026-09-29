@@ -1,9 +1,13 @@
 package agentpolicy
 
 import (
+	"context"
+	"encoding/json"
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/ChristopherDavenport/agentturn"
 )
 
 func TestParseRules(t *testing.T) {
@@ -96,5 +100,53 @@ func TestRuleErrorsArePrefixed(t *testing.T) {
 		if _, err := ParseRules(in); err == nil || !strings.HasPrefix(err.Error(), "agentpolicy: ") {
 			t.Errorf("ParseRules(%q) err = %v", in, err)
 		}
+	}
+}
+
+// A rule's note says why it exists and follows the rule in the reason
+// the model and the prompt read.
+func TestRuleNote(t *testing.T) {
+	ctx := context.Background()
+	note := func(list []Rule, text string) []Rule {
+		for i := range list {
+			list[i].Note = text
+		}
+		return list
+	}
+	e, err := Build(Policy{
+		Deny:    note(rules(t, "bash(curl:*)"), "outbound network is proxied; use fetch"),
+		Ask:     note(rules(t, "Bash(git push:*)"), "pushes are reviewed"),
+		Allow:   note(rules(t, "bash(git status:*)"), "read-only"),
+		Default: Deny(),
+	}, testMatchers, WithAliases(map[string][]string{"Bash": {"bash"}}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tt := range []struct {
+		command string
+		action  agentturn.ToolAction
+		reason  string
+	}{
+		{"curl https://example.com", agentturn.Block, "denied by bash(curl:*): outbound network is proxied; use fetch"},
+		{"git push origin main", agentturn.Defer, "approval required by bash(git push:*): pushes are reviewed"},
+		{"git status", agentturn.Allow, "allowed by bash(git status:*): read-only"},
+		{"ls", agentturn.Block, "no rule allows bash: denied by default"},
+	} {
+		args, _ := json.Marshal(map[string]string{"command": tt.command})
+		d, _ := e.Decide(ctx, call("call_1", "bash", string(args)))
+		if d.Action != tt.action || d.Reason != tt.reason {
+			t.Errorf("%s: %v %q, want %v %q", tt.command, d.Action, d.Reason, tt.action, tt.reason)
+		}
+	}
+	// A rule parsed from the grammar has no note, and the token is
+	// written without it.
+	if r := e.Policy().Ask[0]; r.String() != "bash(git push:*)" || r.Note != "pushes are reviewed" {
+		t.Errorf("expanded ask rule = %+v", r)
+	}
+	// GrantOver finds the ask rule by its tool, specifier and source,
+	// whatever the verdict's copy of the note says.
+	v := Verdict{Action: agentturn.Defer, Rule: &Rule{Tool: "bash", Spec: "git push:*"}}
+	if ok, why := e.GrantOver(ctx, v, Rule{Tool: "bash", Spec: "git push origin:*"}); !ok {
+		t.Errorf("GrantOver = %q", why)
 	}
 }

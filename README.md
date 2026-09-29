@@ -31,6 +31,11 @@ matcher per tool that takes specifiers; `PrefixMatcher` covers the
 common case, `<prefix>:*` or an exact value over one string argument.
 A rule with a specifier for a tool without a matcher does not build.
 
+A rule may say why it exists. `Rule.Note` is not part of the grammar;
+a product's settings parser fills it from a comment or a field beside
+the rule, and it follows the rule in the reason the model reads:
+`denied by bash(curl:*): outbound network is proxied; use fetch`.
+
 A rule's tool name may be a glob, `mcp__*`, which the deny and ask
 lists honour: a `*` stands for any run of characters, and nothing
 folds case. A glob in the allow list does not build, since a glob
@@ -234,6 +239,12 @@ and granting the tools of skills the model never opened.
 `Engine.Grants` reports the sets in force; `Engine.Policy` holds only
 what a product persists.
 
+A set's bare deny, a skill's `disallowed-tools`, takes the tool out of
+the offer as the policy's does: `Engine.Removes` and `Engine.Filter`
+read the deny rules a decision reads, so under `ToolProvider` the tool
+leaves the request on the turn after the set is activated and comes
+back on the turn after `Revoke`.
+
 ## A reviewer instead of a human
 
 ```go
@@ -304,16 +315,22 @@ loop's recorder writes as the session format's `decision` entry on the
 call, Block as `reject` with the reason and Defer as `hold`, and the
 engine names itself there, so those entries read `by: policy`.
 
-An answer on resume names nobody: `agentturn.Answer` carries no
-decider, so the `proceed` entry a recorder writes for an approval has
-no `by` of its own. Who answered is on the verdict instead:
-`Verdict.By` is `policy` for a rule the engine evaluated, `agent` for
-a model-backed reviewer and `human` for a person, which a `Reviewer`
-says through `Review.By`. A product records it beside the decision.
+The answers `Release` and `Answers` build name their decider through
+`agentturn.Answer.By`, `policy` for the engine's own and `agent` or
+`human` for a reviewer's, as `Review.By` says, and `Verdict.By` says
+the same.
 
-What the decision entry cannot carry, the rule that fired, a guard's
-verdict, a grant, reaches the session the same way, as a `custom`
-entry under `agentpolicy`.
+What the decision entry cannot carry, the rule that fired and its
+note, a guard's verdict, a grant, what confined a call, reaches the
+session as a `custom` entry under `agentpolicy:verdict`, which
+`Verdict.Record` writes:
+
+```go
+agentpolicy.WithObserver(func(ctx context.Context, v agentpolicy.Verdict) {
+	ns, data := v.Record()
+	recorder.Annotate(ctx, ns, json.RawMessage(data))
+})
+```
 
 ## Development
 

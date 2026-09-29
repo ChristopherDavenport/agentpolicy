@@ -162,8 +162,8 @@ func TestRelease(t *testing.T) {
 	e, j, end := setup(t)
 	got := released(ctx, t, e, end, agentturn.Approve("call_c").WithNote("ok, once"))
 	want := []agentturn.Answer{
-		agentturn.Approve("call_a"),
-		agentturn.Approve("call_b"),
+		agentturn.Approve("call_a").WithBy(ByPolicy),
+		agentturn.Approve("call_b").WithBy(ByPolicy),
 		agentturn.Approve("call_c").WithNote("ok, once"),
 	}
 	if !reflect.DeepEqual(got, want) {
@@ -182,7 +182,7 @@ func TestRelease(t *testing.T) {
 	// allowed them, and the model sees the one refusal.
 	e, j, end = setup(t)
 	refusal := agentturn.Output(openresponses.NewFunctionCallOutput("call_c", "no"))
-	if got := released(ctx, t, e, end, refusal); !reflect.DeepEqual(got, []agentturn.Answer{agentturn.Approve("call_a"), agentturn.Approve("call_b"), refusal}) {
+	if got := released(ctx, t, e, end, refusal); !reflect.DeepEqual(got, []agentturn.Answer{agentturn.Approve("call_a").WithBy(ByPolicy), agentturn.Approve("call_b").WithBy(ByPolicy), refusal}) {
 		t.Errorf("released after a refusal = %s", dump(got))
 	}
 	if r := reasons(j); r != "call_a released: allowed by bash(git add:*)|call_b released: allowed by bash(git commit:*)" {
@@ -195,8 +195,8 @@ func TestRelease(t *testing.T) {
 	stop := agentturn.Refuse(openresponses.NewFunctionCallOutput("call_c", "no, stop"))
 	got = released(ctx, t, e, end, stop)
 	want = []agentturn.Answer{
-		agentturn.Output(openresponses.NewFunctionCallOutput("call_a", "The call was held for an approval and the turn was stopped; the call did not run.")),
-		agentturn.Output(openresponses.NewFunctionCallOutput("call_b", "The call was held for an approval and the turn was stopped; the call did not run.")),
+		agentturn.Output(openresponses.NewFunctionCallOutput("call_a", "The call was held for an approval and the turn was stopped; the call did not run.")).WithBy(ByPolicy),
+		agentturn.Output(openresponses.NewFunctionCallOutput("call_b", "The call was held for an approval and the turn was stopped; the call did not run.")).WithBy(ByPolicy),
 		stop,
 	}
 	if !reflect.DeepEqual(got, want) {
@@ -217,7 +217,7 @@ func TestRelease(t *testing.T) {
 	e, j, end = setup(t)
 	own := agentturn.Output(openresponses.NewFunctionCallOutput("call_a", "I ran it myself"))
 	stray := agentturn.Approve("call_z")
-	if got := released(ctx, t, e, end, stray, agentturn.Approve("call_c"), own); !reflect.DeepEqual(got, []agentturn.Answer{own, agentturn.Approve("call_b"), agentturn.Approve("call_c"), stray}) {
+	if got := released(ctx, t, e, end, stray, agentturn.Approve("call_c"), own); !reflect.DeepEqual(got, []agentturn.Answer{own, agentturn.Approve("call_b").WithBy(ByPolicy), agentturn.Approve("call_c"), stray}) {
 		t.Errorf("own answer kept = %s", dump(got))
 	}
 	if len(j.all()) != 1 {
@@ -232,6 +232,35 @@ func TestRelease(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got, []agentturn.Answer{agentturn.Approve("call_c")}) {
 		t.Errorf("second release = %s", dump(got))
+	}
+
+	// A release missing an answer is a preview: it names the call,
+	// forgets nothing and journals nothing, so the front answers the
+	// call and releases again.
+	e, j, end = setup(t)
+	preview, err := e.Release(ctx, end)
+	if !errors.Is(err, ErrUnanswered) || err.Error() != "agentpolicy: pending call has no answer: call_c (bash)" {
+		t.Errorf("release with no answers: err = %v", err)
+	}
+	if !reflect.DeepEqual(preview, []agentturn.Answer{agentturn.Approve("call_a").WithBy(ByPolicy), agentturn.Approve("call_b").WithBy(ByPolicy)}) {
+		t.Errorf("preview = %s", dump(preview))
+	}
+	if len(j.all()) != 0 {
+		t.Errorf("a preview journalled %+v", j.all())
+	}
+	for _, id := range []string{"call_a", "call_b", "call_c"} {
+		if _, ok := e.Deferred("run_1", id); !ok {
+			t.Errorf("a preview forgot %s", id)
+		}
+	}
+	if got := released(ctx, t, e, end, agentturn.Approve("call_c")); len(got) != 3 {
+		t.Errorf("release after the preview = %s", dump(got))
+	}
+	if r := reasons(j); r != "call_a released: allowed by bash(git add:*)|call_b released: allowed by bash(git commit:*)" {
+		t.Errorf("verdicts after the preview = %q", r)
+	}
+	if runs := e.Runs(); len(runs) != 0 {
+		t.Errorf("runs after the release = %v", runs)
 	}
 
 	// A pending call the engine never deferred is named too, and a nil

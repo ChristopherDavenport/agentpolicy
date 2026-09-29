@@ -114,7 +114,7 @@ func WithObserver(fn func(context.Context, Verdict)) Option {
 //	})
 //
 // [Build] expands a rule whose name has an entry into one rule per
-// tool it names, keeping the specifier and the source, so the
+// tool it names, keeping the specifier, the source and the note, so the
 // expansion happens once, where the matchers already are, and
 // [Engine.Policy] reports the rules as they are evaluated. A name with
 // no entry is a tool's own name and still fails closed: a rule with a
@@ -276,7 +276,8 @@ func checkAliases(aliases map[string][]string) error {
 }
 
 // expand returns the rules r stands for: one per tool its name is an
-// alias for, keeping the specifier and the source, or r itself.
+// alias for, keeping the specifier, the source and the note, or r
+// itself.
 func (e *Engine) expand(r Rule) []Rule {
 	tools, ok := e.aliases[r.Tool]
 	if !ok {
@@ -284,7 +285,7 @@ func (e *Engine) expand(r Rule) []Rule {
 	}
 	out := make([]Rule, len(tools))
 	for i, tool := range tools {
-		out[i] = Rule{Tool: tool, Spec: r.Spec, Source: r.Source}
+		out[i] = Rule{Tool: tool, Spec: r.Spec, Source: r.Source, Note: r.Note}
 	}
 	return out
 }
@@ -758,17 +759,17 @@ func restrictiveness(a agentturn.ToolAction) int {
 func (e *Engine) decideSubject(a active, tool string, c confinement, args json.RawMessage) (agentturn.ToolAction, *Rule, string) {
 	p := a.policy
 	if r, ok := e.match(p.Deny, tool, args); ok {
-		return agentturn.Block, &r, "denied by " + r.String()
+		return agentturn.Block, &r, "denied by " + r.cite()
 	}
 	r, skipped, ok := e.matchAsk(a, tool, args, c.ok)
 	if ok {
-		return agentturn.Defer, &r, "approval required by " + r.String()
+		return agentturn.Defer, &r, "approval required by " + r.cite()
 	}
 	if skipped {
 		return agentturn.Allow, &r, confinedReason(c.by, r)
 	}
 	if r, ok := e.match(p.Allow, tool, args); ok {
-		return agentturn.Allow, &r, "allowed by " + r.String()
+		return agentturn.Allow, &r, "allowed by " + r.cite()
 	}
 	action, _ := p.Default.Action()
 	switch action {
@@ -970,7 +971,7 @@ func (e *Engine) GrantOver(ctx context.Context, v Verdict, r Rule) (granted bool
 		return false, ask.String() + from + " outranks the grant"
 	}
 	e.mu.Lock()
-	at := slices.Index(e.policy.Ask, ask)
+	at := slices.IndexFunc(e.policy.Ask, ask.same)
 	if at < 0 {
 		e.mu.Unlock()
 		return false, ask.String() + " is no longer in the ask list"

@@ -54,10 +54,10 @@ type Review struct {
 	// which is what the classify package's reviewer sets, [ByHuman]
 	// for a person a reviewer asked on the front's behalf. Empty is
 	// read as ByAgent, since a Reviewer answers where a human would.
-	// [Engine.Answers] puts it on the verdict, and it is what the
-	// answer itself will carry once agentturn's Answer names a
-	// decider; the engine's own fail-closed answers, a timeout and a
-	// review that failed, are [ByPolicy].
+	// [Engine.Answers] puts it on the verdict and on the answer, as
+	// agentturn.Answer.By, which the session recorder writes as the
+	// decision's decider; the engine's own fail-closed answers, a
+	// timeout and a review that failed, are [ByPolicy].
 	By string
 }
 
@@ -139,7 +139,9 @@ func refusalText(reason string) string {
 // through the observer: Allow for an approval, Block otherwise, with
 // the reason and with Verdict.By naming who answered, the reviewer
 // through Review.By or the policy for the answers the engine makes on
-// its own.
+// its own. The answer names the same decider through
+// agentturn.Answer.By, so the session's decision entry says who
+// answered without the verdict beside it.
 //
 // The reviewer sees each deferred call as the hook saw it, with the
 // verdict that deferred it, for the calls the engine asked about in
@@ -178,7 +180,7 @@ func (e *Engine) Answers(ctx context.Context, r Reviewer, end *agentturn.RunEnd)
 			continue
 		}
 		if p.Reason == agentturn.PendingAborted || p.Reason == agentturn.PendingUnknown {
-			answers = append(answers, agentturn.Output(openresponses.NewFunctionCallOutput(call.CallID, cutOffText)))
+			answers = append(answers, agentturn.Output(openresponses.NewFunctionCallOutput(call.CallID, cutOffText)).WithBy(ByPolicy))
 			e.observe(ctx, Verdict{RunID: end.RunID, CallID: call.CallID, Tool: call.Name, Action: agentturn.Block, Reason: "not reviewed: " + string(p.Reason), By: ByPolicy})
 			continue
 		}
@@ -237,27 +239,26 @@ func answer(call *openresponses.FunctionCall, info agentturn.ToolCallInfo, rev R
 	case err != nil:
 		v.Reason = "reviewer failed: " + err.Error()
 		v.By = ByPolicy
-		return refuse(reviewerFailedText), v
+		return refuse(reviewerFailedText).WithBy(ByPolicy), v
 	case rev.Outcome == Approved:
 		v.Action = agentturn.Allow
 		v.Reason = withReason("approved by reviewer", rev.Reason)
 		if rev.Args != nil {
-			return agentturn.ApproveWith(call.CallID, rev.Args).WithNote(rev.Note), v
+			return agentturn.ApproveWith(call.CallID, rev.Args).WithNote(rev.Note).WithBy(v.By), v
 		}
-		return agentturn.Approve(call.CallID).WithNote(rev.Note), v
+		return agentturn.Approve(call.CallID).WithNote(rev.Note).WithBy(v.By), v
 	case rev.Outcome == TimedOut:
 		v.Reason = "reviewer timed out"
 		v.By = ByPolicy
-		return refuse(reviewerTimedOutText), v
+		return refuse(reviewerTimedOutText).WithBy(ByPolicy), v
 	}
 	v.Reason = withReason("denied by reviewer", rev.Reason)
-	return refuse(refusalText(rev.Reason)).WithNote(rev.Note), v
+	return refuse(refusalText(rev.Reason)).WithNote(rev.Note).WithBy(v.By), v
 }
 
 // by names who a review came from: the reviewer's own word, or the
-// agent, since a Reviewer answers where a human would. It is what the
-// answer will carry once agentturn's Answer names a decider; until
-// then it reaches the session through the verdict.
+// agent, since a Reviewer answers where a human would. The verdict and
+// the answer both carry it.
 func by(rev Review) string {
 	if rev.By == "" {
 		return ByAgent
