@@ -39,6 +39,7 @@
 //
 // The engine never calls a model or opens a socket: the same policy and
 // the same call always give the same verdict. Every verdict, every
-// grant and every reviewer's answer reaches the observer exactly once,
-// so a product can record it beside the session.
+// grant and every reviewer's answer reaches every observer exactly
+// once, in the order the observers were given, so a product can record
+// it beside the session.
 package agentpolicy

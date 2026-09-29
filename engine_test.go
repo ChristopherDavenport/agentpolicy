@@ -915,3 +915,24 @@ func TestSetPolicy(t *testing.T) {
 		t.Errorf("a glob over a late tool: %+v", d)
 	}
 }
+
+// Every observer sees every verdict, in the order given: a kit that
+// records verdicts and a product with an observer of its own both run,
+// whichever option comes last.
+func TestObserversAccumulate(t *testing.T) {
+	ctx := context.Background()
+	var order []string
+	observer := func(name string) func(context.Context, Verdict) {
+		return func(_ context.Context, v Verdict) { order = append(order, name+":"+v.CallID) }
+	}
+	e, err := Build(Policy{Ask: rules(t, "bash"), Default: Allow()}, nil,
+		WithObserver(observer("kit")), WithObserver(nil), WithObserver(observer("product")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.Decide(ctx, call("call_1", "bash", `{}`))
+	e.Decide(ctx, call("call_2", "read", `{}`))
+	if got := strings.Join(order, " "); got != "kit:call_1 product:call_1 kit:call_2 product:call_2" {
+		t.Errorf("observed %q", got)
+	}
+}
