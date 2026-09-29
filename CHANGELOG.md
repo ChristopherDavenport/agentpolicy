@@ -5,6 +5,18 @@ All user-visible changes to this library. The format follows
 uses [Semantic Versioning](https://semver.org/); before v1.0.0 minor
 versions may break the API.
 
+## Unreleased
+
+- Dependencies: agenttool v0.0.8 to v0.0.9 and agentturn v0.0.9 to
+  v0.0.10. A guard's Block from `Chain.BeforeModelCall` now stops the
+  run as a guard stop, `ReasonStopped` with `StopGuard` and the
+  `BlockedError` on `RunEnd.Err`, where it ended the run with
+  `ReasonError`, since agentturn#116 treats an `ErrGuard` from that
+  hook as it treats one from `ShouldStopAfterTurn`. A front that told
+  a blocked input from a failure by `errors.Is(err, agentturn.ErrGuard)`
+  on `Prompt`'s error reads `RunEnd.Err` instead. The guard docs and
+  the README say so.
+
 ## v0.0.4 - 2026-09-28
 
 - Dependencies: agenttool v0.0.7 to v0.0.8 and agentturn v0.0.8 to

@@ -472,13 +472,13 @@ func TestGuardsInTheLoop(t *testing.T) {
 	if err != nil || end.Reason != agentturn.ReasonStopped || end.Cause != agentturn.StopGuard || !errors.As(end.Err, &be) || be.Guard != "deny" || be.Subject != "output" {
 		t.Fatalf("stop: err=%v end=%+v", err, end)
 	}
-	// A blocked input fails the run with the guard's error, which
-	// ErrGuard tells from a failure.
+	// A blocked input stops the run as a guard stop before the model
+	// is called, the guard's error on the end.
 	input.Guards = []Guard{Secrets()}
 	agent = agentturn.New(agentturn.Config{Model: &echo.Adapter{}, BeforeModelCall: input.BeforeModelCall()})
 	end, err = agent.Prompt(ctx, openresponses.UserText("AKIAIOSFODNN7EXAMPLE"))
 	be = nil
-	if end.Reason != agentturn.ReasonError || !errors.As(err, &be) || !errors.Is(err, agentturn.ErrGuard) || be.Guard != "secrets" || be.Subject != "input" || be.Reason != "secret detected: aws_access_key" {
+	if err != nil || end.Reason != agentturn.ReasonStopped || end.Cause != agentturn.StopGuard || !errors.As(end.Err, &be) || !errors.Is(end.Err, agentturn.ErrGuard) || be.Guard != "secrets" || be.Subject != "input" || be.Reason != "secret detected: aws_access_key" {
 		t.Fatalf("block: err=%v end=%+v", err, end)
 	}
 	// Every guard's verdict was recorded with the run it belongs to.

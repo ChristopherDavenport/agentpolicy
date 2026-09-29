@@ -258,7 +258,8 @@ cfg.ShouldStopAfterTurn = chain.ShouldStopAfterTurn()
 An input guard sees the request's instructions beside its items, which
 is where most of what enters an agent's window is: an AGENTS.md chain
 read out of a checkout, a skill catalogue, a memory block the model
-wrote. It may block, which fails the model call, or rewrite, which
+wrote. It may block, which stops the run as a guard stop before the
+model is called, or rewrite, which
 replaces the request's input for that call, and its instructions when
 the verdict carries them. An output guard sees
 each assistant message as the stream completes it, before the
