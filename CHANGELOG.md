@@ -5,7 +5,7 @@ All user-visible changes to this library. The format follows
 uses [Semantic Versioning](https://semver.org/); before v1.0.0 minor
 versions may break the API.
 
-## Unreleased
+## v0.0.5 - 2026-09-28
 
 - Dependencies: agenttool v0.0.8 to v0.0.9 and agentturn v0.0.9 to
   v0.0.10. A guard's Block from `Chain.BeforeModelCall` now stops the
