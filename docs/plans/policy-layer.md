@@ -427,9 +427,12 @@ reason the policy asked. It reviews only the calls the policy
 asked about: a held call is released with them, as `Release` does for
 a human's answers, and a call an abort cut off or one found unanswered
 in a seeded transcript, which the loop marks as such on `PendingCall`,
-is not the reviewer's to approve, since its tool may have run; it is
-refused with text that says so, outside the denial bound, and the
-model decides whether to ask for it again. The note is the reviewer's,
+is not the reviewer's to approve, since its tool may have run. Outside
+the denial bound, it runs again when its tool says
+`agenttool.ReplaySafe`, it is refused as never run when the record
+says it never started (`WithNeverStarted`), and it is refused with
+text that says it may have run otherwise, so the model decides whether
+to ask for it again. The note is the reviewer's,
 or the user's through the front: the engine sets none on its own
 decisions, since a rule has nothing to tell the model beyond its
 reason. `Decide` never calls a model; the reviewer the front passes in

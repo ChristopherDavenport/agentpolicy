@@ -172,9 +172,49 @@ func WithConfinement(fn func(ctx context.Context, tool agenttool.Tool, args json
 //
 // The lookup must resolve a name to the tool the loop runs for it; a
 // sibling read as confined through a tool the loop does not run is
-// read as not asking until its own call is decided.
+// read as not asking until its own call is decided. [Engine.Answers]
+// reads it too, for the tool of a cut-off call found in a seeded
+// transcript, which the loop does not name, to ask whether the call
+// may run again.
 func WithTools(lookup func(name string) (agenttool.Tool, bool)) Option {
 	return func(e *Engine) { e.lookup = lookup }
+}
+
+// WithHooks folds these hooks' decisions into the engine's, before the
+// batch hold, so a hook's ask holds the rest of the batch as a rule's
+// does, and a hook's block leaves nothing held for it. A product's own
+// before-tool-call hooks belong here rather than chained after the
+// engine with agentturn.ChainBeforeToolCall: a chained hook is outside
+// the hold, so a call it defers lets its siblings run before anyone
+// answers, and a call it blocks strands the siblings the engine held
+// for it.
+//
+// The fold is agentturn.ChainBeforeToolCall's, with the engine's
+// decision first: the strictest action wins, Block over Defer over
+// Allow, a block ends the fold, and a hook that makes the action
+// stricter brings its reason and its decider, By, with ByPolicy for an
+// empty one; the verdict then has no Rule and no Subject. The first
+// note stands, Terminate is set when any hook sets it, and arguments a
+// hook rewrites are passed to the hooks after it and are what the call
+// runs with, a held call's included when [Engine.Release] releases it.
+// The first error fails the call's decision, and the turn with it.
+//
+// The engine reads a call's siblings to decide whether to hold it, so
+// a hook is called for a sibling of the call being decided, before the
+// loop hands the hook that sibling's own call, with the sibling's
+// batch position and the tool [WithTools] names. A hook must therefore
+// decide a call the same way however often it is asked, and one that
+// fails for a sibling reads as asking, so the call is held. Each
+// WithHooks adds its hooks after those already given; a nil hook adds
+// nothing.
+func WithHooks(fns ...func(context.Context, agentturn.ToolCallInfo) (*agentturn.ToolDecision, error)) Option {
+	return func(e *Engine) {
+		for _, fn := range fns {
+			if fn != nil {
+				e.hooks = append(e.hooks, fn)
+			}
+		}
+	}
 }
 
 // Engine is the runtime form of a [Policy]: the policy in force, the
@@ -192,6 +232,11 @@ type Engine struct {
 	bound     DenialBound
 	confine   func(context.Context, agenttool.Tool, json.RawMessage) (bool, string)
 	lookup    func(string) (agenttool.Tool, bool)
+	// hooks are folded into every decision after the policy's, and
+	// neverStarted reads the record for a cut-off call. Both are set
+	// at Build and never written after.
+	hooks        []func(context.Context, agentturn.ToolCallInfo) (*agentturn.ToolDecision, error)
+	neverStarted func(context.Context, string, string) bool
 
 	mu     sync.Mutex
 	policy Policy
@@ -220,8 +265,11 @@ type deferredCall struct {
 	info    agentturn.ToolCallInfo
 	verdict Verdict
 	// allowed is the reason the policy allowed a held call, for the
-	// verdict that releases it.
+	// verdict that releases it; args and note are what the hooks
+	// rewrote its arguments to and told the model, for its release.
 	allowed string
+	args    json.RawMessage
+	note    string
 }
 
 // Who a decision names as its decider, in the session format's words.
@@ -552,7 +600,14 @@ func (e *Engine) BeforeToolCall() func(context.Context, agentturn.ToolCallInfo) 
 // A call the tool says runs confined is not asked about by a bare ask
 // rule naming its tool; [WithConfinement] says how that is read.
 //
-// The decision names the policy as its decider. The verdict reaches
+// The hold covers the hooks given with [WithHooks], whose decisions
+// are folded into the policy's before it. A hook chained after Decide
+// with agentturn.ChainBeforeToolCall is outside it: a call such a hook
+// defers does not hold its siblings, and a call it blocks leaves the
+// siblings Decide held waiting on a question nobody is asked.
+//
+// The decision names the policy as its decider, or the hook that made
+// it stricter. The verdict reaches
 // the observer before Decide returns, and the same policy and the same
 // call in the same batch always give the same verdict.
 //
@@ -571,7 +626,11 @@ func (e *Engine) Decide(ctx context.Context, info agentturn.ToolCallInfo) (*agen
 	c := e.confinement(ctx, info.Tool, info.Args)
 	v.Action, v.Rule, v.Reason, v.Subject = e.decide(a, name, c, info.Args)
 	v.Confined = c.by
-	d := deferredCall{info: info}
+	out, err := e.foldHooks(ctx, info, &v)
+	if err != nil {
+		return nil, err
+	}
+	d := deferredCall{info: info, args: out.Args, note: out.Note}
 	if e.batchAsks(ctx, a, info, v.Action) {
 		d.allowed = v.Reason
 		v.Action, v.Held, v.Reason = agentturn.Defer, true, "held for approval: "+v.Reason
@@ -581,7 +640,42 @@ func (e *Engine) Decide(ctx context.Context, info agentturn.ToolCallInfo) (*agen
 		e.remember(info.RunID, callID, d)
 	}
 	e.observe(ctx, v)
-	return &agentturn.ToolDecision{Action: v.Action, Reason: v.Reason, By: v.By}, nil
+	out.Action, out.Reason, out.By = v.Action, v.Reason, v.By
+	return &out, nil
+}
+
+// foldHooks folds the hooks' decisions into v, the policy's, as
+// [WithHooks] describes, and returns what the hooks add to the
+// decision besides its action: the note, Terminate and the rewritten
+// arguments.
+func (e *Engine) foldHooks(ctx context.Context, info agentturn.ToolCallInfo, v *Verdict) (agentturn.ToolDecision, error) {
+	var out agentturn.ToolDecision
+	for _, fn := range e.hooks {
+		if v.Action == agentturn.Block {
+			break
+		}
+		d, err := fn(ctx, info)
+		if err != nil {
+			return agentturn.ToolDecision{}, err
+		}
+		if d == nil {
+			continue
+		}
+		if restrictiveness(d.Action) > restrictiveness(v.Action) {
+			v.Action, v.Reason, v.Rule, v.Subject, v.By = d.Action, d.Reason, nil, "", d.By
+			if v.By == "" {
+				v.By = ByPolicy
+			}
+		}
+		if out.Note == "" {
+			out.Note = d.Note
+		}
+		out.Terminate = out.Terminate || d.Terminate
+		if d.Args != nil {
+			out.Args, info.Args = d.Args, d.Args
+		}
+	}
+	return out, nil
 }
 
 // confinement is what a call's tool says of where it runs.
@@ -664,9 +758,7 @@ func (e *Engine) batchAsks(ctx context.Context, a active, info agentturn.ToolCal
 		}
 		ask, ok := known[i]
 		if !ok {
-			args := callArgs(c)
-			action, _, _, _ := e.decide(a, c.Name, e.confinement(ctx, e.sibling(c.Name), args), args)
-			ask = action == agentturn.Defer
+			ask = e.siblingAsks(ctx, a, info, i)
 			decided[i] = ask
 		}
 		asks = asks || ask
@@ -681,6 +773,22 @@ func (e *Engine) batchAsks(ctx context.Context, a active, info agentturn.ToolCal
 		e.mu.Unlock()
 	}
 	return asks
+}
+
+// siblingAsks reports whether the call at position i of info's batch
+// asks, decided as Decide would decide it, the hooks included, with the
+// tool [WithTools] names. A hook that fails reads as asking.
+func (e *Engine) siblingAsks(ctx context.Context, a active, info agentturn.ToolCallInfo, i int) bool {
+	c := info.Batch[i]
+	args := callArgs(c)
+	tool := e.sibling(c.Name)
+	v := Verdict{}
+	v.Action, _, _, _ = e.decide(a, c.Name, e.confinement(ctx, tool, args), args)
+	sib := agentturn.ToolCallInfo{RunID: info.RunID, Turn: info.Turn, Call: c, Tool: tool, Args: args, Batch: info.Batch, Index: i}
+	if _, err := e.foldHooks(ctx, sib, &v); err != nil {
+		return true
+	}
+	return v.Action == agentturn.Defer
 }
 
 // position returns the index of info's own call in its batch: Index
@@ -753,7 +861,9 @@ func (e *Engine) split(name string, args json.RawMessage) ([]Subject, error) {
 }
 
 // fold decides every subject and keeps the most restrictive verdict,
-// the first of equals.
+// the first of equals. A block of a call split into several subjects
+// names the subject it was for and says the whole call did not run, so
+// the model does not report the other half as having succeeded.
 func (e *Engine) fold(a active, name string, c confinement, subjects []Subject) (agentturn.ToolAction, *Rule, string, string) {
 	var (
 		action  agentturn.ToolAction
@@ -776,6 +886,9 @@ func (e *Engine) fold(a active, name string, c confinement, subjects []Subject) 
 		if i == 0 || restrictiveness(act) > restrictiveness(action) {
 			action, rule, reason, subject = act, r, why, s.Text
 		}
+	}
+	if action == agentturn.Block && len(subjects) > 1 && subject != "" {
+		reason += " on " + strconv.Quote(subject) + "; the call did not run"
 	}
 	return action, rule, reason, subject
 }

@@ -92,7 +92,8 @@ func (e *Engine) answered(runID, callID string) {
 // every answer for agentturn's Resume in the order of end.Pending, the
 // model's order, which is the order a sequential batch runs in. The
 // policy allowed a held call, so it is approved and runs with the
-// batch, unless an answer ends the run, one built with
+// batch, with the arguments and the note a hook given to [WithHooks]
+// gave it, unless an answer ends the run, one built with
 // agentturn.Refuse, in which case the held call is answered with a
 // refusal the model reads, since the turn is over. A held call the
 // given answers already cover keeps its answer, and an answer for a
@@ -159,7 +160,11 @@ func (e *Engine) Release(ctx context.Context, end *agentturn.RunEnd, answers ...
 			out = append(out, agentturn.Output(openresponses.NewFunctionCallOutput(id, heldStoppedText)).WithBy(ByPolicy))
 		} else {
 			v.Rule, v.Reason = d.verdict.Rule, "released: "+d.allowed
-			out = append(out, agentturn.Approve(id).WithBy(ByPolicy))
+			ans := agentturn.Approve(id)
+			if d.args != nil {
+				ans = agentturn.ApproveWith(id, d.args)
+			}
+			out = append(out, ans.WithNote(d.note).WithBy(ByPolicy))
 		}
 		answered = append(answered, id)
 		releases = append(releases, v)

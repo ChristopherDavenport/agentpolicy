@@ -25,8 +25,11 @@ type Rule struct {
 	// set it follows the rule in the reason a verdict gives, which is
 	// what the model reads for a denied call and what a prompt shows
 	// for an asked one: "denied by bash(curl:*): outbound network is
-	// proxied; use fetch". Two rules that differ only in their notes
-	// are the same rule to [Engine.GrantOver].
+	// proxied; use fetch". A note from a named source the user has not
+	// trusted is left out of the reason, since the model would read a
+	// repository's text in the harness's voice; it stays on
+	// Verdict.Rule for the record and the front. Two rules that differ
+	// only in their notes are the same rule to [Engine.GrantOver].
 	Note string
 }
 
@@ -62,9 +65,11 @@ func (r Rule) String() string {
 }
 
 // cite is the rule as a reason names it: the token, and the note after
-// it when there is one.
+// it when there is one and its source is the product's or trusted. An
+// untrusted source's deny and ask rules apply, but what its note says
+// is not the harness's to repeat to the model.
 func (r Rule) cite() string {
-	if r.Note == "" {
+	if r.Note == "" || !r.Source.Trusted && r.Source.Name != "" {
 		return r.String()
 	}
 	return r.String() + ": " + r.Note
