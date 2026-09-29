@@ -39,9 +39,10 @@ func PrefixMatcher(field string) Matcher {
 // at any position: "git log * main" matches "git log --oneline main"
 // and "* --version" matches "node --version". The space is part of the
 // pattern, so "ls *" does not match "lsof" while "ls*" does. A trailing
-// ":*" is a wildcard at a word boundary: "ls:*" matches "ls" and
-// "ls -la" and not "lsof". A pattern with no wildcard matches the whole
-// value exactly. Nothing folds case. A missing field, or one that is
+// ":*" is a wildcard at a word boundary, which is a space: "ls:*"
+// matches "ls" and "ls -la", and not "lsof" or "ls" and a tab. ":*"
+// alone matches everything, as "*" does. A pattern with no wildcard
+// matches the whole value exactly. Nothing folds case. A missing field, or one that is
 // not a string, matches nothing.
 //
 // A pattern sees the one string it is given: a compound command is
@@ -53,7 +54,11 @@ func GlobMatcher(field string) Matcher {
 		if !ok {
 			return false
 		}
-		if prefix, ok := strings.CutSuffix(spec, ":*"); ok {
+		prefix, ok := strings.CutSuffix(spec, ":*")
+		switch {
+		case ok && prefix == "":
+			return true
+		case ok:
 			return globMatch(prefix, val) || globMatch(prefix+" *", val)
 		}
 		return globMatch(spec, val)

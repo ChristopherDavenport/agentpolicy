@@ -158,9 +158,11 @@ func WithConfinement(fn func(ctx context.Context, tool agenttool.Tool, args json
 // order: a sibling decided earlier in the batch is read as it was
 // decided, and one later in the batch reads as unconfined, so a call
 // before a confined command that a bare ask rule names is held for it,
-// and [Engine.Release] with no answers releases it. The first reading
-// of a sibling is kept for the batch, so a call decided twice is
-// decided the same way.
+// and [Engine.Release] with no answers releases it.
+//
+// The lookup must resolve a name to the tool the loop runs for it; a
+// sibling read as confined through a tool the loop does not run is
+// read as not asking until its own call is decided.
 func WithTools(lookup func(name string) (agenttool.Tool, bool)) Option {
 	return func(e *Engine) { e.lookup = lookup }
 }
@@ -596,13 +598,15 @@ func (e *Engine) decide(a active, name string, c confinement, args json.RawMessa
 	return e.fold(a, name, c, subjects)
 }
 
-// batchCache is whether each call of one batch asks, kept for the rest
-// of that batch's decisions. key names the batch and the rules it was
-// decided under, so a batch is never read against another's calls or
-// against a policy that has changed since.
+// batchCache is whether each call of one batch asks, by its position
+// in the batch, kept for the rest of that batch's decisions. key names
+// the batch, its run and turn, every call's ID, name and arguments,
+// and the rules it was decided under, so a batch is never read against
+// another's calls, even one whose provider numbers its calls the same
+// way, or against a policy that has changed since.
 type batchCache struct {
 	key  string
-	asks map[string]bool
+	asks map[int]bool
 }
 
 // batchAsks reports whether a call the policy allowed is held: whether
@@ -615,18 +619,23 @@ type batchCache struct {
 // deciding the whole batch per call ran the product's splitter once
 // per pair, ninety times over on a batch of ten. A call the hook has
 // been handed is kept as it was decided, with its own tool; a sibling
-// it has not is decided with the tool [WithTools] names, or none.
+// it has not is decided with the tool [WithTools] names, or none. A
+// reading only ever moves toward asking: a call whose own decision
+// asks is kept as asking whatever it was first read as, and one first
+// read as asking stays so, so a call decided twice is held at least as
+// often as the first time and never runs beside an ask.
 func (e *Engine) batchAsks(ctx context.Context, a active, info agentturn.ToolCallInfo, own agentturn.ToolAction) bool {
 	if len(info.Batch) < 2 || info.Call == nil {
 		return false
 	}
-	key := batchKey(info.Batch, a.gen)
+	self := position(info)
+	key := batchKey(info, a.gen)
 	e.mu.Lock()
 	if e.batch.key != key {
-		e.batch = batchCache{key: key, asks: make(map[string]bool, len(info.Batch))}
+		e.batch = batchCache{key: key, asks: make(map[int]bool, len(info.Batch))}
 	}
-	if _, ok := e.batch.asks[info.Call.CallID]; !ok {
-		e.batch.asks[info.Call.CallID] = own == agentturn.Defer
+	if self >= 0 {
+		e.batch.asks[self] = e.batch.asks[self] || own == agentturn.Defer
 	}
 	if own != agentturn.Allow {
 		e.mu.Unlock()
@@ -635,32 +644,40 @@ func (e *Engine) batchAsks(ctx context.Context, a active, info agentturn.ToolCal
 	known := maps.Clone(e.batch.asks)
 	e.mu.Unlock()
 
-	asks, decided := false, map[string]bool{}
-	for _, c := range info.Batch {
-		if c == nil || c.CallID == info.Call.CallID {
+	asks, decided := false, map[int]bool{}
+	for i, c := range info.Batch {
+		if c == nil || i == self {
 			continue
 		}
-		ask, ok := known[c.CallID]
+		ask, ok := known[i]
 		if !ok {
 			args := callArgs(c)
 			action, _, _, _ := e.decide(a, c.Name, e.confinement(ctx, e.sibling(c.Name), args), args)
 			ask = action == agentturn.Defer
-			decided[c.CallID] = ask
+			decided[i] = ask
 		}
 		asks = asks || ask
 	}
 	if len(decided) > 0 {
 		e.mu.Lock()
 		if e.batch.key == key {
-			for id, ask := range decided {
-				if _, ok := e.batch.asks[id]; !ok {
-					e.batch.asks[id] = ask
-				}
+			for i, ask := range decided {
+				e.batch.asks[i] = e.batch.asks[i] || ask
 			}
 		}
 		e.mu.Unlock()
 	}
 	return asks
+}
+
+// position returns the index of info's own call in its batch: Index
+// when it names the call, else the call found by identity, else -1, in
+// which case every call of the batch is read as a sibling.
+func position(info agentturn.ToolCallInfo) int {
+	if i := info.Index; i >= 0 && i < len(info.Batch) && info.Batch[i] == info.Call {
+		return i
+	}
+	return slices.Index(info.Batch, info.Call)
 }
 
 // sibling returns the tool [WithTools] names, or nil.
@@ -675,14 +692,21 @@ func (e *Engine) sibling(name string) agenttool.Tool {
 	return t
 }
 
-// batchKey names a batch by its calls and the rules of the moment.
-func batchKey(batch []*openresponses.FunctionCall, gen uint64) string {
+// batchKey names a batch by its run, its turn, its calls and the rules
+// of the moment.
+func batchKey(info agentturn.ToolCallInfo, gen uint64) string {
 	var b strings.Builder
 	b.WriteString(strconv.FormatUint(gen, 10))
-	for _, c := range batch {
+	b.WriteByte(0)
+	b.WriteString(info.RunID)
+	b.WriteByte(0)
+	b.WriteString(strconv.Itoa(info.Turn))
+	for _, c := range info.Batch {
 		b.WriteByte(0)
 		if c != nil {
-			b.WriteString(c.CallID)
+			b.WriteString(strconv.Quote(c.CallID))
+			b.WriteString(strconv.Quote(c.Name))
+			b.WriteString(strconv.Quote(c.Arguments))
 		}
 	}
 	return b.String()

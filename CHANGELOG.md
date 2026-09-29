@@ -36,10 +36,20 @@ versions may break the API.
   confinement too, so a confined `ls` beside a `read` the policy
   allows holds nothing: a sibling the hook has already been handed is
   read with its own tool, and `WithTools(set.Lookup)` names the tools
-  of the ones it has not, which otherwise read as unconfined. Each call
-  of a batch is still decided once for the batch, and the first
-  reading is kept, so a call decided twice is decided the same way. The
-  presets' docs say what a confined call does under them. (#25, #32)
+  of the ones it has not, which otherwise read as unconfined. A tool
+  that says a call is confined and names nothing gives `confined, so
+  bash does not ask`. The presets' docs say what a confined call does
+  under them. (#25, #32)
+- The batch hold keeps one reading per call of the batch, by its
+  position, under a key naming the run, the turn and every call's ID,
+  name and arguments, and a reading only moves toward asking. The
+  count it kept before was keyed by the call IDs alone, so a provider
+  that numbers its calls by position, `call_0` every turn, or another
+  run on the same engine with the same IDs, could reuse a batch with no
+  ask and run a call beside one that asked; a call whose ID was empty
+  or repeated in its batch was read as its own sibling. Each call of a
+  batch is still decided at most twice. `Release` answers a held call
+  that `end.Pending` lists twice once.
 - A grant set's bare deny takes the tool out of the offer.
   `Engine.Removes` and `Engine.Filter`, and `ToolProvider` over them,
   read the deny rules a decision reads, the policy's and every active
@@ -81,7 +91,8 @@ versions may break the API.
   characters, `git log * main` and `* --version` match as documented,
   the space is part of the pattern so `ls *` does not match `lsof`
   while `ls*` does, and a trailing `:*` is a wildcard at a word
-  boundary, so `ls:*` does not match `lsof`. Its test is the
+  boundary, a space, so `ls:*` does not match `lsof`; `:*` alone
+  matches everything. Its test is the
   reference's table, on which `PrefixMatcher` still diverges in four
   rows; `PrefixMatcher` is unchanged and its doc says a settings file
   copied from the reference needs `GlobMatcher`. The path matcher's

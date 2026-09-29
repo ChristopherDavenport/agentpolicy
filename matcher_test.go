@@ -56,6 +56,8 @@ func TestGlobMatcher(t *testing.T) {
 		{"git * main:*", `{"command":"git push origin main --force"}`, true},
 		{"git * main:*", `{"command":"git push origin mainline"}`, false},
 		{"*", `{"command":""}`, true},
+		{":*", `{"command":"anything at all"}`, true},
+		{"ls:*", `{"command":"ls\t-la"}`, false},
 		{"ls *", `{"command":"ls"}`, false},
 		{"ls *", `{"command":"ls -la"}`, true},
 		{"*.env", `{"command":"cat .env"}`, true},

@@ -263,6 +263,13 @@ func TestRelease(t *testing.T) {
 		t.Errorf("runs after the release = %v", runs)
 	}
 
+	// A held call listed twice is answered and journalled once.
+	e, j, end = setup(t)
+	end.Pending = append(end.Pending, end.Pending[0])
+	if got := released(ctx, t, e, end, agentturn.Approve("call_c")); len(got) != 3 || len(j.all()) != 2 {
+		t.Errorf("a duplicate held call = %s, %d verdicts", dump(got), len(j.all()))
+	}
+
 	// A pending call the engine never deferred is named too, and a nil
 	// end returns the answers as they are.
 	e, _, end = setup(t)
@@ -413,5 +420,58 @@ func TestBatchIsDecidedOnce(t *testing.T) {
 		if d.Action != agentturn.Defer {
 			t.Errorf("held[%d] = %+v", i, d)
 		}
+	}
+}
+
+// The batch cache never carries a reading across batches or between
+// calls that share an ID: a provider that numbers its calls by position
+// reuses call_0 every turn, and nothing validates that IDs are unique
+// or set.
+func TestBatchCacheIsTheBatchs(t *testing.T) {
+	ctx := context.Background()
+	mk := func(runID string, turn int, ids []string, names ...string) []agentturn.ToolCallInfo {
+		calls := make([]*openresponses.FunctionCall, len(names))
+		for i, n := range names {
+			calls[i] = &openresponses.FunctionCall{CallID: ids[i], Name: n, Arguments: "{}"}
+		}
+		infos := make([]agentturn.ToolCallInfo, len(calls))
+		for i, c := range calls {
+			infos[i] = agentturn.ToolCallInfo{RunID: runID, Turn: turn, Call: c, Args: json.RawMessage("{}"), Batch: calls, Index: i}
+		}
+		return infos
+	}
+	tests := []struct {
+		name    string
+		batches [][]agentturn.ToolCallInfo
+	}{
+		{name: "positional IDs in the next turn", batches: [][]agentturn.ToolCallInfo{
+			mk("run_1", 1, []string{"call_0", "call_1"}, "bash", "read"),
+			mk("run_1", 2, []string{"call_0", "call_1"}, "read", "bash"),
+		}},
+		{name: "positional IDs in another run", batches: [][]agentturn.ToolCallInfo{
+			mk("run_1", 1, []string{"call_0", "call_1"}, "bash", "read"),
+			mk("run_2", 1, []string{"call_0", "call_1"}, "read", "bash"),
+		}},
+		{name: "empty IDs", batches: [][]agentturn.ToolCallInfo{
+			mk("run_1", 1, []string{"", ""}, "read", "bash"),
+		}},
+		{name: "duplicate IDs", batches: [][]agentturn.ToolCallInfo{
+			mk("run_1", 1, []string{"x", "x"}, "read", "bash"),
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			e, err := Build(Policy{Allow: rules(t, "read"), Ask: rules(t, "bash"), Default: Allow()}, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, infos := range tt.batches {
+				for _, info := range infos {
+					if d, _ := e.Decide(ctx, info); d.Action != agentturn.Defer {
+						t.Errorf("turn %d %s %s: %+v, want it held or asked", info.Turn, info.Call.CallID, info.Call.Name, d)
+					}
+				}
+			}
+		})
 	}
 }

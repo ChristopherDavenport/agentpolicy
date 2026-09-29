@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/ChristopherDavenport/agentturn"
@@ -141,6 +142,10 @@ func (e *Engine) Release(ctx context.Context, end *agentturn.RunEnd, answers ...
 			out = append(out, answers[i])
 			placed[id] = true
 			answered = append(answered, id)
+			continue
+		}
+		if slices.Contains(answered, id) {
+			// A call listed twice is answered once.
 			continue
 		}
 		d, ok := e.held(end.RunID, id)
