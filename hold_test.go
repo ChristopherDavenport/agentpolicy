@@ -475,3 +475,140 @@ func TestBatchCacheIsTheBatchs(t *testing.T) {
 		})
 	}
 }
+
+// A hook given to WithHooks is inside the batch hold: its ask holds the
+// siblings, before and after it, and its block of a call the policy
+// asked about leaves nothing held.
+func TestHooksAreInsideTheHold(t *testing.T) {
+	ctx := context.Background()
+	policy := Policy{
+		Allow:   rules(t, "bash(git:*)"),
+		Ask:     rules(t, "bash(npm install:*)"),
+		Default: Allow(),
+	}
+	command := func(info agentturn.ToolCallInfo) string {
+		var a struct{ Command string }
+		_ = json.Unmarshal(info.Args, &a)
+		return a.Command
+	}
+	meter := func(_ context.Context, info agentturn.ToolCallInfo) (*agentturn.ToolDecision, error) {
+		if strings.HasPrefix(command(info), "curl") {
+			return &agentturn.ToolDecision{Action: agentturn.Defer, Reason: "fetches are metered"}, nil
+		}
+		return nil, nil
+	}
+	noInstalls := func(_ context.Context, info agentturn.ToolCallInfo) (*agentturn.ToolDecision, error) {
+		if strings.HasPrefix(command(info), "npm install") {
+			return &agentturn.ToolDecision{Action: agentturn.Block, Reason: "installs are blocked", By: ByHuman}, nil
+		}
+		return nil, nil
+	}
+	short := func(_ context.Context, info agentturn.ToolCallInfo) (*agentturn.ToolDecision, error) {
+		if command(info) == "git status" {
+			return &agentturn.ToolDecision{Args: json.RawMessage(`{"command":"git status --short"}`), Note: "short form"}, nil
+		}
+		return nil, nil
+	}
+	type want struct {
+		action agentturn.ToolAction
+		held   bool
+		reason string
+		by     string
+	}
+	tests := []struct {
+		name     string
+		commands []string
+		want     []want
+		// runs is how many runs the engine holds deferred calls for
+		// once the batch is decided.
+		runs int
+	}{
+		{name: "a hook's ask holds the call before it", commands: []string{"git add -A", "curl example.com"}, runs: 1, want: []want{
+			{agentturn.Defer, true, "held for approval: allowed by bash(git:*)", ByPolicy},
+			{agentturn.Defer, false, "fetches are metered", ByPolicy},
+		}},
+		{name: "a hook's ask holds the call after it", commands: []string{"curl example.com", "git add -A"}, runs: 1, want: []want{
+			{agentturn.Defer, false, "fetches are metered", ByPolicy},
+			{agentturn.Defer, true, "held for approval: allowed by bash(git:*)", ByPolicy},
+		}},
+		{name: "a hook's block of the engine's ask holds nothing", commands: []string{"git add -A", "npm install left-pad"}, runs: 0, want: []want{
+			{agentturn.Allow, false, "allowed by bash(git:*)", ByPolicy},
+			{agentturn.Block, false, "installs are blocked", ByHuman},
+		}},
+		{name: "a hook that allows changes nothing", commands: []string{"git add -A", "ls"}, runs: 0, want: []want{
+			{agentturn.Allow, false, "allowed by bash(git:*)", ByPolicy},
+			{agentturn.Allow, false, "allowed by default", ByPolicy},
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			j := &journal{}
+			e, err := Build(policy, testMatchers, WithObserver(j.observe), WithHooks(nil, meter), WithHooks(noInstalls))
+			if err != nil {
+				t.Fatal(err)
+			}
+			for i, info := range batch("r", tt.commands...) {
+				d, err := e.Decide(ctx, info)
+				if err != nil {
+					t.Fatal(err)
+				}
+				w := tt.want[i]
+				v := j.all()[i]
+				if d.Action != w.action || d.Reason != w.reason || d.By != w.by || v.Held != w.held || v.Reason != w.reason {
+					t.Errorf("%s: decision %+v, verdict held=%v %q; want %v held=%v %q by %q", tt.commands[i], d, v.Held, v.Reason, w.action, w.held, w.reason, w.by)
+				}
+			}
+			if got := len(e.Runs()); got != tt.runs {
+				t.Errorf("engine holds %d run(s), want %d", got, tt.runs)
+			}
+		})
+	}
+
+	// A held call is released with the arguments and the note a hook
+	// gave it.
+	e, err := Build(policy, testMatchers, WithHooks(meter, short))
+	if err != nil {
+		t.Fatal(err)
+	}
+	infos := batch("r", "git status", "curl example.com")
+	var decisions []*agentturn.ToolDecision
+	for _, info := range infos {
+		d, err := e.Decide(ctx, info)
+		if err != nil {
+			t.Fatal(err)
+		}
+		decisions = append(decisions, d)
+	}
+	if d := decisions[0]; d.Action != agentturn.Defer || string(d.Args) != `{"command":"git status --short"}` || d.Note != "short form" {
+		t.Errorf("git status: %+v", d)
+	}
+	end := pendingEnd("r", infos[0].Call, infos[1].Call)
+	no := agentturn.Output(openresponses.NewFunctionCallOutput("call_b", "no"))
+	wantAnswers := []agentturn.Answer{
+		agentturn.ApproveWith("call_a", json.RawMessage(`{"command":"git status --short"}`)).WithNote("short form").WithBy(ByPolicy),
+		no,
+	}
+	if got := released(ctx, t, e, end, no); !reflect.DeepEqual(got, wantAnswers) {
+		t.Errorf("released %s\nwant %s", dump(got), dump(wantAnswers))
+	}
+
+	// A hook's error fails its own call's decision, and holds the
+	// siblings that read it.
+	failing := func(_ context.Context, info agentturn.ToolCallInfo) (*agentturn.ToolDecision, error) {
+		if strings.HasPrefix(command(info), "curl") {
+			return nil, errors.New("meter unavailable")
+		}
+		return nil, nil
+	}
+	e, err = Build(policy, testMatchers, WithHooks(failing))
+	if err != nil {
+		t.Fatal(err)
+	}
+	infos = batch("r", "git add -A", "curl example.com")
+	if d, err := e.Decide(ctx, infos[0]); err != nil || d.Action != agentturn.Defer || d.Reason != "held for approval: allowed by bash(git:*)" {
+		t.Errorf("sibling of a failing hook: %+v, %v", d, err)
+	}
+	if _, err := e.Decide(ctx, infos[1]); err == nil || err.Error() != "meter unavailable" {
+		t.Errorf("failing hook: err = %v", err)
+	}
+}

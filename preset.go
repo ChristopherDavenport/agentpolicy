@@ -28,6 +28,14 @@ type Tools struct {
 // runs confined, and a tool the split does not name asks. The
 // reference also confines the run to a read-only sandbox, which is the
 // product's to arrange.
+//
+// Confinement is one bit: a tool says a call is confined and what
+// confines it, not what that sandbox permits. Under a sandbox that
+// permits writes, workspace-write, Suggest therefore allows every
+// confined command AutoEdit allows, "rm -rf src" included. A product
+// whose sandbox permits writes passes WithConfinement(nil) with
+// Suggest, or a reading that answers confined only for a read-only
+// sandbox, so its commands ask.
 func Suggest(t Tools) Policy {
 	return Policy{
 		Allow:   bare(t.Read),
@@ -39,7 +47,8 @@ func Suggest(t Tools) Policy {
 // AutoEdit approximates Codex's middle mode: reads and edits run,
 // commands ask unless their tool says they run confined, and a tool
 // the split does not name asks. The reference confines the edits to
-// the workspace, which is the product's to arrange.
+// the workspace, which is the product's to arrange. A confined command
+// is allowed whatever its sandbox permits; see [Suggest].
 func AutoEdit(t Tools) Policy {
 	return Policy{
 		Allow:   bare(t.Read, t.Edit),

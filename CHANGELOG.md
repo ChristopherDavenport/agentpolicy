@@ -5,6 +5,57 @@ All user-visible changes to this library. The format follows
 uses [Semantic Versioning](https://semver.org/); before v1.0.0 minor
 versions may break the API.
 
+## Unreleased
+
+- `WithHooks` folds a product's own before-tool-call hooks into the
+  engine's decision before the batch hold, strictest first, as
+  `agentturn.ChainBeforeToolCall` folds them. A hook that defers a call
+  now holds its siblings, where a hook chained after the engine let
+  them run before anyone answered, and a hook that blocks a call the
+  policy asked about leaves nothing held and nothing remembered, where
+  it stranded the siblings on a question nobody was asked. A hook that
+  makes the action stricter brings its reason and its decider; its
+  note, `Terminate` and rewritten arguments reach the decision, and
+  `Release` approves a held call with the arguments and the note a
+  hook gave it. The engine calls a hook for a sibling of the call being
+  decided, before the loop hands it that sibling's own call, so a hook
+  must decide a call the same way each time; one that fails for a
+  sibling reads as asking. `Decide`'s doc says a chained hook is
+  outside the hold. (#38)
+- `Engine.Answers` asks a cut-off call's tool whether it may run again.
+  A call an abort cut off, or one found unanswered in a seeded
+  transcript, whose tool says `agenttool.ReplaySafe` is approved and
+  runs again, with a `run again: replay safe` verdict by the policy,
+  where every such call was refused. The tool is the pending call's, or
+  the one `WithTools` names for a call from a seeded transcript. A tool
+  that says `ReplayKeyed` is still refused, since it is safe to run
+  again only with its first run's idempotency key and agentturn does
+  not carry one into a second run yet. `WithNeverStarted` tells
+  `Answers` which calls the session's record shows never started, and
+  those are refused with `The call was cut off before it started; it
+  did not run.` and a `not run: the call never started` verdict, where
+  the model read that the call may have run. (#36)
+- The reason of a block on a call its `Subjects` split into several
+  subjects names the subject it was for and says the call did not run:
+  `denied by bash(rm:*) on "rm -rf scratch-old"; the call did not run`,
+  where it was `denied by bash(rm:*)` and a model reported the other
+  half as having succeeded. A call with one subject reads as before.
+  (#37)
+- A reviewer's refusal whose `Review.By` is `ByPolicy` reads to the
+  model as `Denied by policy: ...`, where every refusal read `Denied
+  by reviewer`. (#37)
+- `Rule.Note` from a named source the user has not trusted is left out
+  of the reason, which is what the model reads for a refused call: an
+  untrusted repository's deny rule reads `denied by bash(curl:*)`
+  whatever its note says, where the note was repeated to the model in
+  the harness's voice. The note stays on `Verdict.Rule`. A rule the
+  product built itself, with the zero `Source`, keeps its note in the
+  reason. (#39)
+- `Suggest` and `AutoEdit` say that confinement is one bit: under a
+  sandbox that permits writes, `Suggest` allows every confined command
+  `AutoEdit` does, and a product whose sandbox permits writes passes
+  `WithConfinement(nil)` with `Suggest`. (#40)
+
 ## v0.0.6 - 2026-09-28
 
 - **Breaking**: `WithObserver` adds an observer rather than replacing

@@ -39,7 +39,11 @@ A rule with a specifier for a tool without a matcher does not build.
 A rule may say why it exists. `Rule.Note` is not part of the grammar;
 a product's settings parser fills it from a comment or a field beside
 the rule, and it follows the rule in the reason the model reads:
-`denied by bash(curl:*): outbound network is proxied; use fetch`.
+`denied by bash(curl:*): outbound network is proxied; use fetch`. A
+note from a named source the user has not trusted is left out of the
+reason, since the model would read a repository's text in the
+harness's voice; it stays on `Verdict.Rule` for the record and the
+front.
 
 A rule's tool name may be a glob, `mcp__*`, which the deny and ask
 lists honour: a `*` stands for any run of characters, and nothing
@@ -126,6 +130,21 @@ refusal. A pending call neither the front nor the engine answers is
 `ErrUnanswered`, which names it, rather than a `Resume` that fails
 with nothing to say.
 
+A product's own before-tool-call hooks go to `WithHooks`, which folds
+their decisions into the engine's before the hold, strictest first: a
+hook that asks holds the batch as a rule does, and a hook that blocks
+a call the policy asked about leaves nothing held for it. A hook
+chained after `Decide` with `agentturn.ChainBeforeToolCall` is outside
+the hold, so the siblings of a call it defers run before anyone
+answers. The engine reads a call's siblings to decide the hold, so a
+hook is also called for a sibling before the loop hands it that
+sibling's own call, and must decide a call the same way each time.
+
+```go
+eng, err := agentpolicy.Build(policy, matchers,
+	agentpolicy.WithHooks(meterFetches))
+```
+
 One engine serves every agent: what it defers is remembered under the
 call's own run, so a sub-agent deciding a call while the user reads a
 question costs the main agent nothing. `Release` and `Answers` forget
@@ -135,7 +154,9 @@ abandoned run left behind.
 When a tool's `Subjects` splits a call, a shell command into its
 subcommands say, every subject is decided and the verdicts fold: the
 call is denied if any subject is, asked about if any is, and allowed
-only when every subject is. `git status && rm -rf /` is denied. A
+only when every subject is. `git status && rm -rf /` is denied, and
+the model reads `denied by bash(rm:*) on "rm -rf /"; the call did not
+run`, so it does not report the other half as having run. A
 subject may name another tool, so a redirect target is checked against
 the file tool's rules. The splitter is the product's; there is no
 shell parser here. `Verdict.Subject` is the text of the subject the
@@ -161,6 +182,13 @@ decided:
 eng, err := agentpolicy.Build(agentpolicy.AutoEdit(split), matchers,
 	agentpolicy.WithTools(tools.Lookup))
 ```
+
+Confinement is one bit: a tool says a call is confined, not what its
+sandbox permits. Under a sandbox that permits writes, `Suggest` allows
+every confined command `AutoEdit` does, `rm -rf src` included, so a
+product whose sandbox permits writes passes `WithConfinement(nil)` with
+`Suggest`, or a reading that answers confined only for a read-only
+sandbox.
 
 ## Where rules come from
 
@@ -271,9 +299,15 @@ reviewer's `Note` after the result when it gives one; the calls held
 behind it are released with it. A refusal, a timeout and a failed
 review each answer with a refusal the model reads, so nothing runs
 that was not approved, and the refusal tells the model not to pursue
-the same outcome by another route. A call an abort cut off is not the
-reviewer's to approve, since its tool may have run: it is refused with
-text that says so. After three consecutive refusals, or ten within the
+the same outcome by another route; a reviewer that sets `By:
+ByPolicy` is read to the model as `Denied by policy`. A call an abort
+cut off is not the reviewer's to approve, since its tool may have run.
+It runs again when its tool says a second run is safe,
+`agenttool.ReplaySafe`; it is refused as never run when the session
+says it never started, through `WithNeverStarted`; and otherwise it is
+refused with text that says it may have run. A tool that says
+`ReplayKeyed` is refused too until the loop carries the first run's
+idempotency key into the second. After three consecutive refusals, or ten within the
 last fifty reviews, the refusals are built with `agentturn.Refuse`, so
 resuming with them appends the outputs and ends the run without a
 model call, and `ErrDenialBound` tells the front why.

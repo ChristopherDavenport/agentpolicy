@@ -6,6 +6,7 @@ import (
 	"errors"
 	"strings"
 
+	"github.com/ChristopherDavenport/agenttool"
 	"github.com/ChristopherDavenport/agentturn"
 	"github.com/ChristopherDavenport/openresponses"
 )
@@ -99,6 +100,17 @@ func WithDenialBound(b DenialBound) Option {
 	return func(e *Engine) { e.bound = b }
 }
 
+// WithNeverStarted tells [Engine.Answers] which cut-off calls the
+// session's record says never started: no dispatch and no output, in
+// a file that records dispatches, agentsession's CallNeverStarted. The
+// loop reports such a call from a seeded transcript as unknown, and
+// without this Answers tells the model it may have run. fn is called
+// with the run and the call and reports true only for a call the
+// record shows never started.
+func WithNeverStarted(fn func(ctx context.Context, runID, callID string) bool) Option {
+	return func(e *Engine) { e.neverStarted = fn }
+}
+
 // ErrDenialBound is returned by [Engine.Answers], with the answers,
 // when the [DenialBound] was reached.
 var ErrDenialBound = errors.New("agentpolicy: reviewer denial bound reached")
@@ -116,16 +128,22 @@ const (
 	reviewerTimedOutText = "The reviewer did not answer in time; the call did not run."
 	reviewerFailedText   = "The reviewer could not evaluate the call; the call did not run."
 	cutOffText           = "The call was cut off before it finished and may have run; it was not run again."
+	neverStartedText     = "The call was cut off before it started; it did not run."
 	noWorkaroundText     = "Do not pursue the same outcome through a workaround, indirect execution or policy circumvention."
 )
 
-// refusalText is what the model reads for a refusal.
-func refusalText(reason string) string {
+// refusalText is what the model reads for a refusal: denied by policy
+// when the reviewer says a rule answered, by reviewer otherwise.
+func refusalText(reason, by string) string {
+	who := "reviewer"
+	if by == ByPolicy {
+		who = "policy"
+	}
 	reason = strings.TrimSuffix(strings.TrimSpace(reason), ".")
 	if reason == "" {
-		return "Denied by reviewer. " + noWorkaroundText
+		return "Denied by " + who + ". " + noWorkaroundText
 	}
-	return "Denied by reviewer: " + reason + ". " + noWorkaroundText
+	return "Denied by " + who + ": " + reason + ". " + noWorkaroundText
 }
 
 // Answers reviews the calls end left pending and returns one Answer
@@ -149,11 +167,18 @@ func refusalText(reason string) string {
 // alone and a verdict whose Action is Defer and whose Reason is empty.
 // A call the engine held for an ask is not reviewed: the policy
 // allowed it, and [Engine.Release] answers it from the asked calls'
-// answers. A call an abort cut off or one found
-// unanswered in a seeded transcript, whose tool may have run, is not
-// reviewed either: it is answered with a refusal that says so, and
-// does not count toward the bound, so the model decides whether to
-// ask for it again.
+// answers. A call an abort cut off or one found unanswered in a seeded
+// transcript, whose tool may have run, is not reviewed either, and
+// does not count toward the bound. When its tool says a second run is
+// safe, agenttool.ReplaySafe, it is approved and runs again; the tool
+// is the pending call's, or the one [WithTools] names for a call from
+// a seeded transcript. When the record says it never started, through
+// [WithNeverStarted], it is answered with a refusal that says it did
+// not run. Otherwise it is answered with a refusal that says it may
+// have run, so the model decides whether to ask for it again. A tool
+// that says agenttool.ReplayKeyed is refused as one that may have run:
+// it is safe to run again only with the idempotency key its first run
+// carried, and the loop does not yet carry that key into a second run.
 //
 // When the [DenialBound] is reached, every refusal among the answers
 // is built with agentturn.Refuse, so Resume appends the outputs and
@@ -180,8 +205,9 @@ func (e *Engine) Answers(ctx context.Context, r Reviewer, end *agentturn.RunEnd)
 			continue
 		}
 		if p.Reason == agentturn.PendingAborted || p.Reason == agentturn.PendingUnknown {
-			answers = append(answers, agentturn.Output(openresponses.NewFunctionCallOutput(call.CallID, cutOffText)).WithBy(ByPolicy))
-			e.observe(ctx, Verdict{RunID: end.RunID, CallID: call.CallID, Tool: call.Name, Action: agentturn.Block, Reason: "not reviewed: " + string(p.Reason), By: ByPolicy})
+			ans, v := e.cutOff(ctx, end.RunID, p)
+			answers = append(answers, ans)
+			e.observe(ctx, v)
 			continue
 		}
 		info, v := e.recall(end.RunID, call)
@@ -214,6 +240,29 @@ func (e *Engine) Answers(ctx context.Context, r Reviewer, end *agentturn.RunEnd)
 		return answers, ErrDenialBound
 	}
 	return answers, err
+}
+
+// cutOff answers a call an abort cut off or a seeded transcript left
+// unanswered, without a reviewer: refused as never run when the record
+// says it never started, run again when its tool says a second run is
+// safe, and refused as one that may have run otherwise.
+func (e *Engine) cutOff(ctx context.Context, runID string, p agentturn.PendingCall) (agentturn.Answer, Verdict) {
+	call := p.Call
+	v := Verdict{RunID: runID, CallID: call.CallID, Tool: call.Name, Action: agentturn.Block, By: ByPolicy}
+	if e.neverStarted != nil && e.neverStarted(ctx, runID, call.CallID) {
+		v.Reason = "not run: the call never started"
+		return agentturn.Output(openresponses.NewFunctionCallOutput(call.CallID, neverStartedText)).WithBy(ByPolicy), v
+	}
+	tool := p.Tool
+	if tool == nil {
+		tool = e.sibling(call.Name)
+	}
+	if tool != nil && agenttool.ReplayOf(ctx, tool, callArgs(call)) == agenttool.ReplaySafe {
+		v.Action, v.Reason = agentturn.Allow, "run again: replay "+agenttool.ReplaySafe.String()
+		return agentturn.Approve(call.CallID).WithBy(ByPolicy), v
+	}
+	v.Reason = "not reviewed: " + string(p.Reason)
+	return agentturn.Output(openresponses.NewFunctionCallOutput(call.CallID, cutOffText)).WithBy(ByPolicy), v
 }
 
 // recall returns what the engine remembers of a deferred call of the
@@ -253,7 +302,7 @@ func answer(call *openresponses.FunctionCall, info agentturn.ToolCallInfo, rev R
 		return refuse(reviewerTimedOutText).WithBy(ByPolicy), v
 	}
 	v.Reason = withReason("denied by reviewer", rev.Reason)
-	return refuse(refusalText(rev.Reason)).WithNote(rev.Note).WithBy(v.By), v
+	return refuse(refusalText(rev.Reason, v.By)).WithNote(rev.Note).WithBy(v.By), v
 }
 
 // by names who a review came from: the reviewer's own word, or the

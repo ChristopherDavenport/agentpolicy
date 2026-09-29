@@ -4,10 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
 
+	"github.com/ChristopherDavenport/agenttool"
 	"github.com/ChristopherDavenport/agentturn"
 	"github.com/ChristopherDavenport/openresponses"
 )
@@ -421,5 +423,117 @@ func TestAnswersReleasesHeldCalls(t *testing.T) {
 	}
 	if !errors.Is(err, ErrDenialBound) || !reflect.DeepEqual(answers, want) || strings.Join(reviewedIDs, ",") != "call_b" {
 		t.Errorf("refused: %s, %v, reviewed %v", dump(answers), err, reviewedIDs)
+	}
+}
+
+// A cut-off call runs again when its tool says a second run is safe,
+// and is refused as never run when the record says it never started.
+// The rest are refused as calls that may have run.
+func TestAnswersCutOffCallsReadTheirTools(t *testing.T) {
+	ctx := context.Background()
+	replays := func(name string, r agenttool.Replay) agenttool.Tool {
+		run := func(context.Context, agenttool.NoArgs) (string, error) { return "", nil }
+		return agenttool.New(name, "A tool", run, agenttool.WithReplay(func(context.Context, json.RawMessage) agenttool.Replay { return r }))
+	}
+	tools := map[string]agenttool.Tool{
+		"read":   replays("read", agenttool.ReplaySafe),
+		"remind": replays("remind", agenttool.ReplayKeyed),
+		"bash":   replays("bash", agenttool.ReplayUnknown),
+	}
+	lookup := func(name string) (agenttool.Tool, bool) {
+		tool, ok := tools[name]
+		return tool, ok
+	}
+	fc := func(id, name string) *openresponses.FunctionCall {
+		return &openresponses.FunctionCall{CallID: id, Name: name, Arguments: `{}`}
+	}
+	never := func(_ context.Context, runID, callID string) bool {
+		return runID == "r" && strings.HasPrefix(callID, "never")
+	}
+	j := &journal{}
+	e, err := Build(Policy{Default: Ask()}, nil, WithObserver(j.observe), WithTools(lookup), WithNeverStarted(never))
+	if err != nil {
+		t.Fatal(err)
+	}
+	end := &agentturn.RunEnd{RunID: "r", Reason: agentturn.ReasonAborted, Pending: []agentturn.PendingCall{
+		// The tool the run resolved the call to.
+		{Call: fc("safe", "read"), Reason: agentturn.PendingAborted, Tool: tools["read"]},
+		// A keyed tool is safe to run again only with its first key,
+		// which the loop does not carry into a second run.
+		{Call: fc("keyed", "remind"), Reason: agentturn.PendingAborted, Tool: tools["remind"]},
+		{Call: fc("unknown", "bash"), Reason: agentturn.PendingAborted, Tool: tools["bash"]},
+		// A call from a seeded transcript names no tool; WithTools does.
+		{Call: fc("seeded", "read"), Reason: agentturn.PendingUnknown},
+		{Call: fc("unnamed", "fetch"), Reason: agentturn.PendingUnknown},
+		// The record wins over the tool: a call that never started did
+		// not run, whatever running it again would do.
+		{Call: fc("never", "read"), Reason: agentturn.PendingUnknown},
+	}}
+	reviewer := ReviewerFunc(func(context.Context, agentturn.ToolCallInfo, Verdict) (Review, error) {
+		t.Error("a cut-off call reached the reviewer")
+		return Review{}, nil
+	})
+	answers, err := e.Answers(ctx, reviewer, end)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const cut = "The call was cut off before it finished and may have run; it was not run again."
+	want := []agentturn.Answer{
+		agentturn.Approve("safe").WithBy(ByPolicy),
+		agentturn.Output(openresponses.NewFunctionCallOutput("keyed", cut)).WithBy(ByPolicy),
+		agentturn.Output(openresponses.NewFunctionCallOutput("unknown", cut)).WithBy(ByPolicy),
+		agentturn.Approve("seeded").WithBy(ByPolicy),
+		agentturn.Output(openresponses.NewFunctionCallOutput("unnamed", cut)).WithBy(ByPolicy),
+		agentturn.Output(openresponses.NewFunctionCallOutput("never", "The call was cut off before it started; it did not run.")).WithBy(ByPolicy),
+	}
+	if !reflect.DeepEqual(answers, want) {
+		t.Errorf("answers = %s\nwant %s", dump(answers), dump(want))
+	}
+	var got []string
+	for _, v := range j.all() {
+		got = append(got, fmt.Sprintf("%s %v %s", v.CallID, v.Action, v.Reason))
+	}
+	wantVerdicts := []string{
+		fmt.Sprintf("safe %v run again: replay safe", agentturn.Allow),
+		fmt.Sprintf("keyed %v not reviewed: aborted", agentturn.Block),
+		fmt.Sprintf("unknown %v not reviewed: aborted", agentturn.Block),
+		fmt.Sprintf("seeded %v run again: replay safe", agentturn.Allow),
+		fmt.Sprintf("unnamed %v not reviewed: unknown", agentturn.Block),
+		fmt.Sprintf("never %v not run: the call never started", agentturn.Block),
+	}
+	if !reflect.DeepEqual(got, wantVerdicts) {
+		t.Errorf("verdicts = %q\nwant %q", got, wantVerdicts)
+	}
+}
+
+// A reviewer that says a rule answered is read to the model as the
+// policy, not as a reviewer that looked at the call.
+func TestAnswersRefusalNamesWhoAnswered(t *testing.T) {
+	ctx := context.Background()
+	const tail = ". Do not pursue the same outcome through a workaround, indirect execution or policy circumvention."
+	for _, tt := range []struct {
+		by   string
+		text string
+	}{
+		{"", "Denied by reviewer: no pushes on Fridays" + tail},
+		{ByAgent, "Denied by reviewer: no pushes on Fridays" + tail},
+		{ByHuman, "Denied by reviewer: no pushes on Fridays" + tail},
+		{ByPolicy, "Denied by policy: no pushes on Fridays" + tail},
+	} {
+		e, err := Build(Policy{Default: Ask()}, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		reviewer := ReviewerFunc(func(context.Context, agentturn.ToolCallInfo, Verdict) (Review, error) {
+			return Review{Outcome: Refused, Reason: "no pushes on Fridays", By: tt.by}, nil
+		})
+		c := &openresponses.FunctionCall{CallID: "call_1", Name: "bash", Arguments: `{}`}
+		answers, err := e.Answers(ctx, reviewer, pendingEnd("r", c))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(answers) != 1 || answers[0].Output == nil || answers[0].Output.Output.Text != tt.text {
+			t.Errorf("by %q: answers = %s, want %q", tt.by, dump(answers), tt.text)
+		}
 	}
 }
