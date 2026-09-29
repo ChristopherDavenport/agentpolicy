@@ -11,10 +11,15 @@ import (
 // a silent non-match.
 type Matcher func(spec string, args json.RawMessage) bool
 
-// PrefixMatcher is the common case: the specifier is "<prefix>:*",
+// PrefixMatcher is the simplest case: the specifier is "<prefix>:*",
 // matched as a prefix of one string field of the arguments, or any
 // other value, matched exactly. A missing field, or one that is not a
 // string, matches nothing.
+//
+// It is not the reference's grammar: "ls:*" matches "lsof" here, and a
+// "*" anywhere but the end is literal, so "git log * main" matches
+// nothing. A settings file copied from the reference's documentation
+// needs [GlobMatcher].
 func PrefixMatcher(field string) Matcher {
 	return func(spec string, args json.RawMessage) bool {
 		val, ok := stringField(args, field)
@@ -25,6 +30,33 @@ func PrefixMatcher(field string) Matcher {
 			return strings.HasPrefix(val, prefix)
 		}
 		return val == spec
+	}
+}
+
+// GlobMatcher is the reference's pattern over one string field of the
+// arguments, the one a settings file copied from its documentation is
+// written in. A "*" stands for any run of characters, spaces included,
+// at any position: "git log * main" matches "git log --oneline main"
+// and "* --version" matches "node --version". The space is part of the
+// pattern, so "ls *" does not match "lsof" while "ls*" does. A trailing
+// ":*" is a wildcard at a word boundary: "ls:*" matches "ls" and
+// "ls -la" and not "lsof". A pattern with no wildcard matches the whole
+// value exactly. Nothing folds case. A missing field, or one that is
+// not a string, matches nothing.
+//
+// A pattern sees the one string it is given: a compound command is
+// split into its subcommands by the tool's [Subjects], which is what
+// keeps "git status:*" from allowing "git status && rm -rf /".
+func GlobMatcher(field string) Matcher {
+	return func(spec string, args json.RawMessage) bool {
+		val, ok := stringField(args, field)
+		if !ok {
+			return false
+		}
+		if prefix, ok := strings.CutSuffix(spec, ":*"); ok {
+			return globMatch(prefix, val) || globMatch(prefix+" *", val)
+		}
+		return globMatch(spec, val)
 	}
 }
 

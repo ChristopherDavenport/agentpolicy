@@ -76,6 +76,17 @@ versions may break the API.
   to, and `GrantOver` finds the ask rule behind a verdict by its tool,
   specifier and source, so a note does not make a rule a different
   one. (#28)
+- `GlobMatcher(field)` is the reference's pattern over one string
+  field, beside `PrefixMatcher`: a `*` anywhere stands for any run of
+  characters, `git log * main` and `* --version` match as documented,
+  the space is part of the pattern so `ls *` does not match `lsof`
+  while `ls*` does, and a trailing `:*` is a wildcard at a word
+  boundary, so `ls:*` does not match `lsof`. Its test is the
+  reference's table, on which `PrefixMatcher` still diverges in four
+  rows; `PrefixMatcher` is unchanged and its doc says a settings file
+  copied from the reference needs `GlobMatcher`. The path matcher's
+  source-relative anchor needs the rule's source on `Matcher`'s
+  signature, which is a separate change. (#29)
 
 ## v0.0.4 - 2026-09-28
 

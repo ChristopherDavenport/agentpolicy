@@ -27,8 +27,13 @@ rules, err := agentpolicy.ParseRules("read bash(git status:*) bash(npm test:*)")
 ```
 
 What a specifier means belongs to the tool. A product registers a
-matcher per tool that takes specifiers; `PrefixMatcher` covers the
-common case, `<prefix>:*` or an exact value over one string argument.
+matcher per tool that takes specifiers. `GlobMatcher` is the
+reference's pattern over one string argument, the one a settings file
+copied from its documentation needs: a `*` anywhere stands for any run
+of characters, so `git log * main` matches `git log --oneline main`,
+and a trailing `:*` is a wildcard at a word boundary, so `ls:*`
+matches `ls -la` and not `lsof`. `PrefixMatcher` is the simpler
+`<prefix>:*` or an exact value, and reads those patterns differently.
 A rule with a specifier for a tool without a matcher does not build.
 
 A rule may say why it exists. `Rule.Note` is not part of the grammar;
