@@ -215,10 +215,25 @@ func parseRule(tok string) (Rule, error) {
 	if open == 0 {
 		return Rule{}, fmt.Errorf("agentpolicy: rule %q: missing tool name", tok)
 	}
-	if !strings.HasSuffix(tok, ")") {
+	// The specifier runs to the parenthesis that closes the first one,
+	// which must end the token: "Bash(a)(b)" is not the specifier
+	// "a)(b". ParseRules has already refused a token whose parentheses
+	// do not balance, so that parenthesis exists.
+	end, depth := open, 0
+	for ; end < len(tok); end++ {
+		if tok[end] == '(' {
+			depth++
+		} else if tok[end] == ')' {
+			depth--
+			if depth == 0 {
+				break
+			}
+		}
+	}
+	if end != len(tok)-1 {
 		return Rule{}, fmt.Errorf("agentpolicy: rule %q: text after the specifier", tok)
 	}
-	spec := tok[open+1 : len(tok)-1]
+	spec := tok[open+1 : end]
 	switch spec {
 	case "":
 		return Rule{}, fmt.Errorf("agentpolicy: rule %q: empty specifier", tok)

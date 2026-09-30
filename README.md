@@ -381,6 +381,18 @@ agentpolicy.WithObserver(func(ctx context.Context, v agentpolicy.Verdict) {
 })
 ```
 
+## Specification
+
+[RFC 0001](docs/rfcs/0001-agent-policy.md) is the contract this module
+binds: the grammar and its errors, the reference matchers, the
+precedence as an algorithm, confinement, the batch hold, grants, the
+answers to a deferred call, the guard contract and the verdict's
+record. `testdata/policy/` is its conformance corpus, JSON a second
+implementation runs: the grammar, the matchers, and decisions over
+policies, sources, grants, subjects, confinement and a batch. A parser
+of `allowed-tools`, or a front that shows which rule will match a call,
+runs the same files.
+
 ## Development
 
 ```sh
