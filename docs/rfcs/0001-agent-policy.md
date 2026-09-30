@@ -699,8 +699,9 @@ A reviewer's answer becomes:
 
 The refusal text is `Denied by W: reason. ` or `Denied by W. ` with no
 reason, where `W` is `policy` when the reviewer names the policy as
-its decider and `reviewer` otherwise and a trailing full stop of the
-reason is not doubled, followed by `Do not pursue the same outcome
+its decider and `reviewer` otherwise, and the reason is trimmed of
+surrounding whitespace and then of one trailing full stop, so the stop
+is not doubled, followed by `Do not pursue the same outcome
 through a workaround, indirect execution or policy circumvention.`
 Every answer names its decider, and every answer is a verdict: allow
 for an approval, block otherwise.
