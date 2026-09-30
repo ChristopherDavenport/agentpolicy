@@ -5,6 +5,45 @@ All user-visible changes to this library. The format follows
 uses [Semantic Versioning](https://semver.org/); before v1.0.0 minor
 versions may break the API.
 
+## Unreleased
+
+- Requires `agenttool` v0.0.11, up from v0.0.10, and `agentturn`
+  v0.0.12, up from v0.0.11.
+- `Engine.Answers` decides a call it would run again under the policy
+  of the moment before it approves it, with its tool's confinement and
+  the `WithHooks` fold, as `Decide` does without the hold (#46). A call
+  a seeded transcript left may never have been decided, since it may
+  have been waiting on the user when the product stopped, and a
+  `ReplaySafe` tool was run again with no one asked and a
+  `run again: replay safe` verdict by the policy, whatever its ask or
+  deny rule said. Now a call the policy allows is approved with the
+  verdict `run again: replay safe; <the policy's reason>`, and the
+  arguments a hook rewrote; one it asks about goes to the reviewer with
+  the policy's verdict and counts toward the denial bound; and one it
+  denies is refused with `The call was cut off before it finished and
+  may have run; it was not run again. Denied by policy: <reason>. Do
+  not pursue the same outcome through a workaround, indirect execution
+  or policy circumvention.` A hook that fails reads as asking.
+- Every answer `Engine.Answers` makes without a reviewer carries its
+  verdict's reason as `agentturn.Answer.Reason`, so the session's
+  recorder writes it on the `proceed` or `answer` decision where it
+  wrote a re-run with no decision and an answer with no reason (#44).
+- Arguments a `WithHooks` hook rewrites are decided again, their
+  confinement read from them (#47). The policy's verdict stood for
+  arguments the call no longer had, so a hook that took a confined
+  call out of its sandbox ran it unconfined with no prompt, the verdict
+  saying `confined by ...`, and a hook that resolved a path skipped the
+  deny rule for it. The stricter action stands; a verdict the policy
+  still owns takes the rewrite's rule and reason; and
+  `Verdict.Confined` is the rewrite's. The batch hold reads siblings
+  the same way.
+- The reason of a block on a call its `Subjects` split into several
+  subjects says nothing in the command ran and names the other
+  subjects: `denied by bash(rm:*) on "rm -rf scratch-old"; nothing in
+  this command ran, including "ls -la"`, where it said `; the call did
+  not run` and two models still reported the other half as having
+  succeeded (#45).
+
 ## v0.0.7 - 2026-09-29
 
 - Requires `agentturn` v0.0.11, up from v0.0.10, and `agenttool`

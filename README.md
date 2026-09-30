@@ -302,9 +302,12 @@ that was not approved, and the refusal tells the model not to pursue
 the same outcome by another route; a reviewer that sets `By:
 ByPolicy` is read to the model as `Denied by policy`. A call an abort
 cut off is not the reviewer's to approve, since its tool may have run.
-It runs again when its tool says a second run is safe,
-`agenttool.ReplaySafe`, or safe under its first run's key,
-`ReplayKeyed`, and the loop carries that key; it is refused as never
+When its tool says a second run is safe, `agenttool.ReplaySafe`, or
+safe under its first run's key, `ReplayKeyed`, and the loop carries
+that key, it is decided under the policy first, since a call a seeded
+transcript left may have been waiting on the user: it runs again when
+the policy allows it, goes to the reviewer when the policy asks, and is
+refused when the policy denies it. It is refused as never
 run when the loop never handed it over, `PendingUndispatched`, or the
 session says it never started, through `WithNeverStarted`; and
 otherwise it is refused with text that says it may have run, as is a
