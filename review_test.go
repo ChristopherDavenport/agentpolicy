@@ -200,6 +200,64 @@ func TestAnswersRecallsTheCallsOfItsOwnRun(t *testing.T) {
 	}
 }
 
+// A reviewer is shown the arguments a hook rewrote a deferred call to,
+// the ones the verdict is about, and an approval runs them: from the
+// engine's memory, and from the loop's PendingCall.Args for a call the
+// engine has forgotten. (#54)
+func TestAnswersReviewsAHooksRewrite(t *testing.T) {
+	ctx := context.Background()
+	const model, rewritten = `{"command":"curl -O x","escape":true}`, `{"command":"curl -O x"}`
+	strip := func(context.Context, agentturn.ToolCallInfo) (*agentturn.ToolDecision, error) {
+		return &agentturn.ToolDecision{Args: json.RawMessage(rewritten)}, nil
+	}
+	c := &openresponses.FunctionCall{CallID: "c1", Name: "bash", Arguments: model}
+	tests := []struct {
+		name     string
+		forget   bool
+		pending  json.RawMessage
+		review   Review
+		wantSeen string
+		want     agentturn.Answer
+	}{
+		{name: "remembered", review: Review{Outcome: Approved}, wantSeen: rewritten, want: agentturn.ApproveWith("c1", json.RawMessage(rewritten)).WithBy(ByAgent)},
+		{name: "reviewer's own arguments", review: Review{Outcome: Approved, Args: json.RawMessage(`{"command":"true"}`)}, wantSeen: rewritten, want: agentturn.ApproveWith("c1", json.RawMessage(`{"command":"true"}`)).WithBy(ByAgent)},
+		{name: "forgotten, the loop's rewrite", forget: true, pending: json.RawMessage(rewritten), review: Review{Outcome: Approved}, wantSeen: rewritten, want: agentturn.ApproveWith("c1", json.RawMessage(rewritten)).WithBy(ByAgent)},
+		{name: "forgotten, no rewrite", forget: true, review: Review{Outcome: Approved}, wantSeen: model, want: agentturn.Approve("c1").WithBy(ByAgent)},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			e, err := Build(Policy{Default: Ask()}, nil, WithHooks(strip))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := e.Decide(ctx, agentturn.ToolCallInfo{RunID: "r", Turn: 1, Call: c, Args: json.RawMessage(model)}); err != nil {
+				t.Fatal(err)
+			}
+			if tc.forget {
+				e.Forget("r")
+			}
+			var seen string
+			reviewer := ReviewerFunc(func(_ context.Context, info agentturn.ToolCallInfo, _ Verdict) (Review, error) {
+				seen = string(info.Args)
+				return tc.review, nil
+			})
+			end := &agentturn.RunEnd{RunID: "r", Reason: agentturn.ReasonInputRequired, Pending: []agentturn.PendingCall{
+				{Call: c, Reason: agentturn.PendingDeferred, Args: tc.pending},
+			}}
+			answers, err := e.Answers(ctx, reviewer, end)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if seen != tc.wantSeen {
+				t.Errorf("reviewer saw %s, want %s", seen, tc.wantSeen)
+			}
+			if !reflect.DeepEqual(answers, []agentturn.Answer{tc.want}) {
+				t.Errorf("answers = %s\nwant %s", dump(answers), dump([]agentturn.Answer{tc.want}))
+			}
+		})
+	}
+}
+
 func TestAnswersEdgeCases(t *testing.T) {
 	ctx := context.Background()
 	e, err := Build(Policy{Default: Ask()}, nil)

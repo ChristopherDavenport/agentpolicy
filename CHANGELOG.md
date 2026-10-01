@@ -7,6 +7,20 @@ versions may break the API.
 
 ## Unreleased
 
+- Requires `agentturn` v0.0.13, up from v0.0.12, and `agenttool`
+  v0.0.12, up from v0.0.11. An approval from `Engine.Answers` of a
+  call a `WithHooks` hook rewrote and deferred now runs the rewritten
+  arguments, as `Release` already did for a held call: the loop keeps
+  them on `PendingCall.Args` and `Approve` runs them, where it ran the
+  model's.
+- `Engine.Answers` shows a reviewer the arguments a `WithHooks` hook
+  rewrote a deferred call to, the ones its verdict is about, where it
+  showed the model's beside a verdict about the rewrite, and an
+  approval with no arguments of its own runs the rewrite, as `Release`
+  does for a held call. A call the engine has forgotten, deferred
+  before a restart, takes the rewrite from `PendingCall.Args`. A
+  reviewer was asked about a call the policy said runs confined and
+  approved arguments that escaped (#54).
 - The policy is written down. `docs/rfcs/0001-agent-policy.md` states
   what the doc comments carried: the rule grammar and its five errors;
   the prefix and glob matchers; subjects and how their verdicts fold;
