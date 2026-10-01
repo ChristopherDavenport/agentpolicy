@@ -5,6 +5,29 @@ All user-visible changes to this library. The format follows
 uses [Semantic Versioning](https://semver.org/); before v1.0.0 minor
 versions may break the API.
 
+## Unreleased
+
+- The policy is written down. `docs/rfcs/0001-agent-policy.md` states
+  what the doc comments carried: the rule grammar and its five errors;
+  the prefix and glob matchers; subjects and how their verdicts fold;
+  sources, merge, rank and the reach of a carve-out; the precedence as
+  an algorithm, with every reason text; confinement; the batch hold;
+  grants, grant sets and their refusals; the release and the answers
+  without a human; the guard contract; and the verdict's record under
+  `agentpolicy:verdict`. The Go module and its agentturn hooks are
+  binding tables, and every open issue the text touches is an open
+  question with its number (#12).
+- `testdata/policy/` is the conformance corpus: `grammar.json`,
+  `matchers.json` and `decisions.json`, the last covering precedence,
+  build errors, tool-name globs, carve-outs across sources, untrusted
+  sources and notes, aliases, split subjects, confinement, the batch
+  hold, grant sets and the tools offered. The tests run it, and the Go
+  tables it replaces are gone, so the corpus is the test (#12).
+- `ParseRules` ends a specifier at the parenthesis that closes the
+  first one, which must end the token. `Bash(a)(b)` read as the
+  specifier `a)(b` and `Bash(a)x(b)` as `a)x(b`; both are now
+  `text after the specifier`, as agentskill already refused them.
+
 ## v0.0.8 - 2026-09-29
 
 - Requires `agenttool` v0.0.11, up from v0.0.10, and `agentturn`

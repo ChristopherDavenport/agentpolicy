@@ -1,0 +1,31 @@
+{
+  "cases": [
+    {"name": "empty", "input": "", "rules": []},
+    {"name": "whitespace only", "input": "   \n\t ", "rules": []},
+    {"name": "bare name", "input": "Bash", "rules": [{"tool": "Bash"}]},
+    {"name": "two bare names", "input": "Bash Read", "rules": [{"tool": "Bash"}, {"tool": "Read"}]},
+    {"name": "specifier", "input": "Bash(git:*)", "rules": [{"tool": "Bash", "spec": "git:*"}]},
+    {"name": "spaces inside a specifier", "input": "Bash(git status:*) Bash(npm test:*)", "rules": [{"tool": "Bash", "spec": "git status:*"}, {"tool": "Bash", "spec": "npm test:*"}]},
+    {"name": "inner wildcards", "input": "Bash(git add *) Bash(git commit *) Bash(git status *)", "rules": [{"tool": "Bash", "spec": "git add *"}, {"tool": "Bash", "spec": "git commit *"}, {"tool": "Bash", "spec": "git status *"}]},
+    {"name": "balanced parentheses are literal", "input": "Edit(./Finance (2024)/**)", "rules": [{"tool": "Edit", "spec": "./Finance (2024)/**"}]},
+    {"name": "carve-out", "input": "Read(!.env.example)", "rules": [{"tool": "Read", "spec": "!.env.example"}]},
+    {"name": "tool-name glob", "input": "mcp__*", "rules": [{"tool": "mcp__*"}]},
+    {"name": "long tool name", "input": "mcp__github__get_issue", "rules": [{"tool": "mcp__github__get_issue"}]},
+    {"name": "every separator", "input": "  Bash(a b)\n Read\t", "rules": [{"tool": "Bash", "spec": "a b"}, {"tool": "Read"}]},
+    {"name": "form feed and vertical tab separate", "input": "Read\u000bEdit\fWrite\rGrep", "rules": [{"tool": "Read"}, {"tool": "Edit"}, {"tool": "Write"}, {"tool": "Grep"}]},
+    {"name": "unclosed specifier", "input": "Bash(git", "error": {"kind": "unbalanced_parentheses", "token": "Bash(git"}},
+    {"name": "unclosed specifier with a space", "input": "Bash(git status", "error": {"kind": "unbalanced_parentheses", "token": "Bash(git status"}},
+    {"name": "stray close", "input": "Bash git)", "error": {"kind": "unbalanced_parentheses", "token": "git)"}},
+    {"name": "close alone", "input": ")", "error": {"kind": "unbalanced_parentheses", "token": ")"}},
+    {"name": "no tool name", "input": "(git:*)", "error": {"kind": "missing_tool_name", "token": "(git:*)"}},
+    {"name": "empty specifier", "input": "Bash()", "error": {"kind": "empty_specifier", "token": "Bash()"}},
+    {"name": "empty carve-out", "input": "Read(!)", "error": {"kind": "empty_carve_out", "token": "Read(!)"}},
+    {"name": "text after the specifier", "input": "Bash(git)x", "error": {"kind": "text_after_specifier", "token": "Bash(git)x"}},
+    {"name": "text after a closed specifier", "input": "Bash(a)x(b)", "error": {"kind": "text_after_specifier", "token": "Bash(a)x(b)"}},
+    {"name": "two specifiers", "input": "Bash(a)(b)", "error": {"kind": "text_after_specifier", "token": "Bash(a)(b)"}},
+    {"name": "nested parentheses in a specifier", "input": "Bash(a(b)c)", "rules": [{"tool": "Bash", "spec": "a(b)c"}]},
+    {"name": "a non-ASCII space does not separate", "input": "Read\u00a0Edit", "rules": [{"tool": "Read\u00a0Edit"}]},
+    {"name": "a specifier may hold any character", "input": "Edit(/tmp/**\u00a0x)", "rules": [{"tool": "Edit", "spec": "/tmp/**\u00a0x"}]},
+    {"name": "one bad token fails the list", "input": "Read Bash() Edit", "error": {"kind": "empty_specifier", "token": "Bash()"}}
+  ]
+}

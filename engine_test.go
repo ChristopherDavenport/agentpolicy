@@ -92,30 +92,6 @@ var testMatchers = map[string]ToolMatcher{
 	"read": {Match: PrefixMatcher("path")},
 }
 
-func TestPrefixMatcher(t *testing.T) {
-	m := PrefixMatcher("command")
-	tests := []struct {
-		spec, args string
-		want       bool
-	}{
-		{"git:*", `{"command":"git status"}`, true},
-		{"git:*", `{"command":"git"}`, true},
-		{"git:*", `{"command":"gitk"}`, true},
-		{"git:*", `{"command":"npm test"}`, false},
-		{"git status", `{"command":"git status"}`, true},
-		{"git status", `{"command":"git status --short"}`, false},
-		{"git:*", `{"cmd":"git status"}`, false},
-		{"git:*", `{"command":42}`, false},
-		{"git:*", `not json`, false},
-		{"git:*", ``, false},
-	}
-	for _, tc := range tests {
-		if got := m(tc.spec, json.RawMessage(tc.args)); got != tc.want {
-			t.Errorf("PrefixMatcher(%q, %s) = %v, want %v", tc.spec, tc.args, got, tc.want)
-		}
-	}
-}
-
 func TestBuildValidates(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -154,73 +130,6 @@ func TestBuildValidates(t *testing.T) {
 		}
 		if tc.errText != "" && (err == nil || err.Error() != tc.errText) {
 			t.Errorf("%s: err = %v, want %q", tc.name, err, tc.errText)
-		}
-	}
-}
-
-func TestDecidePrecedence(t *testing.T) {
-	policy := Policy{
-		Allow: rules(t, "read bash(git:*) edit(/src:*)"),
-		Deny:  rules(t, "bash(git push:*) edit(/etc:*)"),
-		Ask:   rules(t, "bash(git commit:*) edit"),
-	}
-	type want struct {
-		action agentturn.ToolAction
-		rule   string
-		reason string
-	}
-	tests := []struct {
-		name   string
-		def    Default
-		tool   string
-		args   string
-		want   want
-		deferR bool
-	}{
-		// Deny beats ask beats allow, whatever the order of the lists.
-		{name: "deny over allow", def: Allow(), tool: "bash", args: `{"command":"git push origin main"}`, want: want{agentturn.Block, "bash(git push:*)", "denied by bash(git push:*)"}},
-		{name: "deny over ask", def: Allow(), tool: "edit", args: `{"path":"/etc/passwd"}`, want: want{agentturn.Block, "edit(/etc:*)", "denied by edit(/etc:*)"}},
-		{name: "ask over allow", def: Allow(), tool: "bash", args: `{"command":"git commit -m x"}`, want: want{agentturn.Defer, "bash(git commit:*)", "approval required by bash(git commit:*)"}},
-		{name: "bare ask over spec allow", def: Allow(), tool: "edit", args: `{"path":"/src/main.go"}`, want: want{agentturn.Defer, "edit", "approval required by edit"}},
-		{name: "allow", def: Deny(), tool: "bash", args: `{"command":"git status"}`, want: want{agentturn.Allow, "bash(git:*)", "allowed by bash(git:*)"}},
-		{name: "bare allow", def: Deny(), tool: "read", args: `{"path":"/etc/passwd"}`, want: want{agentturn.Allow, "read", "allowed by read"}},
-		// The default, each way.
-		{name: "default allow", def: Allow(), tool: "bash", args: `{"command":"npm test"}`, want: want{agentturn.Allow, "", "allowed by default"}},
-		{name: "default deny", def: Deny(), tool: "bash", args: `{"command":"npm test"}`, want: want{agentturn.Block, "", "no rule allows bash: denied by default"}},
-		{name: "default ask", def: Ask(), tool: "bash", args: `{"command":"npm test"}`, want: want{agentturn.Defer, "", "no rule allows bash: approval required by default"}},
-		{name: "unknown tool takes the default", def: Ask(), tool: "web_fetch", args: `{"url":"https://example.com"}`, want: want{agentturn.Defer, "", "no rule allows web_fetch: approval required by default"}},
-	}
-	for _, tc := range tests {
-		policy.Default = tc.def
-		j := &journal{}
-		e, err := Build(policy, testMatchers, WithObserver(j.observe))
-		if err != nil {
-			t.Fatal(err)
-		}
-		info := call("call_1", tc.tool, tc.args)
-		d, err := e.Decide(context.Background(), info)
-		if err != nil {
-			t.Fatalf("%s: %v", tc.name, err)
-		}
-		if d.Action != tc.want.action || d.Reason != tc.want.reason {
-			t.Errorf("%s: decision = %+v, want %+v", tc.name, d, tc.want)
-		}
-		vs := j.all()
-		if len(vs) != 1 {
-			t.Fatalf("%s: observer saw %d verdicts, want 1", tc.name, len(vs))
-		}
-		v := vs[0]
-		gotRule := ""
-		if v.Rule != nil {
-			gotRule = v.Rule.String()
-		}
-		if v.RunID != "run_1" || v.Turn != 2 || v.CallID != "call_1" || v.Tool != tc.tool || v.Action != tc.want.action || gotRule != tc.want.rule || v.Reason != tc.want.reason {
-			t.Errorf("%s: verdict = %+v, want %+v", tc.name, v, tc.want)
-		}
-		// The same policy and the same call give the same verdict.
-		d2, _ := e.Decide(context.Background(), info)
-		if !reflect.DeepEqual(d, d2) {
-			t.Errorf("%s: decisions differ: %+v then %+v", tc.name, d, d2)
 		}
 	}
 }
