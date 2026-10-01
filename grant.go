@@ -154,16 +154,16 @@ func sourceName(s Source) string {
 // firing: a deny rule with no specifier for the tool, which no grant
 // beats, or an ask rule with no specifier from a source that outranks
 // the grant's, which is the rank check GrantOver makes. A rule with a
-// specifier is left to the decision, where the test is made against
-// the subject.
+// specifier, or one a carve-out of its list reaches, is left to the
+// decision, where the test is made against the subject.
 func blocks(p Policy, r Rule, src Source) (bool, string) {
 	for _, d := range p.Deny {
-		if d.Bare() && d.MatchesTool(r.Tool) {
+		if d.Bare() && d.MatchesTool(r.Tool) && !reopened(p.Deny, d) {
 			return true, "denied by " + d.String() + ": a grant never beats a deny"
 		}
 	}
 	for _, a := range p.Ask {
-		if a.Bare() && a.MatchesTool(r.Tool) && a.Source.Rank > src.Rank {
+		if a.Bare() && a.MatchesTool(r.Tool) && a.Source.Rank > src.Rank && !reopened(p.Ask, a) {
 			from := ""
 			if a.Source.Name != "" {
 				from = " from " + a.Source.Name

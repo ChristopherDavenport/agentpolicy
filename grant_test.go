@@ -157,6 +157,29 @@ func TestGrantSetRefusals(t *testing.T) {
 			refused: []Refusal{{Rule: Rule{Tool: "web", Spec: "https://x:*", Source: Source{Name: "skill", Trusted: true}}, Reason: "agentpolicy: no matcher for the rule's tool: web(https://x:*)"}},
 			action:  agentturn.Allow,
 		},
+		// A carve-out lets some calls past the bare rule, so the rule
+		// does not certainly keep the grant from firing. (#60)
+		{
+			name:    "a deny rule a carve-out reaches is left to the decision",
+			policy:  Policy{Deny: []Rule{{Tool: "bash", Source: managed}, {Tool: "bash", Spec: "!git status:*", Source: managed}}, Default: Allow()},
+			set:     RuleSet{Source: Source{Name: "skill", Rank: 9, Trusted: true}, Allow: rules(t, "bash(git status:*)")},
+			granted: "bash(git status:*)",
+			action:  agentturn.Allow,
+		},
+		{
+			name:    "an ask rule a carve-out reaches is left to the decision",
+			policy:  Policy{Ask: []Rule{{Tool: "bash", Source: managed}, {Tool: "bash", Spec: "!git status:*", Source: managed}}, Default: Ask()},
+			set:     RuleSet{Source: Source{Name: "skill", Rank: 1, Trusted: true}, Allow: rules(t, "bash(git status:*)")},
+			granted: "bash(git status:*)",
+			action:  agentturn.Allow,
+		},
+		{
+			name:    "a carve-out from a lower source does not reach the deny",
+			policy:  Policy{Deny: []Rule{{Tool: "bash", Source: managed}, {Tool: "bash", Spec: "!git status:*", Source: Source{Name: "project", Rank: 1, Trusted: true}}}, Default: Allow()},
+			set:     RuleSet{Source: Source{Name: "skill", Rank: 9, Trusted: true}, Allow: rules(t, "bash(git status:*)")},
+			refused: []Refusal{{Rule: Rule{Tool: "bash", Spec: "git status:*", Source: Source{Name: "skill", Rank: 9, Trusted: true}}, Reason: "denied by bash: a grant never beats a deny"}},
+			action:  agentturn.Block,
+		},
 		{
 			name:    "an ask rule with a specifier is left to the decision",
 			policy:  Policy{Ask: []Rule{{Tool: "bash", Spec: "git push:*", Source: managed}}, Default: Ask()},

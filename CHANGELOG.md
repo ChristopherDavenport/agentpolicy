@@ -5,6 +5,59 @@ All user-visible changes to this library. The format follows
 uses [Semantic Versioning](https://semver.org/); before v1.0.0 minor
 versions may break the API.
 
+## Unreleased
+
+- Requires `agentturn` v0.0.15, up from v0.0.13, and `agenttool`
+  v0.0.14, up from v0.0.12. Neither changes what this module does.
+  Under v0.0.15 a nested call the policy defers is put to the
+  invoking tool's elicitor rather than refused; the engine still
+  remembers it as deferred until `Engine.Forget`, since a nested
+  call's `ToolCallInfo` does not say it is one.
+- `Engine.Answers` decides a cut-off call on the arguments it would
+  run again with, those of the dispatch it repeats on
+  `PendingCall.Args`, where it decided the model's while `Resume` ran
+  the dispatch's. A rule tightened since the first run, or a
+  reviewer's or person's rewrite, is now what the policy judges, and
+  the tool's replay is read for those arguments too (#50).
+- `Engine.Answers` shows a reviewer the arguments a `WithHooks` hook
+  rewrote a cut-off call to, the ones its verdict is about, as it
+  does for a deferred call since #54; it showed the model's (#57). A
+  rewrite to other arguments whose tool does not say the rewrite is
+  safe to run is refused as one that may have run, with the verdict
+  `not run again: a hook rewrote the arguments, and replay is X for
+  the rewrite`, since `Resume` would refuse a keyed call run again
+  with other arguments under its key.
+- `guard.Chain.Stop` makes a Block of `OutputGuard` stop the run as a
+  guard stop: it returns a `BlockedError` with the subject `message`,
+  and agentturn withholds the message and ends the run with
+  `StopGuard` and `RunEnd.Withheld`, so neither the message nor the
+  guard's reason reaches the caller. Without it a Block puts a
+  placeholder in the message's place and the run goes on, as before
+  (#58, #49).
+- A guard's `Check` error that wraps `agentturn.ErrGuard` is reported
+  to the chain's observer as that guard's Block, on every hook, before
+  the chain returns it; its reason is a `BlockedError`'s reason, else
+  the error's text. The run stopped with no verdict naming the guard
+  (#58).
+- `Engine.Removes`, `Engine.Filter` and so `Engine.ToolProvider` keep
+  a tool offered when a carve-out of the deny list reaches its bare
+  deny: one for the same tool name from a source that does not rank
+  below the rule's. The model was never offered calls the policy
+  allows. `Engine.GrantSet` no longer refuses an allow rule over such
+  a deny, or over a bare ask a carve-out reaches, and leaves it to the
+  decision (#60).
+- `ParseRules` checks the parentheses over the whole string before it
+  reads any token, as RFC 0001 says and agentskill does, so `Read
+  Bash() git)` is refused as `unbalanced parentheses` naming `git)`
+  rather than as `empty specifier` naming `Bash()`. The RFC's grammar
+  section says the order plainly, and `grammar.json` holds both cases
+  and one that NEL does not separate tokens (#59).
+- RFC 0001: the output guard's row says what a chain that stops does
+  and that an error wrapping the guard error is a guard stop; the
+  answers without a human say which arguments a cut-off call is
+  decided on; offering tools and the grant set's refusals say what a
+  carve-out does; #50 leaves the open questions.
+
 ## v0.0.9 - 2026-10-01
 
 - Requires `agentturn` v0.0.13, up from v0.0.12, and `agenttool`

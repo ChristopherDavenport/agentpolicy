@@ -18,8 +18,11 @@
 // stops the run as a guard stop, agentturn.ErrGuard on the run's end,
 // when the subject is the input, before the model is called, or a
 // finished turn, whose items are already in the transcript, and
-// withholds a message behind a placeholder when the subject is one.
-// Defer has no meaning for content and is an error. Every verdict
+// withholds a message behind a placeholder when the subject is one, or
+// stops the run there too when the chain sets Stop. Defer has no
+// meaning for content and is an error. A check that returns an error
+// wrapping agentturn.ErrGuard stops the run as a guard stop, and is
+// reported as that guard's Block. Every verdict
 // reaches the observer as an agentpolicy.Verdict whose Guard names the
 // guard, so a product records it beside the engine's.
 //
@@ -29,6 +32,7 @@ package guard
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/ChristopherDavenport/agentpolicy"
@@ -110,12 +114,14 @@ func (g *funcGuard) Check(ctx context.Context, subject any) (Verdict, error) {
 // BlockedError is the error a guard's Block becomes on the hooks that
 // return one. From BeforeModelCall and from ShouldStopAfterTurn the
 // loop ends the run with ReasonStopped and StopGuard, the error on
-// RunEnd.Err, after a ModelBlocked event from the first. It wraps
+// RunEnd.Err, after a ModelBlocked event from the first. From
+// OutputGuard, under [Chain.Stop], the loop withholds the message and
+// ends the run with StopGuard and RunEnd.Withheld. It wraps
 // agentturn.ErrGuard, so errors.Is tells a guard's refusal from a
 // failure, and errors.As finds it.
 type BlockedError struct {
 	Guard string
-	// Subject is "input" or "output".
+	// Subject is "input", "message" or "output".
 	Subject string
 	Reason  string
 }
@@ -138,6 +144,13 @@ type Chain struct {
 	// Placeholder builds the message OutputGuard puts in place of one a
 	// guard withheld. nil means [Withheld].
 	Placeholder func(original *openresponses.Message, guard, reason string) *openresponses.Message
+	// Stop makes a Block of OutputGuard stop the run as a guard stop,
+	// as a Block of the input does, rather than put a placeholder in
+	// the message's place and go on. Neither the message nor the
+	// guard's reason reaches the caller: the loop withholds the
+	// message and the fronts report a content filter. Placeholder is
+	// not used.
+	Stop bool
 }
 
 // BeforeModelCall returns the hook value for agentturn.Config. A Block
@@ -153,7 +166,7 @@ func (c Chain) BeforeModelCall() func(context.Context, *openresponses.Request) e
 		for _, g := range c.Guards {
 			v, err := g.Check(ctx, Input{Items: req.Input, Instructions: req.Instructions})
 			if err != nil {
-				return fmt.Errorf("agentpolicy/guard: %s: %w", g.Name(), err)
+				return c.fail(ctx, agentpolicy.Verdict{RunID: runID, Guard: g.Name()}, err)
 			}
 			c.observe(ctx, agentpolicy.Verdict{RunID: runID, Guard: g.Name(), Action: v.Action, Reason: v.Reason})
 			switch v.Action {
@@ -181,17 +194,19 @@ func (c Chain) BeforeModelCall() func(context.Context, *openresponses.Request) e
 // front's item_end, and the guards after the one that blocked are not
 // consulted. The deltas of the original have already been delivered,
 // so a front that must not show withheld text renders on item_end. A
-// guard that errs or defers fails the run with its error. Withholding
-// a message does not end the run; a chain that should also stop it is
-// wired into ShouldStopAfterTurn as well, where it sees the turn's
-// response as the model produced it.
+// guard that errs or defers fails the run with its error, and one
+// whose error wraps agentturn.ErrGuard stops it as a guard stop.
+// Withholding a message does not end the run unless the chain sets
+// [Chain.Stop]: a Block then returns a [BlockedError], and the loop
+// withholds the message and ends the run as a guard stop, with no
+// placeholder and no reason the caller reads.
 func (c Chain) OutputGuard() func(context.Context, agentturn.OutputInfo) (*openresponses.Message, error) {
 	return func(ctx context.Context, info agentturn.OutputInfo) (*openresponses.Message, error) {
 		msg, replaced := info.Message, false
 		for _, g := range c.Guards {
 			v, err := g.Check(ctx, Message{Message: msg})
 			if err != nil {
-				return nil, fmt.Errorf("agentpolicy/guard: %s: %w", g.Name(), err)
+				return nil, c.fail(ctx, agentpolicy.Verdict{RunID: info.RunID, Turn: info.Turn, Guard: g.Name()}, err)
 			}
 			c.observe(ctx, agentpolicy.Verdict{RunID: info.RunID, Turn: info.Turn, Guard: g.Name(), Action: v.Action, Reason: v.Reason})
 			switch v.Action {
@@ -205,6 +220,9 @@ func (c Chain) OutputGuard() func(context.Context, agentturn.OutputInfo) (*openr
 				}
 				msg, replaced = m, true
 			case agentturn.Block:
+				if c.Stop {
+					return nil, &BlockedError{Guard: g.Name(), Subject: "message", Reason: v.Reason}
+				}
 				build := c.Placeholder
 				if build == nil {
 					build = Withheld
@@ -245,7 +263,7 @@ func (c Chain) ShouldStopAfterTurn() func(context.Context, agentturn.TurnInfo) (
 		for _, g := range c.Guards {
 			v, err := g.Check(ctx, Output{Response: info.Response})
 			if err != nil {
-				return false, fmt.Errorf("agentpolicy/guard: %s: %w", g.Name(), err)
+				return false, c.fail(ctx, agentpolicy.Verdict{RunID: info.RunID, Turn: info.Turn, Guard: g.Name()}, err)
 			}
 			c.observe(ctx, agentpolicy.Verdict{RunID: info.RunID, Turn: info.Turn, Guard: g.Name(), Action: v.Action, Reason: v.Reason})
 			switch v.Action {
@@ -258,6 +276,23 @@ func (c Chain) ShouldStopAfterTurn() func(context.Context, agentturn.TurnInfo) (
 		}
 		return false, nil
 	}
+}
+
+// fail returns the error a guard's check failed with. One that wraps
+// agentturn.ErrGuard stops the run as a guard stop, so it is the
+// guard's Block and is reported as one, with the reason of a
+// [BlockedError] or the error's text; any other fails the run, and is
+// no verdict.
+func (c Chain) fail(ctx context.Context, v agentpolicy.Verdict, err error) error {
+	if errors.Is(err, agentturn.ErrGuard) {
+		v.Action, v.Reason = agentturn.Block, err.Error()
+		var b *BlockedError
+		if errors.As(err, &b) {
+			v.Reason = b.Reason
+		}
+		c.observe(ctx, v)
+	}
+	return fmt.Errorf("agentpolicy/guard: %s: %w", v.Guard, err)
 }
 
 func (c Chain) observe(ctx context.Context, v agentpolicy.Verdict) {

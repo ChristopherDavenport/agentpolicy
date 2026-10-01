@@ -172,10 +172,13 @@ A rule's string form is its tool name, or its tool name with its
 specifier in parentheses, which is the token it was parsed from.
 Nothing folds case: `Bash` and `bash` are different tool names.
 
-A parser MUST refuse the whole list at the first bad token, with one
-of these errors, naming the token. Parentheses are checked during the
-scan, before any token is read; a token that fails more than one of
-the other checks fails the first in the table's order, so `Bash()x` is
+A parser MUST refuse the whole list with one of these errors, naming
+the token. Parentheses are checked over the whole string first, before
+any token is read, so an unbalanced parenthesis is the error even
+when a token before it is bad in another way: `Read Bash() git)` is
+`unbalanced_parentheses` naming `git)`. Otherwise the list is refused
+at the first bad token, and a token that fails more than one of the
+other checks fails the first in the table's order, so `Bash()x` is
 `text_after_specifier`:
 
 | kind | when | token named |
@@ -515,7 +518,12 @@ A deny rule that is bare, or whose tool name is a glob, denies every
 call of the tools it names, and both reference agents answer that by
 never offering the tool: the model does not see it, plans nothing
 around it and spends no tokens being refused. A tool is **removed** by
-the first such rule of the active deny list that names it. A deny rule
+the first such rule of the active deny list that names it and that no
+carve-out of the list reaches: a carve-out whose tool name is the
+rule's tool name, from a source that does not rank below the rule's.
+Such a carve-out lets some calls through, so the rule no longer
+denies every call; its pattern is matched only once a subject
+arrives, so any such carve-out keeps the tool offered. A deny rule
 with a specifier denies some calls and leaves the tool offered.
 
 The removal test and the decision's tool-name test are one test, so a
@@ -594,15 +602,17 @@ through the aliases, and keeps or refuses each:
 | deny, ask | it could not build in its list | the build error's text |
 | allow | it could not build as an allow rule, or is a carve-out | the build error's text |
 | allow | the source is untrusted | `withheld: the source N is not trusted` |
-| allow | a bare deny rule of the policy names its tool | `denied by R: a grant never beats a deny` |
-| allow | a bare ask rule of the policy from a source that outranks the set names its tool | `R from S outranks the grant`, or `R outranks the grant` |
+| allow | a bare deny rule of the policy that no carve-out reaches names its tool | `denied by R: a grant never beats a deny` |
+| allow | a bare ask rule of the policy that no carve-out reaches, from a source that outranks the set, names its tool | `R from S outranks the grant`, or `R outranks the grant` |
 
 Deny rules are considered first, then ask, then allow, each in order.
 A set's deny and ask rules apply at once, trusted or not, since they
 only restrict. An untrusted set's allow rules are withheld, reported
 with the policy's withheld list, and never evaluated. An ask rule with
 a specifier is not a reason to refuse: whether it fires is a question
-about a subject, and shadowing answers it at the decision.
+about a subject, and shadowing answers it at the decision. Nor is a
+bare rule a carve-out reaches, as the offer reads one: the carve-out
+lets some subjects past it, and the decision tells which.
 
 Sets are keyed by source name: activating a set under a name already
 active replaces it in place, and **revoking** a name removes its set,
@@ -676,9 +686,19 @@ order:
   says a second run is safe, or safe under its first run's key and the
   loop carries that key, it is decided under the policy of the moment,
   with its tool's confinement and the hooks but no hold, since it may
-  never have been decided at all: allowed, it is approved and runs
+  never have been decided at all. It is decided on the arguments it
+  would run again with: those of the dispatch it repeats, which a
+  decision may have rewritten, else the model's. When a hook rewrites
+  them to other arguments, the verdict is about the rewrite; a
+  rewrite whose tool does not say it is safe to run is refused with
+  `The call was cut off before it finished and may have run; it was
+  not run again.` and the verdict `not run again: a hook rewrote the
+  arguments, and replay is X for the rewrite`, since a keyed call
+  runs again only with the arguments of the dispatch it repeats.
+  Otherwise: allowed, it is approved and runs
   again, with the verdict `run again: replay X; ` and the policy's
-  reason; asked, it goes to the reviewer with that verdict; denied, it
+  reason; asked, it goes to the reviewer with that verdict and the
+  arguments it is about; denied, it
   is refused with `The call was cut off before it finished and may
   have run; it was not run again.`, a space, and the refusal text
   below with the policy's reason and `W` as `policy`, the verdict's
@@ -747,15 +767,25 @@ check:
 | hook | subject | allow | block | error or defer |
 | --- | --- | --- | --- | --- |
 | before model call | input | a rewrite replaces the request's input or instructions for this call | the run stops as a guard stop, before the model is called | the model call is blocked and the run fails |
-| output guard | message | a rewrite replaces the message for the guards after and for the transcript | the message is withheld behind a placeholder, and the guards after are not consulted | fails the run |
+| output guard | message | a rewrite replaces the message for the guards after and for the transcript | the message is withheld behind a placeholder, or, when the chain stops on a block, withheld and the run stops as a guard stop; the guards after are not consulted | fails the run |
 | should stop after turn | output | — | the run stops after the turn as a guard stop, and the guards after are not consulted | fails the run |
 
+A guard's error that is a guard stop, one that wraps agentturn's guard
+error, is not a failure on any hook: the run stops as a guard stop,
+and the chain reports it as that guard's block, its reason the
+reason the error carries, else the error's text, before it returns
+the error.
+
 A guard stop is agentturn RFC 0001's: the run ends stopped with cause
-`guard`, and the error names the guard, the subject, `input` or
-`output`, and the reason. The default placeholder is an assistant
-message reading `Withheld by G: reason`, with the identity, status and
-phase of the original, so a front's item end matches its item start.
-Withholding does not end the run.
+`guard`, and the error names the guard, the subject, `input`,
+`message` or `output`, and the reason. On the output guard the loop
+withholds the message, and neither it nor the reason reaches the
+caller; the fronts report a content filter. The default placeholder
+is an assistant message reading `Withheld by G: reason`, with the
+identity, status and phase of the original, so a front's item end
+matches its item start. Withholding behind a placeholder does not end
+the run, and the caller reads the reason; a host that must not show
+it stops the run instead.
 
 Nothing in a guard chain calls a model. A guard backed by one is the
 host's, through a binding's package: the reference asks for one JSON
@@ -875,7 +905,7 @@ The root module of this repository is the reference binding.
 | record | `VerdictNS = "agentpolicy:verdict"`; `Verdict.Record()` → namespace and bytes |
 | presets | `Tools{Read, Edit, Execute}`; `Suggest`, `AutoEdit`, `FullAuto` |
 | guard | `guard.Guard{Name, Check}`, `guard.New`; `guard.Input{Items, Instructions}`, `guard.Message`, `guard.Output`; `guard.Verdict{Action, Reason, Items, Instructions}` |
-| chain | `guard.Chain{Guards, Observer, Placeholder}`; `BeforeModelCall`, `OutputGuard`, `ShouldStopAfterTurn`; `guard.Withheld` |
+| chain | `guard.Chain{Guards, Observer, Placeholder, Stop}`; `BeforeModelCall`, `OutputGuard`, `ShouldStopAfterTurn`; `guard.Withheld` |
 | guard stop | `guard.BlockedError{Guard, Subject, Reason}`, which wraps `agentturn.ErrGuard` |
 | reference guards | `guard.Limit`, `guard.Deny`, `guard.Secrets`, `guard.Redact`, `guard.Pattern`, `guard.DefaultSecrets` |
 | model-backed | `classify.New` for a guard, `classify.NewReviewer` for a reviewer |
@@ -1048,10 +1078,8 @@ listed in the changelog as one.
   by concurrent runs whose tool lists differ reads one list for all of
   them, and a batch hold can be defeated. A lookup given the decision's
   context is proposed.
-- **Cut-off calls and the reviewer** (#50, #51, #52, #53). The
-  answers without a human are the least settled section. A cut-off
-  call is decided on the model's arguments while the loop runs it
-  again with those its dispatch ran (#50); a reviewer's refusal,
+- **Cut-off calls and the reviewer** (#51, #52, #53). The
+  answers without a human are the least settled section. A reviewer's refusal,
   timeout or failure on a call that may have run tells the model it
   did not run (#51); a never-started call is refused where the loop
   would put it to the policy (#52); a call the record shows rejected
@@ -1074,7 +1102,9 @@ listed in the changelog as one.
   front shows.
 - **The reason in the placeholder** (#49). The default placeholder
   puts the guard's reason, a deny pattern, in the answer a caller
-  receives, which is the rule a caller could phrase around.
+  receives, which is the rule a caller could phrase around. A chain
+  that stops on a block keeps it from the caller; one that goes on
+  still shows it.
 - **Quoting a subject.** The fold's reason quotes a subject as the
   reference's `strconv.Quote` does, which escapes a control character
   as `\x01` and a non-printable one as `\u00a0`. That is neither JSON

@@ -652,6 +652,80 @@ func TestAnswersDecidesAReplayUnderThePolicy(t *testing.T) {
 	}
 }
 
+// A cut-off call is decided on the arguments it would run with: those
+// of the dispatch it repeats, else the model's, and then a hook's
+// rewrite, which the reviewer is shown beside the verdict about it. A
+// rewrite of a keyed call's arguments is not run again, since Resume
+// would refuse it under the key of the dispatch it repeats. (#50, #57)
+func TestAnswersCutOffDecidesTheArgumentsThatRun(t *testing.T) {
+	ctx := context.Background()
+	run := func(context.Context, agenttool.NoArgs) (string, error) { return "", nil }
+	replays := func(name string, r agenttool.Replay) agenttool.Tool {
+		return agenttool.New(name, "A tool", run, agenttool.WithReplay(func(context.Context, json.RawMessage) agenttool.Replay { return r }))
+	}
+	tools := map[string]agenttool.Tool{"web_fetch": replays("web_fetch", agenttool.ReplaySafe), "remind": replays("remind", agenttool.ReplayKeyed)}
+	lookup := func(name string) (agenttool.Tool, bool) {
+		tool, ok := tools[name]
+		return tool, ok
+	}
+	matchers := map[string]ToolMatcher{"web_fetch": {Match: PrefixMatcher("url")}}
+	pol := Policy{
+		Ask:     []Rule{{Tool: "web_fetch", Spec: "https://mirror.internal/:*"}},
+		Deny:    []Rule{{Tool: "web_fetch", Spec: "https://blocked.internal/:*"}},
+		Default: Allow(),
+	}
+	// The host's proxy sends example.com to its mirror, and a reminder
+	// is reworded.
+	proxy := func(_ context.Context, info agentturn.ToolCallInfo) (*agentturn.ToolDecision, error) {
+		switch {
+		case info.Call.Name == "remind":
+			return &agentturn.ToolDecision{Args: json.RawMessage(`{"text":"reworded"}`)}, nil
+		case strings.Contains(string(info.Args), "https://example.com/"):
+			return &agentturn.ToolDecision{Args: json.RawMessage(strings.Replace(string(info.Args), "https://example.com/", "https://mirror.internal/", 1))}, nil
+		}
+		return nil, nil
+	}
+	e, err := Build(pol, matchers, WithTools(lookup), WithHooks(proxy))
+	if err != nil {
+		t.Fatal(err)
+	}
+	fc := func(id, name, args string) *openresponses.FunctionCall {
+		return &openresponses.FunctionCall{CallID: id, Name: name, Arguments: args}
+	}
+	end := &agentturn.RunEnd{RunID: "r", Reason: agentturn.ReasonAborted, Pending: []agentturn.PendingCall{
+		// A person approved the fetch pointed elsewhere, and the host
+		// has denied that host since.
+		{Call: fc("approved", "web_fetch", `{"url":"https://public.example/a"}`), Reason: agentturn.PendingAborted, Args: json.RawMessage(`{"url":"https://blocked.internal/a"}`)},
+		// The proxy rewrites the fetch to the mirror the policy asks about.
+		{Call: fc("proxied", "web_fetch", `{"url":"https://example.com/status"}`), Reason: agentturn.PendingAborted},
+		{Call: fc("keyed", "remind", `{"text":"call mum"}`), Reason: agentturn.PendingAborted, IdempotencyKey: "r/keyed"},
+	}}
+	var reviewed []string
+	reviewer := ReviewerFunc(func(_ context.Context, info agentturn.ToolCallInfo, v Verdict) (Review, error) {
+		reviewed = append(reviewed, fmt.Sprintf("%s %s %s", info.Call.CallID, info.Args, v.Reason))
+		return Review{Outcome: Approved}, nil
+	})
+	answers, err := e.Answers(ctx, reviewer, end)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{`proxied {"url":"https://mirror.internal/status"} approval required by web_fetch(https://mirror.internal/:*)`}; !reflect.DeepEqual(reviewed, want) {
+		t.Errorf("reviewed = %q, want %q", reviewed, want)
+	}
+	const (
+		denied = "The call was cut off before it finished and may have run; it was not run again. Denied by policy: denied by web_fetch(https://blocked.internal/:*). Do not pursue the same outcome through a workaround, indirect execution or policy circumvention."
+		cut    = "The call was cut off before it finished and may have run; it was not run again."
+	)
+	want := []agentturn.Answer{
+		agentturn.Output(openresponses.NewFunctionCallOutput("approved", denied)).WithBy(ByPolicy).WithReason("denied by web_fetch(https://blocked.internal/:*)"),
+		agentturn.ApproveWith("proxied", json.RawMessage(`{"url":"https://mirror.internal/status"}`)).WithBy(ByAgent),
+		agentturn.Output(openresponses.NewFunctionCallOutput("keyed", cut)).WithBy(ByPolicy).WithReason("not run again: a hook rewrote the arguments, and replay is keyed for the rewrite"),
+	}
+	if !reflect.DeepEqual(answers, want) {
+		t.Errorf("answers = %s\nwant %s", dump(answers), dump(want))
+	}
+}
+
 // A deferred call held after its dispatch that may run again is the
 // reviewer's to approve, as any deferred call is.
 func TestAnswersReviewsDispatchedHoldThatMayRunAgain(t *testing.T) {

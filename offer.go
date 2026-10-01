@@ -12,7 +12,8 @@ import (
 // references answer by never offering the tool: the model does not see
 // it, plans nothing around it and spends no tokens being refused. A
 // deny rule with a specifier denies some calls and leaves the tool
-// offered.
+// offered, and so does a deny rule with none that a carve-out of the
+// list reaches, since the carve-out lets some calls through.
 //
 // It reads the deny rules a decision reads: the policy's, and those of
 // every rule set [Engine.GrantSet] activated, so a grant set's bare
@@ -25,14 +26,28 @@ func (e *Engine) Removes(tool string) (Rule, bool) {
 	return removes(e.active().policy.Deny, tool)
 }
 
-// removes returns the first bare deny rule of list that names the tool.
+// removes returns the first bare deny rule of list that names the tool
+// and that no carve-out of the list reaches.
 func removes(deny []Rule, tool string) (Rule, bool) {
 	for _, r := range deny {
-		if r.Bare() && r.MatchesTool(tool) {
+		if r.Bare() && r.MatchesTool(tool) && !reopened(deny, r) {
 			return r, true
 		}
 	}
 	return Rule{}, false
+}
+
+// reopened reports whether a carve-out of list may cancel the rule for
+// some subject: one the decision would weigh against it, of its tool
+// name and a source it does not rank below. Its pattern is matched only
+// once a subject arrives, so any such carve-out counts.
+func reopened(list []Rule, r Rule) bool {
+	for _, c := range list {
+		if _, carve := c.CarveOut(); carve && c.Tool == r.Tool && c.Source.Rank >= r.Source.Rank {
+			return true
+		}
+	}
+	return false
 }
 
 // Filter returns the tools of the list the policy does not remove, in

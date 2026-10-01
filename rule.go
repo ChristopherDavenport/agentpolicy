@@ -149,20 +149,11 @@ func (r Rule) CarveOut() (pattern string, ok bool) {
 // "Edit(./Finance (2024)/**)". An empty string yields no rules and no
 // error. The rules have no Source.
 func ParseRules(s string) ([]Rule, error) {
-	var rules []Rule
+	// The parentheses are checked over the whole string before any
+	// token is read, so an unbalanced one is the error even after a
+	// token that is bad in another way, as agentskill reports it.
+	var tokens []string
 	depth, start := 0, -1
-	flush := func(end int) error {
-		if start < 0 {
-			return nil
-		}
-		r, err := parseRule(s[start:end])
-		if err != nil {
-			return err
-		}
-		rules = append(rules, r)
-		start = -1
-		return nil
-	}
 	for i := 0; i < len(s); i++ {
 		switch c := s[i]; {
 		case c == '(':
@@ -173,8 +164,9 @@ func ParseRules(s string) ([]Rule, error) {
 			}
 			depth--
 		case depth == 0 && isSpace(c):
-			if err := flush(i); err != nil {
-				return nil, err
+			if start >= 0 {
+				tokens = append(tokens, s[start:i])
+				start = -1
 			}
 			continue
 		}
@@ -185,8 +177,16 @@ func ParseRules(s string) ([]Rule, error) {
 	if depth != 0 {
 		return nil, fmt.Errorf("agentpolicy: rule %q: unbalanced parentheses", s[start:])
 	}
-	if err := flush(len(s)); err != nil {
-		return nil, err
+	if start >= 0 {
+		tokens = append(tokens, s[start:])
+	}
+	var rules []Rule
+	for _, tok := range tokens {
+		r, err := parseRule(tok)
+		if err != nil {
+			return nil, err
+		}
+		rules = append(rules, r)
 	}
 	return rules, nil
 }

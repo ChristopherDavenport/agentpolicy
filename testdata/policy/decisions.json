@@ -171,6 +171,29 @@
       ]
     },
     {
+      "name": "a carve-out keeps its tool offered",
+      "policy": {"deny": "read read(!/repo/README.md)", "default": "allow"},
+      "calls": [
+        {"tool": "read", "args": {"path": "/repo/README.md"}, "want": {"action": "allow", "reason": "allowed by default"}},
+        {"tool": "read", "args": {"path": "/repo/secrets"}, "want": {"action": "block", "rule": "read", "reason": "denied by read"}}
+      ],
+      "offer": {"tools": ["bash", "read"], "want": ["bash", "read"]}
+    },
+    {
+      "name": "a carve-out that does not reach the bare deny leaves the tool removed",
+      "policy": {
+        "sources": [
+          {"name": "managed", "rank": 3, "trusted": true, "deny": "read"},
+          {"name": "project", "rank": 1, "trusted": true, "deny": "read(!/repo/README.md)"}
+        ],
+        "default": "allow"
+      },
+      "calls": [
+        {"tool": "read", "args": {"path": "/repo/README.md"}, "want": {"action": "block", "rule": "read", "source": "managed", "reason": "denied by read"}}
+      ],
+      "offer": {"tools": ["bash", "read"], "want": ["bash"]}
+    },
+    {
       "name": "an untrusted source restricts and grants nothing",
       "policy": {
         "sources": [
