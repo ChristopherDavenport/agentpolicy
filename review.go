@@ -1,9 +1,11 @@
 package agentpolicy
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"reflect"
 	"strings"
 
 	"github.com/ChristopherDavenport/agenttool"
@@ -312,18 +314,38 @@ func (e *Engine) cutOff(ctx context.Context, runID string, p agentturn.PendingCa
 			if tool == nil {
 				tool = e.sibling(call.Name)
 			}
-			info := agentturn.ToolCallInfo{RunID: runID, Call: call, Tool: tool, Args: callArgs(call), Index: -1}
+			// The policy decides the arguments the call would run with:
+			// those of the dispatch it repeats, which a decision may
+			// have rewritten, as Resume runs an approval with them.
+			args := pendingArgs(p)
+			info := agentturn.ToolCallInfo{RunID: runID, Call: call, Tool: tool, Args: args, Index: -1}
 			out, err := e.judge(ctx, e.active(), info, &v)
 			if err != nil {
 				v.Action, v.Rule, v.Subject, v.By = agentturn.Defer, nil, "", ByPolicy
 				v.Reason = call.Name + " hook failed: " + err.Error()
 			}
-			switch v.Action {
-			case agentturn.Block:
+			if v.Action == agentturn.Block {
 				text := cutOffText + " " + refusalText(v.Reason, ByPolicy)
 				ans := agentturn.Output(openresponses.NewFunctionCallOutput(call.CallID, text)).WithBy(v.By).WithReason(v.Reason)
 				return ans, v, nil
-			case agentturn.Defer:
+			}
+			if out.Args != nil && !sameArgs(out.Args, args) {
+				// A hook rewrote the arguments again. Resume runs a
+				// keyed call again only with the arguments of the
+				// dispatch it repeats, so the rewrite runs again only
+				// when its tool says the rewrite is safe to.
+				if rr := agenttool.ReplayOf(ctx, tool, out.Args); rr != agenttool.ReplaySafe {
+					v.Action, v.Rule, v.Subject, v.By = agentturn.Block, nil, "", ByPolicy
+					v.Reason = "not run again: a hook rewrote the arguments, and replay is " + rr.String() + " for the rewrite"
+					return refuse(cutOffText)
+				}
+			}
+			if out.Args != nil {
+				// The verdict is about the rewrite, so a reviewer is
+				// shown it, as Decide shows a deferred call's.
+				info.Args = out.Args
+			}
+			if v.Action == agentturn.Defer {
 				return agentturn.Answer{}, v, &review{info: info, args: out.Args}
 			}
 			v.Reason = "run again: replay " + r.String() + "; " + v.Reason
@@ -359,8 +381,41 @@ func (e *Engine) replay(ctx context.Context, p agentturn.PendingCall) (agenttool
 	if tool == nil {
 		return agenttool.ReplayUnknown, false
 	}
-	r := agenttool.ReplayOf(ctx, tool, callArgs(p.Call))
+	r := agenttool.ReplayOf(ctx, tool, pendingArgs(p))
 	return r, r == agenttool.ReplaySafe || r == agenttool.ReplayKeyed && p.IdempotencyKey != ""
+}
+
+// pendingArgs returns the arguments a pending call runs with when it
+// is approved without arguments of its own: those of the dispatch it
+// repeats, which a decision may have rewritten, else the model's.
+func pendingArgs(p agentturn.PendingCall) json.RawMessage {
+	if len(p.Args) == 0 {
+		return callArgs(p.Call)
+	}
+	return p.Args
+}
+
+// sameArgs reports whether two argument objects are the same JSON
+// value, whatever their spelling, as Resume compares them.
+func sameArgs(a, b json.RawMessage) bool {
+	x, errX := decodeNumbers(a)
+	y, errY := decodeNumbers(b)
+	if errX != nil || errY != nil {
+		return bytes.Equal(a, b)
+	}
+	return reflect.DeepEqual(x, y)
+}
+
+// decodeNumbers decodes raw keeping numbers as written, so two integers
+// past float64's precision are not taken for the same one.
+func decodeNumbers(raw json.RawMessage) (any, error) {
+	d := json.NewDecoder(bytes.NewReader(raw))
+	d.UseNumber()
+	var v any
+	if err := d.Decode(&v); err != nil {
+		return nil, err
+	}
+	return v, nil
 }
 
 // recall returns what the engine remembers of a deferred call of the

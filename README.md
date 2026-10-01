@@ -93,7 +93,9 @@ on its own never allows everything else by accident.
 
 A deny with no specifier denies every call of its tool, so the tool is
 not offered at all: the model never sees it and plans nothing around
-it, as in the reference. `Engine.Filter` drops those tools from a
+it, as in the reference. A carve-out in the deny list that reaches it,
+`read read(!/repo/README.md)`, lets some calls through, so the tool
+stays offered and the decision refuses the rest. `Engine.Filter` drops those tools from a
 list, `Engine.ToolProvider` is the hook value over a list that
 changes, and `Engine.Removes` names the rule for a front that shows
 what a policy withheld.
@@ -340,7 +342,10 @@ the verdict carries them. An output guard sees
 each assistant message as the stream completes it, before the
 transcript, the record or the front's `item_end` keeps it: it may
 rewrite the message or withhold it behind a placeholder, `Withheld by
-deny: matched denied pattern "..."` unless the chain sets its own. A
+deny: matched denied pattern "..."` unless the chain sets its own, and
+the run goes on. A chain that sets `Stop` stops the run instead, as a
+guard stop with the message withheld, so neither the message nor the
+pattern reaches the caller. A
 guard over a finished turn can only stop the run, since the turn's
 items are already in the transcript; it does so as a guard stop, with
 a `BlockedError` wrapping `agentturn.ErrGuard` on the run's end, so a

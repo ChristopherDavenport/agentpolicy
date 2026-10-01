@@ -3,6 +3,7 @@ package guard
 import (
 	"context"
 	"errors"
+	"fmt"
 	"regexp"
 	"strings"
 	"sync"
@@ -67,6 +68,7 @@ func TestChainBeforeModelCall(t *testing.T) {
 		{name: "block", guards: []Guard{fixed("a", allow, nil), fixed("b", block("nope"), nil), fixed("c", allow, nil)}, blocked: &BlockedError{Guard: "b", Subject: "input", Reason: "nope"}, wantErr: "agentpolicy/guard: b blocked the input: nope", input: "hello", reasons: []string{"", "nope"}},
 		{name: "block ignores a rewrite", guards: []Guard{fixed("a", Verdict{Action: agentturn.Block, Reason: "x", Items: openresponses.Items{openresponses.UserText("no")}}, nil)}, wantErr: "agentpolicy/guard: a blocked the input: x", input: "hello", reasons: []string{"x"}},
 		{name: "error", guards: []Guard{fixed("a", allow, errors.New("boom"))}, wantErr: "agentpolicy/guard: a: boom", input: "hello"},
+		{name: "an ErrGuard error is a block", guards: []Guard{fixed("a", allow, fmt.Errorf("%w: spent", agentturn.ErrGuard))}, wantErr: "agentpolicy/guard: a: agentturn: guard stopped the run: spent", input: "hello", reasons: []string{"agentturn: guard stopped the run: spent"}},
 		{name: "defer", guards: []Guard{fixed("a", Verdict{Action: agentturn.Defer}, nil)}, wantErr: "agentpolicy/guard: a: Defer is not valid for content", input: "hello", reasons: []string{""}},
 	}
 	for _, tc := range tests {
@@ -154,6 +156,7 @@ func TestChainShouldStopAfterTurn(t *testing.T) {
 		{name: "allow", guards: []Guard{fixed("a", allow, nil)}, reasons: []string{""}},
 		{name: "stop at the first block", guards: []Guard{fixed("a", allow, nil), fixed("b", block("bad"), nil), fixed("c", block("later"), nil)}, stop: true, wantErr: "agentpolicy/guard: b blocked the output: bad", guard: true, reasons: []string{"", "bad"}},
 		{name: "error", guards: []Guard{fixed("a", allow, errors.New("boom"))}, wantErr: "agentpolicy/guard: a: boom"},
+		{name: "an ErrGuard error is a block", guards: []Guard{fixed("a", allow, fmt.Errorf("%w: spent", agentturn.ErrGuard))}, wantErr: "agentpolicy/guard: a: agentturn: guard stopped the run: spent", guard: true, reasons: []string{"agentturn: guard stopped the run: spent"}},
 		{name: "defer", guards: []Guard{fixed("a", Verdict{Action: agentturn.Defer}, nil)}, wantErr: "agentpolicy/guard: a: Defer is not valid for content", reasons: []string{""}},
 	}
 	for _, tc := range tests {
@@ -208,6 +211,7 @@ func TestChainOutputGuard(t *testing.T) {
 	tests := []struct {
 		name    string
 		guards  []Guard
+		stop    bool
 		text    string // the replacement's text; "" keeps the message
 		wantErr string
 		reasons []string
@@ -218,12 +222,20 @@ func TestChainOutputGuard(t *testing.T) {
 		{name: "block withholds behind the placeholder", guards: []Guard{fixed("a", allow, nil), fixed("b", block("bad"), nil), fixed("c", block("later"), nil)}, text: "Withheld by b: bad", reasons: []string{"", "bad"}},
 		{name: "block ignores a rewrite", guards: []Guard{fixed("a", Verdict{Action: agentturn.Block, Reason: "x", Items: openresponses.Items{openresponses.AssistantText("no")}}, nil)}, text: "Withheld by a: x", reasons: []string{"x"}},
 		{name: "error", guards: []Guard{fixed("a", allow, errors.New("boom"))}, wantErr: "agentpolicy/guard: a: boom"},
+		// Under Stop a Block stops the run and nothing takes the
+		// message's place. (#58)
+		{name: "stop: block stops the run", guards: []Guard{fixed("a", allow, nil), fixed("b", block("bad"), nil), fixed("c", block("later"), nil)}, stop: true, wantErr: "agentpolicy/guard: b blocked the message: bad", reasons: []string{"", "bad"}},
+		{name: "stop: allow keeps the message", guards: []Guard{fixed("a", allow, nil)}, stop: true, reasons: []string{""}},
+		// An error that stops the run is the guard's Block, and is
+		// reported as one. (#58)
+		{name: "an ErrGuard error is a block", guards: []Guard{fixed("a", allow, fmt.Errorf("%w: spent", agentturn.ErrGuard)), fixed("b", allow, nil)}, wantErr: "agentpolicy/guard: a: agentturn: guard stopped the run: spent", reasons: []string{"agentturn: guard stopped the run: spent"}},
+		{name: "a BlockedError is a block with its reason", guards: []Guard{fixed("a", allow, &BlockedError{Guard: "a", Subject: "message", Reason: "spent"})}, wantErr: "agentpolicy/guard: a: agentpolicy/guard: a blocked the message: spent", reasons: []string{"spent"}},
 		{name: "defer", guards: []Guard{fixed("a", Verdict{Action: agentturn.Defer}, nil)}, wantErr: "agentpolicy/guard: a: Defer is not valid for content", reasons: []string{""}},
 		{name: "a rewrite that is not one message", guards: []Guard{notAMessage}, wantErr: "agentpolicy/guard: odd: a rewrite of a message must be one message", reasons: []string{""}},
 	}
 	for _, tc := range tests {
 		j := &journal{}
-		replacement, err := Chain{Guards: tc.guards, Observer: j.observe}.OutputGuard()(ctx, info)
+		replacement, err := Chain{Guards: tc.guards, Observer: j.observe, Stop: tc.stop}.OutputGuard()(ctx, info)
 		if tc.wantErr == "" && err != nil {
 			t.Errorf("%s: %v", tc.name, err)
 		}
@@ -241,6 +253,7 @@ func TestChainOutputGuard(t *testing.T) {
 		if original.Text() != "hello" {
 			t.Fatalf("%s: the original was modified", tc.name)
 		}
+		stopped := errors.Is(err, agentturn.ErrGuard)
 		vs := j.all()
 		if len(vs) != len(tc.reasons) {
 			t.Fatalf("%s: verdicts = %+v, want %d", tc.name, vs, len(tc.reasons))
@@ -248,6 +261,9 @@ func TestChainOutputGuard(t *testing.T) {
 		for i, v := range vs {
 			if v.RunID != "run_3" || v.Turn != 2 || v.Guard != tc.guards[i].Name() || v.Reason != tc.reasons[i] {
 				t.Errorf("%s: verdict[%d] = %+v", tc.name, i, v)
+			}
+			if stopped && i == len(vs)-1 && v.Action != agentturn.Block {
+				t.Errorf("%s: the stop was reported as %v", tc.name, v.Action)
 			}
 		}
 	}
@@ -537,5 +553,24 @@ func TestOutputGuardInTheLoop(t *testing.T) {
 	}
 	if got := strings.Join(reasons, "|"); got != `redact: redacted 1 secret: aws_access_key|deny: matched denied pattern "forbidden"` {
 		t.Errorf("reasons = %q", got)
+	}
+
+	// Under Stop the run ends as a guard stop with the message withheld,
+	// and the guard's reason is in the verdict, not the transcript.
+	// (#58)
+	j = &journal{}
+	output = Chain{Guards: []Guard{Deny(regexp.MustCompile(`forbidden`))}, Observer: j.observe, Stop: true}
+	agent = agentturn.New(agentturn.Config{Model: &echo.Adapter{}, OutputGuard: output.OutputGuard()})
+	end, err = agent.Prompt(ctx, openresponses.UserText("say forbidden"))
+	if err != nil || !errors.Is(end.Err, agentturn.ErrGuard) || end.Reason != agentturn.ReasonStopped || end.Cause != agentturn.StopGuard || !end.Withheld {
+		t.Fatalf("stop: err=%v end=%+v", err, end)
+	}
+	for _, it := range end.Items {
+		if m, ok := it.(*openresponses.Message); ok && m.Role == openresponses.RoleAssistant {
+			t.Errorf("the transcript kept %q", m.Text())
+		}
+	}
+	if vs := j.all(); len(vs) != 1 || vs[0].Action != agentturn.Block || vs[0].Reason != `matched denied pattern "forbidden"` {
+		t.Errorf("stop verdicts = %+v", vs)
 	}
 }
