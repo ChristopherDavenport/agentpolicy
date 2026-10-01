@@ -656,7 +656,9 @@ block with `not released: the turn was stopped`.
 
 A **reviewer** answers a deferred call where a human would: a rule of
 the host's, a model, or a front that asks a person. It receives the
-call as the decision saw it and the verdict that deferred it, and
+call as the decision saw it and the verdict that deferred it, with
+the arguments a hook rewrote the call to in place of the model's,
+since those are what the verdict is about, and
 answers with an outcome, **approved**, **refused** or **timed out**, a
 reason, replacement arguments for an approval, a note for the model,
 and who answered, `agent` when it says nothing.
@@ -692,7 +694,7 @@ A reviewer's answer becomes:
 
 | outcome | answer | verdict reason | decider |
 | --- | --- | --- | --- |
-| approved | approve, with the reviewer's arguments when given, and its note | `approved by reviewer`, `: reason` when given | the reviewer's |
+| approved | approve, with the reviewer's arguments when given, else a hook's rewrite when there was one, and its note | `approved by reviewer`, `: reason` when given | the reviewer's |
 | refused | the refusal text below, and its note | `denied by reviewer`, `: reason` when given | the reviewer's |
 | timed out | `The reviewer did not answer in time; the call did not run.` | `reviewer timed out` | `policy` |
 | the review failed | `The reviewer could not evaluate the call; the call did not run.` | `reviewer failed: E` | `policy` |
@@ -1046,17 +1048,15 @@ listed in the changelog as one.
   by concurrent runs whose tool lists differ reads one list for all of
   them, and a batch hold can be defeated. A lookup given the decision's
   context is proposed.
-- **Cut-off calls and the reviewer** (#50, #51, #52, #53, #54). The
+- **Cut-off calls and the reviewer** (#50, #51, #52, #53). The
   answers without a human are the least settled section. A cut-off
   call is decided on the model's arguments while the loop runs it
   again with those its dispatch ran (#50); a reviewer's refusal,
   timeout or failure on a call that may have run tells the model it
   did not run (#51); a never-started call is refused where the loop
   would put it to the policy (#52); a call the record shows rejected
-  goes to the reviewer, and an approval of it fails the resume (#53);
-  and a reviewer is shown the model's arguments beside a verdict about
-  a hook's rewrite, and an approval runs the model's (#54). Each fix
-  changes text this document states.
+  goes to the reviewer, and an approval of it fails the resume (#53).
+  Each fix changes text this document states.
 - **Presets for an open tool set** (#16). Every preset's default is
   ask, so a host with MCP or plugin tools either prompts for all of
   them or overrides the default and loses the guard for tools added

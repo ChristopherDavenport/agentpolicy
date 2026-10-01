@@ -231,7 +231,7 @@ func (e *Engine) Answers(ctx context.Context, r Reviewer, end *agentturn.RunEnd)
 			}
 			info, v, args = ask.info, cv, ask.args
 		} else {
-			info, v = e.recall(end.RunID, call)
+			info, v, args = e.recall(end.RunID, p)
 			if v.Held {
 				continue
 			}
@@ -364,15 +364,24 @@ func (e *Engine) replay(ctx context.Context, p agentturn.PendingCall) (agenttool
 }
 
 // recall returns what the engine remembers of a deferred call of the
-// run, or the call alone.
-func (e *Engine) recall(runID string, call *openresponses.FunctionCall) (agentturn.ToolCallInfo, Verdict) {
+// run, or the call alone, and the arguments a hook rewrote it to, nil
+// when none did. A call the engine does not remember, one deferred
+// before a restart, carries the loop's own record of a rewrite on
+// PendingCall.Args.
+func (e *Engine) recall(runID string, p agentturn.PendingCall) (agentturn.ToolCallInfo, Verdict, json.RawMessage) {
+	call := p.Call
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if d, ok := e.deferred[runID][call.CallID]; ok {
-		return d.info, d.verdict
+		return d.info, d.verdict, d.args
 	}
-	return agentturn.ToolCallInfo{RunID: runID, Call: call, Args: callArgs(call)},
-		Verdict{RunID: runID, CallID: call.CallID, Tool: call.Name, Action: agentturn.Defer, By: ByPolicy}
+	args := callArgs(call)
+	if p.Args != nil {
+		args = p.Args
+	}
+	return agentturn.ToolCallInfo{RunID: runID, Call: call, Args: args},
+		Verdict{RunID: runID, CallID: call.CallID, Tool: call.Name, Action: agentturn.Defer, By: ByPolicy},
+		p.Args
 }
 
 // answer turns one review into the answer the loop takes and the

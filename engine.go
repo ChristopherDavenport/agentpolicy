@@ -634,6 +634,10 @@ func (e *Engine) Decide(ctx context.Context, info agentturn.ToolCallInfo) (*agen
 		return nil, err
 	}
 	d := deferredCall{info: info, args: out.Args, note: out.Note}
+	if out.Args != nil {
+		// The verdict is about the rewrite, so a reviewer is shown it.
+		d.info.Args = out.Args
+	}
 	if e.batchAsks(ctx, a, info, v.Action) {
 		d.allowed = v.Reason
 		v.Action, v.Held, v.Reason = agentturn.Defer, true, "held for approval: "+v.Reason
