@@ -5,7 +5,7 @@ All user-visible changes to this library. The format follows
 uses [Semantic Versioning](https://semver.org/); before v1.0.0 minor
 versions may break the API.
 
-## Unreleased
+## v0.0.9 - 2026-10-01
 
 - Requires `agentturn` v0.0.13, up from v0.0.12, and `agenttool`
   v0.0.12, up from v0.0.11. An approval from `Engine.Answers` of a
