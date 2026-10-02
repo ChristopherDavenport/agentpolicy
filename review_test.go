@@ -478,7 +478,7 @@ func TestAnswersReleasesHeldCalls(t *testing.T) {
 	reviewedIDs = nil
 	answers, err = e.Answers(ctx, reviewer(Refused), hold())
 	want := []agentturn.Answer{
-		agentturn.Output(openresponses.NewFunctionCallOutput("call_a", "The call was held for an approval and the turn was stopped; the call did not run.")).WithBy(ByPolicy),
+		agentturn.Output(openresponses.NewFunctionCallOutput("call_a", "The call was held for an approval and the turn was stopped; the call did not run.")).WithBy(ByPolicy).WithReason("not released: the turn was stopped"),
 		agentturn.Refuse(openresponses.NewFunctionCallOutput("call_b", "Denied by reviewer. Do not pursue the same outcome through a workaround, indirect execution or policy circumvention.")).WithBy(ByAgent).WithReason("denied by reviewer"),
 	}
 	if !errors.Is(err, ErrDenialBound) || !reflect.DeepEqual(answers, want) || strings.Join(reviewedIDs, ",") != "call_b" {
@@ -520,7 +520,11 @@ func TestAnswersCutOffCallsReadTheirTools(t *testing.T) {
 		if runID != "r" || !strings.HasPrefix(callID, "ran") {
 			return nil, ""
 		}
-		return &openresponses.FunctionCallOutput{ID: "fco_1", CallID: "other", Status: openresponses.StatusCompleted, Output: openresponses.FunctionCallOutputData{Text: "branch output for " + callID}}, where
+		out := &openresponses.FunctionCallOutput{ID: "fco_1", CallID: "other", Status: openresponses.StatusCompleted, Output: openresponses.FunctionCallOutputData{Text: "branch output for " + callID}}
+		if callID == "ran-somewhere" {
+			return out, ""
+		}
+		return out, where
 	}
 	j := &journal{}
 	e, err := Build(Policy{Default: Allow()}, nil, WithObserver(j.observe), WithTools(lookup), WithNeverStarted(never), WithRan(ran))
@@ -556,6 +560,12 @@ func TestAnswersCutOffCallsReadTheirTools(t *testing.T) {
 		// again although the replay rule would run it.
 		{Call: fc("ran-aborted", "bash"), Reason: agentturn.PendingAborted, Tool: tools["bash"]},
 		{Call: fc("ran-keyed", "remind"), Reason: agentturn.PendingAborted, Tool: tools["remind"], IdempotencyKey: "r/ran-keyed"},
+		// A call held after its dispatch whose dispatch completed on the
+		// branch, which is how session.Pending lists one: it is owed the
+		// output, not a review, although its tool would run again.
+		{Call: fc("ran-held", "read"), Reason: agentturn.PendingDeferred, Dispatched: true, Tool: tools["read"]},
+		// A record that says the call ran but not where.
+		{Call: fc("ran-somewhere", "bash"), Reason: agentturn.PendingUnknown},
 		// The record says it never started, so it did not run anywhere.
 		{Call: fc("never-ran", "bash"), Reason: agentturn.PendingUnknown},
 	}}
@@ -595,6 +605,8 @@ func TestAnswersCutOffCallsReadTheirTools(t *testing.T) {
 		agentturn.Output(openresponses.NewFunctionCallOutput("held", cut)).WithBy(ByPolicy).WithReason("not reviewed: deferred"),
 		agentturn.Output(branch("ran-aborted")).WithBy(ByPolicy).WithReason(where),
 		agentturn.Output(branch("ran-keyed")).WithBy(ByPolicy).WithReason(where),
+		agentturn.Output(branch("ran-held")).WithBy(ByPolicy).WithReason(where),
+		agentturn.Output(branch("ran-somewhere")).WithBy(ByPolicy).WithReason("ran elsewhere"),
 		agentturn.Output(openresponses.NewFunctionCallOutput("never-ran", notRun)).WithBy(ByPolicy).WithReason("not run: the call never started"),
 	}
 	if !reflect.DeepEqual(answers, want) {
@@ -619,6 +631,8 @@ func TestAnswersCutOffCallsReadTheirTools(t *testing.T) {
 		fmt.Sprintf("held %v not reviewed: deferred", agentturn.Block),
 		fmt.Sprintf("ran-aborted %v %s", agentturn.Allow, where),
 		fmt.Sprintf("ran-keyed %v %s", agentturn.Allow, where),
+		fmt.Sprintf("ran-held %v %s", agentturn.Allow, where),
+		fmt.Sprintf("ran-somewhere %v ran elsewhere", agentturn.Allow),
 		fmt.Sprintf("never-ran %v not run: the call never started", agentturn.Block),
 	}
 	if !reflect.DeepEqual(got, wantVerdicts) {
@@ -855,6 +869,14 @@ func TestAnswersRefusesAReviewersRewriteOfACallThatMayHaveRun(t *testing.T) {
 	}
 	edit := replays("edit", agenttool.ReplayKeyed)
 	read := replays("read", agenttool.ReplaySafe)
+	// mirrored is keyed, except that a write to the mirror is safe to
+	// repeat: a hook's rewrite to the mirror passes the replay rule.
+	mirrored := agenttool.New("edit", "A tool", run, agenttool.WithReplay(func(_ context.Context, args json.RawMessage) agenttool.Replay {
+		if strings.Contains(string(args), "mirror") {
+			return agenttool.ReplaySafe
+		}
+		return agenttool.ReplayKeyed
+	}))
 	fc := func(name, args string) *openresponses.FunctionCall {
 		return &openresponses.FunctionCall{CallID: "c1", Name: name, Arguments: args}
 	}
@@ -865,8 +887,10 @@ func TestAnswersRefusesAReviewersRewriteOfACallThatMayHaveRun(t *testing.T) {
 	tests := []struct {
 		name    string
 		pending agentturn.PendingCall
-		args    json.RawMessage
-		want    agentturn.Answer
+		// hook, when set, is what a hook rewrites the call to.
+		hook json.RawMessage
+		args json.RawMessage
+		want agentturn.Answer
 		// verdict is the verdict's action and reason; counted says the
 		// answer counts toward the bound.
 		verdict string
@@ -896,6 +920,17 @@ func TestAnswersRefusesAReviewersRewriteOfACallThatMayHaveRun(t *testing.T) {
 			verdict: fmt.Sprintf("%v %s", agentturn.Block, rewrote),
 		},
 		{
+			// The dispatch ran a hook's rewrite, and the reviewer puts it
+			// back: nothing was rewritten that Resume would refuse.
+			name:    "rewritten back to the dispatch's arguments",
+			pending: agentturn.PendingCall{Call: fc("edit", `{"path":"notes.md"}`), Reason: agentturn.PendingAborted, Tool: mirrored, IdempotencyKey: "r/c1", Args: json.RawMessage(`{"path":"/srv/notes.md"}`)},
+			hook:    json.RawMessage(`{"path":"/srv/mirror/notes.md"}`),
+			args:    json.RawMessage(`{"path":"/srv/notes.md"}`),
+			want:    agentturn.ApproveWith("c1", json.RawMessage(`{"path":"/srv/notes.md"}`)).WithBy(ByAgent),
+			verdict: fmt.Sprintf("%v approved by reviewer", agentturn.Allow),
+			counted: true,
+		},
+		{
 			name:    "the same value spelled differently",
 			pending: agentturn.PendingCall{Call: fc("edit", `{"path":"notes.md"}`), Reason: agentturn.PendingAborted, Tool: edit, IdempotencyKey: "r/c1"},
 			args:    json.RawMessage(`{ "path" : "notes.md" }`),
@@ -917,7 +952,14 @@ func TestAnswersRefusesAReviewersRewriteOfACallThatMayHaveRun(t *testing.T) {
 			j := &journal{}
 			// Consecutive 1: an approval that counts resets nothing, and
 			// a refusal that counts would trip the bound at once.
-			e, err := Build(Policy{Default: Ask()}, nil, WithObserver(j.observe), WithDenialBound(DenialBound{Consecutive: 1}))
+			opts := []Option{WithObserver(j.observe), WithDenialBound(DenialBound{Consecutive: 1})}
+			if tc.hook != nil {
+				rewrite := func(context.Context, agentturn.ToolCallInfo) (*agentturn.ToolDecision, error) {
+					return &agentturn.ToolDecision{Args: tc.hook}, nil
+				}
+				opts = append(opts, WithHooks(rewrite))
+			}
+			e, err := Build(Policy{Default: Ask()}, nil, opts...)
 			if err != nil {
 				t.Fatal(err)
 			}

@@ -35,6 +35,14 @@ type grantScopeKey struct{}
 // its hooks, and on the context it activates and revokes the skill's
 // set with; [Engine.RevokeScope] takes every set of a scope back when
 // the conversation ends.
+//
+// A context derived from a scoped one carries the scope. A sub-agent
+// run from a tool call runs under a context derived from the hook's,
+// so it inherits its parent's scope and the parent's grants decide its
+// calls; a host that wants a sub-agent kept out of what its parent
+// opened gives the child's context a scope of its own. A kit that
+// scopes skill grants to a conversation by other means puts the
+// conversation's key here instead, and the engine keeps the scope.
 func ContextWithGrantScope(ctx context.Context, scope string) context.Context {
 	return context.WithValue(ctx, grantScopeKey{}, scope)
 }
@@ -255,17 +263,18 @@ func (e *Engine) Revoke(ctx context.Context, source string) int {
 // another way, so nothing a conversation opened outlives it. Under a
 // context with no scope it removes every unscoped set, and no scoped
 // one. The revocation is journaled as a Verdict, Block with "revoked
-// the rules granted under S", S the scope or "no scope", when it
-// removed a rule.
+// the rules granted under S", S the scope, or "revoked the rules
+// granted without a scope" for the unscoped one, when it removed a
+// rule.
 func (e *Engine) RevokeScope(ctx context.Context) int {
 	scope := GrantScopeFromContext(ctx)
 	n := e.revoke(func(g grant) bool { return g.scope == scope })
 	if n > 0 {
-		under := scope
-		if under == "" {
-			under = "no scope"
+		reason := "revoked the rules granted without a scope"
+		if scope != "" {
+			reason = "revoked the rules granted under " + scope
 		}
-		e.observe(ctx, Verdict{Action: agentturn.Block, Reason: "revoked the rules granted under " + under, By: ByPolicy})
+		e.observe(ctx, Verdict{Action: agentturn.Block, Reason: reason, By: ByPolicy})
 	}
 	return n
 }

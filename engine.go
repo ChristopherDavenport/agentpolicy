@@ -680,6 +680,35 @@ func (e *Engine) Decide(ctx context.Context, info agentturn.ToolCallInfo) (*agen
 	return &out, nil
 }
 
+// Would reports what [Engine.Decide] would decide for the call on its
+// own, as a verdict, without deciding it: the policy of the moment and
+// the grant sets ctx's scope consults, the call's confinement, and the
+// [WithHooks] fold, but no batch hold, since the call's siblings are
+// not read, and nothing remembered, so no deferral waits on an answer
+// and nothing reaches the observer. It is the question a front asks to
+// show which rule will match a call before the call is made, and a
+// host asks to tell a call the policy allows on its own from one only
+// a grant allowed, without reimplementing the precedence over
+// [Engine.Policy] and [Engine.Grants]. The hooks are called as they
+// are for a sibling, so a hook must decide a call the same way however
+// often it is asked; a hook's error is returned as Decide returns it.
+//
+// The verdict is the one Decide would report before the hold, down to
+// its rule, reason, subject and confinement; its Held is never set.
+// Deciding the call afterwards may differ when the rules changed in
+// between, or when another call of its batch asks.
+func (e *Engine) Would(ctx context.Context, info agentturn.ToolCallInfo) (Verdict, error) {
+	name, callID := "", ""
+	if info.Call != nil {
+		name, callID = info.Call.Name, info.Call.CallID
+	}
+	v := Verdict{RunID: info.RunID, Turn: info.Turn, CallID: callID, Tool: name, By: ByPolicy}
+	if _, err := e.judge(ctx, e.active(ctx), info, &v); err != nil {
+		return Verdict{}, err
+	}
+	return v, nil
+}
+
 // judge decides info's call as Decide does before the hold: the
 // policy on its arguments, read with its tool's confinement, and then
 // the hooks folded in. v carries the call's identity in and the

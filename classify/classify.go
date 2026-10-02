@@ -37,14 +37,26 @@ import (
 type Option func(*options)
 
 type options struct {
-	name    string
-	timeout time.Duration
-	request openresponses.Request
+	name      string
+	timeout   time.Duration
+	request   openresponses.Request
+	everyTurn bool
 }
 
 // WithName sets the name the guard reports; the default is "classify".
 func WithName(name string) Option {
 	return func(o *options) { o.name = name }
+}
+
+// WithEveryTurn makes the guard classify every finished turn it is
+// handed as a guard.Output, those in which the model only called tools
+// included. Without it the guard passes a turn that is not the run's
+// answer, guard.Output.Final unset, without a model call: a guard over
+// what the user will read has nothing to judge there, and a tool-heavy
+// run has several such turns for every answer, each of which would
+// bill for a classification of function calls and their results.
+func WithEveryTurn() Option {
+	return func(o *options) { o.everyTurn = true }
 }
 
 // WithTimeout bounds each model call. A reviewer that runs out of time
@@ -119,7 +131,9 @@ func parseAnswer(text string) (answer, error) {
 
 // Guard classifies content with a model and blocks what the rubric
 // refuses. It checks a guard.Input, a guard.Message or a guard.Output
-// and passes anything else.
+// and passes anything else. A guard.Output that is not the run's
+// answer, one whose Final is unset because the model called tools,
+// passes without a model call unless [WithEveryTurn] is given.
 type Guard struct {
 	model     openresponses.Streamer
 	modelName string
@@ -153,6 +167,11 @@ func (g *Guard) Check(ctx context.Context, subject any) (guard.Verdict, error) {
 			items = openresponses.Items{s.Message}
 		}
 	case guard.Output:
+		if !s.Final && !g.o.everyTurn {
+			// A turn that only called tools is not what the user will
+			// read; see WithEveryTurn.
+			return guard.Verdict{Action: agentturn.Allow}, nil
+		}
 		kind = "output"
 		if s.Response != nil {
 			items = s.Response.Output

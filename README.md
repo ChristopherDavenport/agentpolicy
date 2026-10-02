@@ -89,7 +89,10 @@ Precedence is deny, then ask, then allow, then the default, always. A
 deny blocks the call with `denied by bash(rm:*)` as its error output;
 an ask defers it, the run ends with the call pending, and the front
 answers through `Agent.Resume`. The default must be set: a deny list
-on its own never allows everything else by accident.
+on its own never allows everything else by accident. `Engine.Would`
+gives the verdict `Decide` would, without the batch hold and without
+deciding anything, for a front that shows which rule will match before
+the call is made.
 
 A deny with no specifier denies every call of its tool, so the tool is
 not offered at all: the model never sees it and plans nothing around
@@ -296,8 +299,11 @@ against the unscoped sets and those of its own context's scope, and
 `Revoke` removes the set of its context's scope; a context with no
 scope is the unscoped one, as before. Run every hook of the
 conversation, and `GrantSet` and `Revoke` for it, under the same
-context. `Engine.GrantsFor(ctx)` lists the sets a call under `ctx`
-consults; `Engine.Grants` spans every scope.
+context. A context derived from a scoped one carries the scope, so a
+sub-agent run from a tool call is decided under its parent's scope
+unless its context is given one of its own. `Engine.GrantsFor(ctx)`
+lists the sets a call under `ctx` consults; `Engine.Grants` spans
+every scope.
 
 ## A reviewer instead of a human
 

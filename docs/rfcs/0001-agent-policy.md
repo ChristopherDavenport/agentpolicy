@@ -633,7 +633,11 @@ scope alone. A context with no scope is the **unscoped** scope, the
 default, under which a set decides every call the engine sees; an
 unscoped revoke never removes a scoped set, nor a scoped one the
 unscoped set. Revoking a scope removes every set under it, which a
-host does when a conversation ends. One engine serves every agent of a
+host does when a conversation ends. A context derived from a scoped
+one carries the scope, so a sub-agent run from a tool call is decided
+under its parent's scope unless the host gives its context a scope of
+its own; a host that scopes grants to a conversation by other means
+puts the conversation's key here and lets the engine keep the scope. One engine serves every agent of a
 host, and a grant set had no run, so a skill the main agent opened
 granted its tools to a sub-agent that never opened it; the scope is
 how that question (#18) was answered.
@@ -650,9 +654,10 @@ removed a rule is a verdict: allow with the rule and `granted G` for a
 grant, `granted G over R` for a grant over and `granted G by N` for a
 grant set, `N` its source's name or `the product` when it has none;
 block with the rule and `not granted G: reason` for a grant set's
-refusal; block with `revoked the rules granted by N` for a revocation
-and `revoked the rules granted under S` for a scope's, `S` the scope or
-`no scope` for the unscoped one. The decider is `policy`.
+refusal; block with `revoked the rules granted by N` for a revocation,
+`revoked the rules granted under S` for a scope's, `S` the scope, and
+`revoked the rules granted without a scope` for the unscoped scope's.
+The decider is `policy`.
 
 ## Deferred calls
 
@@ -682,10 +687,11 @@ them, the model's order:
   nothing is forgotten and nothing is recorded, so the host answers
   the missing call and releases again.
 
-Every answer the engine builds names `policy` as its decider. Every
-release is a verdict with held set: allow with the rule that allowed
-the call and `released: ` followed by the reason it was allowed, or
-block with `not released: the turn was stopped`.
+Every answer the engine builds names `policy` as its decider, and the
+refusal of a held call carries its verdict's reason. Every release is
+a verdict with held set: allow with the rule that allowed the call and
+`released: ` followed by the reason it was allowed, or block with `not
+released: the turn was stopped`.
 
 ### Answers without a human
 
@@ -718,11 +724,13 @@ order:
   without the reviewer, by `policy`, with `The call was refused before
   it ran; it did not run.` and the verdict `not run: the call was
   refused before it ran`.
-- A call the record shows completed elsewhere, on a branch a rebase
-  left or in the session this one forks, is answered with that output,
-  by `policy`, with the record's reason for where it ran, such as `ran
-  on a branch the rebase left`, as the answer's reason and the
-  verdict's, before the replay rule: it is owed that output and must
+- A call that may have run, a held call dispatched before it was held
+  included, that the record shows completed elsewhere, on a branch a
+  rebase left or in the session this one forks, is answered with that
+  output, by `policy`, with the record's reason for where it ran, `ran
+  on a branch the rebase left`, or `ran elsewhere` when the record
+  gives none, as the answer's reason and the verdict's, before the
+  reviewer and before the replay rule: it is owed that output and must
   not run again.
 - A call that may have run, cut off by an abort or found unanswered in
   a seeded transcript, is not the reviewer's to approve. When its tool
@@ -775,9 +783,9 @@ verdict's reason, so the record's decision says why without the
 verdict beside it. Every answer is a verdict: allow for an approval,
 block otherwise.
 
-An approval of a call that may have run whose arguments differ from
-those the call would run with, a hook's rewrite when there was one,
-else those of the dispatch it repeats, compared as values, is refused
+An approval of a call that may have run whose arguments differ, as
+values, both from the rewrite a hook gave the call, when one did, and
+from those of the dispatch it repeats, is refused
 with `The call was cut off before it finished and may have run; it was
 not run again.`, by `policy`, with the verdict `not run again: the
 reviewer rewrote the arguments, and replay is X for the rewrite`, `X`
@@ -853,7 +861,9 @@ Nothing in a guard chain calls a model. A guard backed by one is the
 host's, through a binding's package: the reference asks for one JSON
 object, `{"allow": true or false, "reason": "..."}`, reads the first
 such object in the answer, and treats a model failure or an answer it
-cannot read as an error, so the chain fails closed.
+cannot read as an error, so the chain fails closed. Over an output it
+passes a turn that is not final without asking the model, unless the
+host says to judge every turn.
 
 The reference guards, informative:
 
@@ -957,9 +967,10 @@ The root module of this repository is the reference binding.
 | aliases | `WithAliases(map[string][]string)` |
 | build | `Build(policy, matchers, opts…)`; `ErrNoDefault`, `ErrNoMatcher`, `ErrToolGlob` for the kinds, and a plain error for `invalid_rule` |
 | engine | `Engine`; `Policy`, `PolicyOf(source)`, `Sources`, `Withheld`, `SetPolicy` |
-| decision | `Engine.Decide`, `Engine.BeforeToolCall()` for `agentturn.Config.BeforeToolCall` |
+| decision | `Engine.Decide`, `Engine.BeforeToolCall()` for `agentturn.Config.BeforeToolCall`; `Engine.Would(ctx, info)`, the verdict Decide would give before the hold, with no deferral remembered and no verdict reported |
 | confinement | `agenttool.ConfinedBy` by default; `WithConfinement(fn)`, `nil` to turn it off |
 | sibling tools | `WithTools(lookup)`, `WithToolsFor(lookup)` for one given the decision's context |
+| model-backed output | `classify.WithEveryTurn()` to judge a turn that is not final |
 | hooks | `WithHooks(fns…)` |
 | offering tools | `Engine.Removes(tool)`, `Engine.Filter(tools)`, `Engine.ToolProvider(base)` for `agentturn.Config.ToolProvider` |
 | grants | `Engine.Grant`, `Engine.GrantOver`; `Engine.GrantSet` → granted and `[]Refusal{Rule, Reason}`, `Engine.Revoke`, `Engine.Grants`; the scope: `ContextWithGrantScope(ctx, scope)`, `GrantScopeFromContext(ctx)`, `Engine.GrantsFor(ctx)`, `Engine.RevokeScope(ctx)` |
@@ -972,7 +983,7 @@ The root module of this repository is the reference binding.
 | verdict | `Verdict{RunID, Turn, CallID, Tool, Guard, Action, Rule, Reason, By, Held, Subject, Confined}`; `WithObserver(fn)`, which adds an observer |
 | record | `VerdictNS = "agentpolicy:verdict"`; `Verdict.Record()` → namespace and bytes |
 | presets | `Tools{Read, Edit, Execute}`; `Suggest`, `AutoEdit`, `FullAuto` |
-| guard | `guard.Guard{Name, Check}`, `guard.New`; `guard.Input{Items, Instructions}`, `guard.Message`, `guard.Output`; `guard.Verdict{Action, Reason, Items, Instructions}` |
+| guard | `guard.Guard{Name, Check}`, `guard.New`; `guard.Input{Items, Instructions}`, `guard.Message`, `guard.Output{Response, Final}`; `guard.Verdict{Action, Reason, Items, Instructions}` |
 | chain | `guard.Chain{Guards, Observer, Placeholder, Stop}`; `BeforeModelCall`, `OutputGuard`, `ShouldStopAfterTurn`; `guard.Withheld` |
 | guard stop | `guard.BlockedError{Guard, Subject, Reason}`, which wraps `agentturn.ErrGuard` |
 | reference guards | `guard.Limit`, `guard.Deny`, `guard.Secrets`, `guard.Redact`, `guard.Pattern`, `guard.DefaultSecrets` |
@@ -1146,13 +1157,15 @@ listed in the changelog as one.
   (#63).
 - **What the loop's pending call does not carry** (#53, #63). The
   binding reads the record through the host, `WithNeverStarted` and
-  `WithRan`, for what agentturn's `PendingCall` does not say: the
-  output of a call that completed on a branch a rebase left, which
+  `WithRan`, for what agentturn v0.0.15's `PendingCall` does not say:
+  the output of a call that completed on a branch a rebase left, which
   agentturn/session's `ReplayAnswers` holds on a private field, and
   the reason of the reject a rejected call is owed, which this
-  document answers with fixed text. When the loop carries them, the
-  loop's word is read first and the host's second, and the rejected
-  call's answer becomes the reject's own reason.
+  document answers with fixed text. agentturn's next release carries
+  the first as `PendingCall.Ran` and `PendingCall.RanWhere`; once the
+  binding requires it, the loop's word is read first and the host's
+  second, and when the reject's reason follows, the rejected call's
+  answer becomes it.
 - Answered in v0.0.11: `redact` reads only the items that are not
   messages over a finished turn, since the messages were its to
   rewrite on the output guard (#17); the output subject says whether

@@ -534,7 +534,7 @@ func TestGrantCrossesAgents(t *testing.T) {
 		"granted bash(git diff:*) by skill:review",
 		"granted bash(git log:*) by skill:review",
 		"revoked the rules granted under A",
-		"revoked the rules granted under no scope",
+		"revoked the rules granted without a scope",
 		"revoked the rules granted under B",
 	}
 	if strings.Join(got, "|") != strings.Join(want, "|") {

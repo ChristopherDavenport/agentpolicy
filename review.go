@@ -122,7 +122,12 @@ func WithNeverStarted(fn func(ctx context.Context, runID, callID string) bool) O
 // forks, which agentturn/session's ReplayAnswers answers with that output.
 // fn is called with the run and the call and returns the output and where
 // it ran, as the record says it ("ran on a branch the rebase left"), or
-// nil for a call the record does not show completed.
+// nil for a call the record does not show completed; an empty where is
+// recorded as "ran elsewhere". It is read for every call that may have
+// run, a deferred call held after its dispatch included, before the
+// reviewer and before the replay rule. The loop's PendingCall does not
+// yet carry the output; once it does, as PendingCall.Ran and
+// PendingCall.RanWhere, the loop's word is read first and fn second.
 func WithRan(fn func(ctx context.Context, runID, callID string) (output *openresponses.FunctionCallOutput, where string)) Option {
 	return func(e *Engine) { e.ran = fn }
 }
@@ -157,6 +162,9 @@ const (
 	decidedOnResumeReason = "not started: decided on resume"
 	neverStartedReason    = "not run: the call never started"
 	rejectedReason        = "not run: the call was refused before it ran"
+	// ranElsewhereReason stands in for the record's word on where a
+	// call ran when WithRan gives none.
+	ranElsewhereReason = "ran elsewhere"
 )
 
 // notRun is what the model reads when a reviewer's timeout or failure
@@ -293,6 +301,11 @@ func (e *Engine) Answers(ctx context.Context, r Reviewer, end *agentturn.RunEnd)
 			answers = append(answers, agentturn.Approve(call.CallID).WithBy(ByPolicy).WithReason(decidedOnResumeReason))
 			continue
 		}
+		if ans, v, ok := e.ranElsewhere(ctx, end.RunID, p); ok {
+			answers = append(answers, ans)
+			e.observe(ctx, v)
+			continue
+		}
 		var (
 			info agentturn.ToolCallInfo
 			v    Verdict
@@ -373,11 +386,37 @@ func (e *Engine) unreviewed(ctx context.Context, p agentturn.PendingCall) bool {
 	return p.MayHaveRun()
 }
 
+// ranElsewhere answers a call that may have run, a deferred call held
+// after its dispatch included, when the record shows it ran to
+// completion elsewhere, on a branch a rebase left or in the session
+// this one forks: it is owed that output and must not run again, nor
+// be reviewed, so it is read before the replay rule and before the
+// reviewer. The record is read through [WithRan] until agentturn's
+// PendingCall carries the output, as PendingCall.Ran and
+// PendingCall.RanWhere; then the loop's word is read first and the
+// option second. It reports false for a call the record does not show
+// completed.
+func (e *Engine) ranElsewhere(ctx context.Context, runID string, p agentturn.PendingCall) (agentturn.Answer, Verdict, bool) {
+	if e.ran == nil || !p.MayHaveRun() {
+		return agentturn.Answer{}, Verdict{}, false
+	}
+	call := p.Call
+	out, where := e.ran(ctx, runID, call.CallID)
+	if out == nil {
+		return agentturn.Answer{}, Verdict{}, false
+	}
+	if where == "" {
+		where = ranElsewhereReason
+	}
+	v := Verdict{RunID: runID, CallID: call.CallID, Tool: call.Name, Action: agentturn.Allow, Reason: where, By: ByPolicy}
+	ans := agentturn.Output(&openresponses.FunctionCallOutput{CallID: call.CallID, Status: out.Status, Output: out.Output})
+	return ans.WithBy(ByPolicy).WithReason(where), v, true
+}
+
 // cutOff answers a call an abort cut off or a seeded transcript left
 // unanswered, without a reviewer: refused as never run when the record
 // says it never started, answered as refused when a decision refused
-// it before it ran, answered with its output when the record shows it
-// ran to completion elsewhere, and refused as one that may have run
+// it before it ran, and refused as one that may have run
 // when its tool does not say a second run is safe, or keyed with the
 // key of its first, or when it was already answered.
 //
@@ -406,18 +445,6 @@ func (e *Engine) cutOff(ctx context.Context, runID string, p agentturn.PendingCa
 			// reason, the owed refusal will be written from it.
 			v.Reason = rejectedReason
 			return refuse(rejectedText)
-		}
-		if e.ran != nil && p.MayHaveRun() {
-			// The record shows the call ran to completion elsewhere, on
-			// a branch a rebase left or in the session this one forks,
-			// so it is owed that output and must not run again. When
-			// agentturn's PendingCall carries the output, the loop's
-			// word is read first and the option second.
-			if out, where := e.ran(ctx, runID, call.CallID); out != nil {
-				v.Action, v.Reason = agentturn.Allow, where
-				ans := agentturn.Output(&openresponses.FunctionCallOutput{CallID: call.CallID, Status: out.Status, Output: out.Output})
-				return ans.WithBy(ByPolicy).WithReason(where), v, nil
-			}
 		}
 		if r, again := e.replay(ctx, p); again {
 			tool := p.Tool
@@ -480,19 +507,19 @@ type review struct {
 }
 
 // rewriteRefused refuses a reviewer's approval of a call that may have
-// run when revArgs, the arguments the approval carries, differ from
-// those the call would otherwise run with, rewrite when a hook gave
-// one, else those of the dispatch it repeats, and the call's tool does
-// not say running the rewrite is safe: Resume would refuse a keyed
+// run when revArgs, the arguments the approval carries, differ both
+// from the rewrite a hook gave the call, when one did, and from those
+// of the dispatch it repeats, and the call's tool does not say running
+// the rewrite is safe: Resume would refuse a keyed
 // call run again with other arguments under its dispatch's key. It
 // reports false when the approval stands.
 func (e *Engine) rewriteRefused(ctx context.Context, p agentturn.PendingCall, info agentturn.ToolCallInfo, revArgs, rewrite json.RawMessage) (agentturn.Answer, Verdict, bool) {
 	call := p.Call
-	base := rewrite
-	if base == nil {
-		base = pendingArgs(p)
-	}
-	if revArgs == nil || sameArgs(revArgs, base) {
+	// The approval stands with the arguments a hook rewrote the call
+	// to, and with those of the dispatch it repeats, which Resume runs
+	// under the dispatch's key: a reviewer that puts a hook's rewrite
+	// back rewrote nothing.
+	if revArgs == nil || rewrite != nil && sameArgs(revArgs, rewrite) || sameArgs(revArgs, pendingArgs(p)) {
 		return agentturn.Answer{}, Verdict{}, false
 	}
 	tool := p.Tool
