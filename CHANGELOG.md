@@ -5,7 +5,7 @@ All user-visible changes to this library. The format follows
 uses [Semantic Versioning](https://semver.org/); before v1.0.0 minor
 versions may break the API.
 
-## Unreleased
+## v0.0.11 - 2026-10-02
 
 - Requires `agentturn` v0.0.16, up from v0.0.15, `agenttool` v0.0.15,
   up from v0.0.14, and `openresponses` v0.0.14, up from v0.0.12.
