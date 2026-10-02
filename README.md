@@ -309,13 +309,20 @@ safe under its first run's key, `ReplayKeyed`, and the loop carries
 that key, it is decided under the policy first, since a call a seeded
 transcript left may have been waiting on the user: it runs again when
 the policy allows it, goes to the reviewer when the policy asks, and is
-refused when the policy denies it. It is refused as never
-run when the loop never handed it over, `PendingUndispatched`, or the
-session says it never started, through `WithNeverStarted`; and
-otherwise it is refused with text that says it may have run, as is a
-call pending as `PendingAnswered`. A deferred call held after its
-dispatch is reviewed when it may run again and refused when it may
-not. After three consecutive refusals, or ten within the
+refused when the policy denies it. When the reviewer does not approve
+such a call, the model reads that it was cut off and may have run; an
+approval with other arguments than the call would run with is refused
+unless the tool says the rewrite is safe, since the loop would refuse
+to run a keyed call again with them. A call the loop never handed over,
+`PendingUndispatched`, is approved for the loop to put to the policy on
+resume; one the session says never started, through
+`WithNeverStarted`, is refused as never run; one the session says ran
+to completion on a branch a rebase left, through `WithRan`, is answered
+with that output; one pending as `PendingRejected` is answered as
+refused before it ran; and otherwise it is refused with text that says
+it may have run, as is a call pending as `PendingAnswered`. A deferred
+call held after its dispatch is reviewed when it may run again and
+refused when it may not. After three consecutive refusals, or ten within the
 last fifty reviews, the refusals are built with `agentturn.Refuse`, so
 resuming with them appends the outputs and ends the run without a
 model call, and `ErrDenialBound` tells the front why.
