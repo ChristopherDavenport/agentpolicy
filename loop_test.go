@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -458,5 +459,181 @@ func TestLoopTwoAgentsOneEngine(t *testing.T) {
 	}
 	if got := strings.Join(mainBash.ran, "|"); got != "git add -A|git commit -m wip|git push --force" {
 		t.Errorf("the main agent ran %q", got)
+	}
+}
+
+// seededEnd is the run's end a front holds for an agent seeded from a
+// record: its pending calls, as agentturn lists them.
+func seededEnd(agent *agentturn.Agent) *agentturn.RunEnd {
+	return &agentturn.RunEnd{RunID: "seeded", Reason: agentturn.ReasonInputRequired, Pending: agent.State().Pending}
+}
+
+// A call the loop never handed to its tool is approved for the loop to
+// decide, and Resume puts it to the engine's BeforeToolCall: under a
+// policy that allows it, it runs and the policy's decision is the one
+// verdict; under one that asks, the run ends asking again with the
+// call deferred. (#52)
+func TestLoopAnswersApprovesAnUndispatchedCallForThePolicy(t *testing.T) {
+	ctx := context.Background()
+	never := ReviewerFunc(func(context.Context, agentturn.ToolCallInfo, Verdict) (Review, error) {
+		t.Error("an undispatched call reached the reviewer")
+		return Review{}, nil
+	})
+	seed := func(e *Engine) (*agentturn.Agent, *bashTool) {
+		bash := &bashTool{}
+		call := &openresponses.FunctionCall{CallID: "call_1", Name: "bash", Arguments: `{"command":"git status"}`}
+		agent := agentturn.New(agentturn.Config{
+			Model:          &echo.Adapter{},
+			Tools:          []agenttool.Tool{bash.tool()},
+			BeforeToolCall: e.BeforeToolCall(),
+		},
+			agentturn.WithTranscript(agentturn.Transcript{openresponses.UserText("git status"), call}),
+			agentturn.WithPending([]agentturn.PendingCall{{Call: call, Reason: agentturn.PendingUndispatched}}),
+		)
+		return agent, bash
+	}
+	wantAnswers := []agentturn.Answer{agentturn.Approve("call_1").WithBy(ByPolicy).WithReason("not started: decided on resume")}
+
+	// Allowed: the call runs, and the verdict is the policy's.
+	j := &journal{}
+	e, err := Build(Policy{Allow: rules(t, "bash(git status:*)"), Default: Deny()}, testMatchers, WithObserver(j.observe))
+	if err != nil {
+		t.Fatal(err)
+	}
+	agent, bash := seed(e)
+	if p := agent.State().Pending; len(p) != 1 || p[0].Reason != agentturn.PendingUndispatched {
+		t.Fatalf("seeded pending = %+v", p)
+	}
+	answers, err := e.Answers(ctx, never, seededEnd(agent))
+	if err != nil || !reflect.DeepEqual(answers, wantAnswers) {
+		t.Fatalf("answers = %s, %v", dump(answers), err)
+	}
+	if vs := j.all(); len(vs) != 0 {
+		t.Errorf("the approval was observed as a verdict: %+v", vs)
+	}
+	end, err := agent.Resume(ctx, answers...)
+	if err != nil || end.Reason != agentturn.ReasonDone {
+		t.Fatalf("resume allowed: err=%v end=%+v", err, end)
+	}
+	if len(bash.ran) != 1 || bash.ran[0] != "git status" {
+		t.Errorf("ran = %v", bash.ran)
+	}
+	vs := j.all()
+	if len(vs) != 1 || vs[0].Action != agentturn.Allow || vs[0].CallID != "call_1" || vs[0].Rule == nil || vs[0].Rule.String() != "bash(git status:*)" || vs[0].Reason != "allowed by bash(git status:*)" || vs[0].RunID != end.RunID {
+		t.Errorf("verdicts = %+v", vs)
+	}
+
+	// Asked: nothing runs, and the run ends asking with the call
+	// deferred, which the reviewer then answers as any deferred call.
+	j = &journal{}
+	e, err = Build(Policy{Default: Ask()}, testMatchers, WithObserver(j.observe))
+	if err != nil {
+		t.Fatal(err)
+	}
+	agent, bash = seed(e)
+	answers, err = e.Answers(ctx, never, seededEnd(agent))
+	if err != nil || !reflect.DeepEqual(answers, wantAnswers) {
+		t.Fatalf("answers = %s, %v", dump(answers), err)
+	}
+	end, err = agent.Resume(ctx, answers...)
+	if err != nil || end.Reason != agentturn.ReasonInputRequired || len(end.Pending) != 1 || end.Pending[0].Reason != agentturn.PendingDeferred || end.Pending[0].Call.CallID != "call_1" || len(bash.ran) != 0 {
+		t.Fatalf("resume asked: err=%v end=%+v ran=%v", err, end, bash.ran)
+	}
+	vs = j.all()
+	if len(vs) != 1 || vs[0].Action != agentturn.Defer || vs[0].CallID != "call_1" || vs[0].Reason != "no rule allows bash: approval required by default" {
+		t.Errorf("verdicts = %+v", vs)
+	}
+	approve := ReviewerFunc(func(context.Context, agentturn.ToolCallInfo, Verdict) (Review, error) {
+		return Review{Outcome: Approved}, nil
+	})
+	answers, err = e.Answers(ctx, approve, end)
+	if err != nil {
+		t.Fatal(err)
+	}
+	end, err = agent.Resume(ctx, answers...)
+	if err != nil || end.Reason != agentturn.ReasonDone || len(bash.ran) != 1 || bash.ran[0] != "git status" {
+		t.Fatalf("resume reviewed: err=%v end=%+v ran=%v", err, end, bash.ran)
+	}
+}
+
+type editArgs struct {
+	Path string `json:"path"`
+}
+
+// editTool is keyed: a second run under the first run's key has no
+// further effect, so running it again with other arguments under that
+// key is what Resume refuses.
+type editTool struct {
+	ran []string
+}
+
+func (e *editTool) tool() agenttool.Tool {
+	return agenttool.New("edit", "Edit a file", func(_ context.Context, a editArgs) (string, error) {
+		e.ran = append(e.ran, a.Path)
+		return "edited " + a.Path, nil
+	}, agenttool.WithReplay(func(context.Context, json.RawMessage) agenttool.Replay { return agenttool.ReplayKeyed }))
+}
+
+// A reviewer's approval of a cut-off keyed call with other arguments
+// used to fail the resume with ErrAmbiguousCall; Answers now refuses
+// it with text the model reads, and the resume completes with nothing
+// run. (#62)
+func TestLoopAnswersRefusesARewriteResumeWouldReject(t *testing.T) {
+	ctx := context.Background()
+	edit := &editTool{}
+	tool := edit.tool()
+	lookup := func(name string) (agenttool.Tool, bool) {
+		if name == "edit" {
+			return tool, true
+		}
+		return nil, false
+	}
+	j := &journal{}
+	e, err := Build(Policy{Default: Ask()}, testMatchers, WithObserver(j.observe), WithTools(lookup))
+	if err != nil {
+		t.Fatal(err)
+	}
+	call := &openresponses.FunctionCall{CallID: "call_1", Name: "edit", Arguments: `{"path":"notes.md"}`}
+	agent := agentturn.New(agentturn.Config{
+		Model:          &echo.Adapter{},
+		Tools:          []agenttool.Tool{tool},
+		BeforeToolCall: e.BeforeToolCall(),
+	},
+		agentturn.WithTranscript(agentturn.Transcript{openresponses.UserText("notes.md"), call}),
+		agentturn.WithPending([]agentturn.PendingCall{{Call: call, Reason: agentturn.PendingAborted, IdempotencyKey: "k1"}}),
+	)
+	other := json.RawMessage(`{"path":"other.md"}`)
+	// The filing: the approval Answers used to build fails the resume.
+	if _, err := agent.Resume(ctx, agentturn.ApproveWith("call_1", other).WithBy(ByAgent)); !errors.Is(err, agentturn.ErrAmbiguousCall) {
+		t.Fatalf("resume with the rewrite: %v", err)
+	}
+	var reviewed []string
+	reviewer := ReviewerFunc(func(_ context.Context, info agentturn.ToolCallInfo, v Verdict) (Review, error) {
+		reviewed = append(reviewed, info.Call.CallID+": "+v.Reason)
+		return Review{Outcome: Approved, Args: other}, nil
+	})
+	answers, err := e.Answers(ctx, reviewer, seededEnd(agent))
+	if err != nil {
+		t.Fatal(err)
+	}
+	const (
+		cut    = "The call was cut off before it finished and may have run; it was not run again."
+		reason = "not run again: the reviewer rewrote the arguments, and replay is keyed for the rewrite"
+	)
+	want := []agentturn.Answer{agentturn.Output(openresponses.NewFunctionCallOutput("call_1", cut)).WithBy(ByPolicy).WithReason(reason)}
+	if !reflect.DeepEqual(answers, want) || strings.Join(reviewed, "|") != "call_1: no rule allows edit: approval required by default" {
+		t.Fatalf("answers = %s, reviewed %v", dump(answers), reviewed)
+	}
+	end, err := agent.Resume(ctx, answers...)
+	if err != nil || end.Reason != agentturn.ReasonDone || len(edit.ran) != 0 {
+		t.Fatalf("resume: err=%v end=%+v ran=%v", err, end, edit.ran)
+	}
+	tail := agent.State().Transcript
+	if text := tail[len(tail)-1].(*openresponses.Message).Text(); text != "Tool result: "+cut {
+		t.Errorf("assistant saw %q", text)
+	}
+	vs := j.all()
+	if len(vs) != 1 || vs[0].Action != agentturn.Block || vs[0].Reason != reason || vs[0].By != ByPolicy || vs[0].Rule != nil {
+		t.Errorf("verdicts = %+v", vs)
 	}
 }

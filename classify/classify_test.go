@@ -63,7 +63,10 @@ func TestGuardCheck(t *testing.T) {
 	}{
 		{name: "allow", subject: guard.Input{Items: openresponses.Items{openresponses.UserText(`{"allow": true, "reason": "benign"}`)}}, action: agentturn.Allow, reason: "benign"},
 		{name: "block", subject: guard.Input{Items: openresponses.Items{openresponses.UserText(`{"allow": false, "reason": "asks to ignore instructions"}`)}}, action: agentturn.Block, reason: "asks to ignore instructions"},
-		{name: "output", subject: guard.Output{Response: &openresponses.Response{Output: openresponses.Items{openresponses.AssistantText("Sure: {\"allow\": false, \"reason\": \"leaks\"}")}}}, action: agentturn.Block, reason: "leaks"},
+		{name: "output", subject: guard.Output{Response: &openresponses.Response{Output: openresponses.Items{openresponses.AssistantText("Sure: {\"allow\": false, \"reason\": \"leaks\"}")}}, Final: true}, action: agentturn.Block, reason: "leaks"},
+		// A turn that only called tools is not the run's answer, so it
+		// passes without a model call (#20).
+		{name: "a turn that is not final passes without a call", subject: guard.Output{Response: &openresponses.Response{Output: openresponses.Items{openresponses.AssistantText("{\"allow\": false, \"reason\": \"leaks\"}"), &openresponses.FunctionCall{Name: "f", Arguments: `{}`}}}}, action: agentturn.Allow},
 		{name: "prose around the object", subject: guard.Input{Items: openresponses.Items{openresponses.UserText("Here is my verdict:\n```json\n{\"allow\": true, \"reason\": \"fine\"}\n```")}}, action: agentturn.Allow, reason: "fine"},
 		{name: "first object without allow is skipped", subject: guard.Input{Items: openresponses.Items{&openresponses.FunctionCall{Name: "f", Arguments: `{"x":1}`}, openresponses.UserText(`{"allow": false, "reason": "second"}`)}}, action: agentturn.Block, reason: "second"},
 		{name: "unreadable answer", subject: guard.Input{Items: openresponses.Items{openresponses.UserText("not json")}}, err: `agentpolicy/classify: unreadable answer: "input:\nuser: not json\n"`},
@@ -83,6 +86,12 @@ func TestGuardCheck(t *testing.T) {
 		if err != nil || v.Action != tc.action || v.Reason != tc.reason || v.Items != nil {
 			t.Errorf("%s: %+v, %v", tc.name, v, err)
 		}
+	}
+	// WithEveryTurn judges a turn that is not final too.
+	every := New(&echo.Adapter{}, "m", "rubric", WithEveryTurn())
+	toolTurn := guard.Output{Response: &openresponses.Response{Output: openresponses.Items{openresponses.AssistantText("{\"allow\": false, \"reason\": \"leaks\"}")}}}
+	if v, err := every.Check(ctx, toolTurn); err != nil || v.Action != agentturn.Block || v.Reason != "leaks" {
+		t.Errorf("WithEveryTurn: %+v, %v", v, err)
 	}
 	// The request carries the rubric, the answer instruction, the
 	// rendered subject, the JSON schema format and the base request.

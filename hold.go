@@ -101,8 +101,9 @@ func (e *Engine) answered(runID, callID string) {
 // is a Verdict through the observer with Held set: Allow with the rule
 // that allowed the call, or Block when the turn was stopped.
 // Every answer the engine builds names the policy as its decider,
-// through agentturn.Answer.By; the caller's answers are returned as
-// given.
+// through agentturn.Answer.By, and a refusal carries the verdict's
+// reason, "not released: the turn was stopped", through
+// agentturn.Answer.Reason; the caller's answers are returned as given.
 //
 // A pending call neither the caller nor the engine answers is
 // [ErrUnanswered], returned with the answers and naming the call,
@@ -157,7 +158,7 @@ func (e *Engine) Release(ctx context.Context, end *agentturn.RunEnd, answers ...
 		v := Verdict{RunID: d.info.RunID, Turn: d.info.Turn, CallID: id, Tool: p.Call.Name, Action: agentturn.Allow, Held: true, By: ByPolicy, Confined: d.verdict.Confined}
 		if stopped {
 			v.Action, v.Reason = agentturn.Block, "not released: the turn was stopped"
-			out = append(out, agentturn.Output(openresponses.NewFunctionCallOutput(id, heldStoppedText)).WithBy(ByPolicy))
+			out = append(out, agentturn.Output(openresponses.NewFunctionCallOutput(id, heldStoppedText)).WithBy(ByPolicy).WithReason(v.Reason))
 		} else {
 			v.Rule, v.Reason = d.verdict.Rule, "released: "+d.allowed
 			ans := agentturn.Approve(id)

@@ -344,9 +344,11 @@ matcher to read the specifier with.
 ## Deciding a subject
 
 A subject is decided against the **active lists**: the policy's lists,
-followed by the kept lists of every active grant set in activation
-order (see [Grant sets](#grant-sets)). The inputs are the tool whose
-rules apply, the subject's arguments, and the call's confinement.
+followed by the kept lists of the active grant sets the decision
+consults, in activation order: the sets activated under no grant
+scope, then those activated under the scope of the decision's context
+(see [Grant sets](#grant-sets)). The inputs are the tool whose rules
+apply, the subject's arguments, and the call's confinement.
 
 A rule **fires** for a tool `T` and arguments `A`, within the list `L`
 it belongs to, when all of these hold:
@@ -496,17 +498,20 @@ batch holds, and a deferred call is deferred on its own account.
 
 A sibling's confinement is read from its own tool when the harness has
 handed the engine that sibling's call, and otherwise from the tool a
-host-supplied lookup names for it, or read as unconfined when there is
-none. So without a lookup, a call before a confined command that a
+host-supplied lookup names for it, given the decision's context, which
+carries the run's ID, so an engine shared by runs whose tool lists
+differ reads each run's list (this answers #43), or read as unconfined
+when there is none. So without a lookup, a call before a confined command that a
 bare ask rule names is held for it. A reading only ever moves toward
 asking within a batch: a sibling once read as asking stays so, and a
 call decided twice is held at least as often as the first time, so it
 never runs beside an ask.
 
 A batch is identified by its run, its turn, every call's ID, name and
-arguments, and the rules in force. A binding MAY cache the siblings'
-readings for a batch, and MUST NOT read a cache across two batches or
-across a change of rules.
+arguments, and the rules in force, the grant scope of the decision's
+context included. A binding MAY cache the siblings' readings for a
+batch, and MUST NOT read a cache across two batches, across a change
+of rules or across two grant scopes.
 
 The loop decides every call of a batch before any executes, under
 agentturn RFC 0001, which is what lets the engine see an ask wherever
@@ -528,7 +533,11 @@ with a specifier denies some calls and leaves the tool offered.
 
 The removal test and the decision's tool-name test are one test, so a
 front that lists what a policy withheld and the list the model is
-offered cannot disagree. Removing a tool is not a verdict and is not
+offered cannot disagree. The active deny list the offer reads is the
+one a decision under the offer's context reads: the policy's and the
+unscoped grant sets' always, and a scoped set's for the turns of the
+runs under its scope; a test with no context reads the unscoped sets
+alone. Removing a tool is not a verdict and is not
 recorded: it answers what the model is offered, once per turn, not
 what was decided about a call.
 
@@ -614,20 +623,41 @@ about a subject, and shadowing answers it at the decision. Nor is a
 bare rule a carve-out reaches, as the offer reads one: the carve-out
 lets some subjects past it, and the decision tells which.
 
-Sets are keyed by source name: activating a set under a name already
-active replaces it in place, and **revoking** a name removes its set,
-which is what a host does at the turn boundary for a grant that lasts
-one turn. A set's bare deny, a skill's `disallowed-tools`, removes the
-tool from the offer for as long as the set is active.
+Sets are keyed by **grant scope** and source name. The scope is a key
+the host gives the conversation, agent or run whose calls a set should
+decide, a session ID say, carried on the context: a set is activated
+under the scope of the context it is activated with, a subject is
+decided against the unscoped sets and those of its context's scope,
+and revoking a name removes the set of that name under the context's
+scope alone. A context with no scope is the **unscoped** scope, the
+default, under which a set decides every call the engine sees; an
+unscoped revoke never removes a scoped set, nor a scoped one the
+unscoped set. Revoking a scope removes every set under it, which a
+host does when a conversation ends. A context derived from a scoped
+one carries the scope, so a sub-agent run from a tool call is decided
+under its parent's scope unless the host gives its context a scope of
+its own; a host that scopes grants to a conversation by other means
+puts the conversation's key here and lets the engine keep the scope. One engine serves every agent of a
+host, and a grant set had no run, so a skill the main agent opened
+granted its tools to a sub-agent that never opened it; the scope is
+how that question (#18) was answered.
+
+Activating a set under a name and scope already active replaces it in
+place, and **revoking** a name removes its set under the scope, which
+is what a host does at the turn boundary for a grant that lasts one
+turn. A set's bare deny, a skill's `disallowed-tools`, removes the
+tool from the offer for as long as the set is active, for the runs
+under its scope.
 
 Every grant, every grant set's refusal, and every revocation that
 removed a rule is a verdict: allow with the rule and `granted G` for a
 grant, `granted G over R` for a grant over and `granted G by N` for a
 grant set, `N` its source's name or `the product` when it has none;
 block with the rule and `not granted G: reason` for a grant set's
-refusal; block
-with `revoked the rules granted by N` for a revocation. The decider is
-`policy`.
+refusal; block with `revoked the rules granted by N` for a revocation,
+`revoked the rules granted under S` for a scope's, `S` the scope, and
+`revoked the rules granted without a scope` for the unscoped scope's.
+The decider is `policy`.
 
 ## Deferred calls
 
@@ -657,10 +687,11 @@ them, the model's order:
   nothing is forgotten and nothing is recorded, so the host answers
   the missing call and releases again.
 
-Every answer the engine builds names `policy` as its decider. Every
-release is a verdict with held set: allow with the rule that allowed
-the call and `released: ` followed by the reason it was allowed, or
-block with `not released: the turn was stopped`.
+Every answer the engine builds names `policy` as its decider, and the
+refusal of a held call carries its verdict's reason. Every release is
+a verdict with held set: allow with the rule that allowed the call and
+`released: ` followed by the reason it was allowed, or block with `not
+released: the turn was stopped`.
 
 ### Answers without a human
 
@@ -677,10 +708,32 @@ Answering a run's pending calls with a reviewer, per pending call in
 order:
 
 - A held call is left to the release, which runs last.
-- A call the loop never handed to its tool, or one the record says
-  never started, is refused with `The call was cut off before it
+- A call the loop never handed to its tool, pending as undispatched,
+  was decided by nothing, and the loop puts an approval of it to its
+  decision hook on resume as a run would. It is approved, by `policy`,
+  with the reason `not started: decided on resume`, for the policy to
+  decide there. This answer is no verdict: the decision on resume is,
+  and one here would say allow for a call the policy may then block.
+- A call that may have run, a held call dispatched before it was held
+  included, that the record shows completed elsewhere, on a branch a
+  rebase left or in the session this one forks, is answered with that
+  output, by `policy`, with the record's reason for where it ran, `ran
+  on a branch the rebase left`, or `ran elsewhere` when the record
+  gives none, as the answer's reason and the verdict's: it is owed that
+  output and must not run again. This is read before anything else of
+  the call, the record's word that it never started included, since a
+  record whose path never started the call may hold its completed
+  dispatch on a branch a rebase left.
+- A call the record says never started but that the loop lists under
+  another reason is refused with `The call was cut off before it
   started; it did not run.` and the verdict `not run: the call never
-  started`.
+  started`, since the loop would hold an approval of it to the replay
+  rule and refuse it.
+- A call the record says a decision refused before it ran, pending as
+  rejected, is owed that refusal and nothing else. It is answered
+  without the reviewer, by `policy`, with `The call was refused before
+  it ran; it did not run.` and the verdict `not run: the call was
+  refused before it ran`.
 - A call that may have run, cut off by an abort or found unanswered in
   a seeded transcript, is not the reviewer's to approve. When its tool
   says a second run is safe, or safe under its first run's key and the
@@ -715,9 +768,9 @@ A reviewer's answer becomes:
 | outcome | answer | verdict reason | decider |
 | --- | --- | --- | --- |
 | approved | approve, with the reviewer's arguments when given, else a hook's rewrite when there was one, and its note | `approved by reviewer`, `: reason` when given | the reviewer's |
-| refused | the refusal text below, and its note | `denied by reviewer`, `: reason` when given | the reviewer's |
-| timed out | `The reviewer did not answer in time; the call did not run.` | `reviewer timed out` | `policy` |
-| the review failed | `The reviewer could not evaluate the call; the call did not run.` | `reviewer failed: E` | `policy` |
+| refused | the refusal text below, and its note; for a call that may have run, `The call was cut off before it finished and may have run; it was not run again.`, a space, and the refusal text | `denied by reviewer`, `: reason` when given | the reviewer's |
+| timed out | `The reviewer did not answer in time; the call did not run.`; for a call that may have run, `The call was cut off before it finished and may have run; it was not run again. The reviewer did not answer in time.` | `reviewer timed out` | `policy` |
+| the review failed | `The reviewer could not evaluate the call; the call did not run.`; for a call that may have run, `The call was cut off before it finished and may have run; it was not run again. The reviewer could not evaluate the call.` | `reviewer failed: E` | `policy` |
 
 The refusal text is `Denied by W: reason. ` or `Denied by W. ` with no
 reason, where `W` is `policy` when the reviewer names the policy as
@@ -725,15 +778,30 @@ its decider and `reviewer` otherwise, and the reason is trimmed of
 surrounding whitespace and then of one trailing full stop, so the stop
 is not doubled, followed by `Do not pursue the same outcome
 through a workaround, indirect execution or policy circumvention.`
-Every answer names its decider, and every answer is a verdict: allow
-for an approval, block otherwise.
+A call that may have run is one the policy asked about running again,
+or one held after its dispatch that may run again. Every answer names
+its decider; a refusal, a timeout and a failed review also carry the
+verdict's reason, so the record's decision says why without the
+verdict beside it. Every answer is a verdict: allow for an approval,
+block otherwise.
+
+An approval of a call that may have run whose arguments differ, as
+values, from those of the dispatch it repeats, is refused
+with `The call was cut off before it finished and may have run; it was
+not run again.`, by `policy`, with the verdict `not run again: the
+reviewer rewrote the arguments, and replay is X for the rewrite`, `X`
+being what the tool says of running the rewrite, unless its tool says
+the rewrite is safe to run, since the loop runs a keyed call again only
+with the arguments of the dispatch it repeats. It is not a refusal of
+the reviewer's and does not count toward the bound.
 
 A **denial bound** stops a reviewer that refuses and refuses: after a
 number of consecutive refusals, or a number within a window of recent
 reviews, every refusal among the answers ends the run, and the host is
 told the bound was reached. Every answer that is not an approval
 counts, a timeout and a failed review included; a call answered
-without the reviewer does not. The reference bound is three
+without the reviewer does not, nor does the refusal of a reviewer's
+rewrite above. The reference bound is three
 consecutive, or ten within the last fifty. The count persists across
 answers until the host resets it, which it does at each new user
 message.
@@ -752,7 +820,10 @@ A guard checks content. Its **subject** is one of:
 - a **message**: one assistant message as the stream completes it,
   before the transcript, the record or the front keeps it;
 - an **output**: a finished turn's response, its items already in the
-  transcript.
+  transcript, as the model produced it and not as the output guard's
+  rewrites left it, and whether the turn is **final**, one in which
+  the model called no tools, so the response is the run's answer. A
+  guard over the answer passes a turn that is not final.
 
 A guard answers with an action and a reason, and for an input or a
 message MAY rewrite: replacement items for an input, a replacement
@@ -767,7 +838,7 @@ check:
 | hook | subject | allow | block | error or defer |
 | --- | --- | --- | --- | --- |
 | before model call | input | a rewrite replaces the request's input or instructions for this call | the run stops as a guard stop, before the model is called | the model call is blocked and the run fails |
-| output guard | message | a rewrite replaces the message for the guards after and for the transcript | the message is withheld behind a placeholder, or, when the chain stops on a block, withheld and the run stops as a guard stop; the guards after are not consulted | fails the run |
+| output guard | message | a rewrite replaces the message for the guards after and for the transcript | the message is withheld behind a placeholder built from the message as the guards before left it, or, when the chain stops on a block, withheld and the run stops as a guard stop; the guards after are not consulted | fails the run |
 | should stop after turn | output | — | the run stops after the turn as a guard stop, and the guards after are not consulted | fails the run |
 
 A guard's error that is a guard stop, one that wraps agentturn's guard
@@ -791,7 +862,9 @@ Nothing in a guard chain calls a model. A guard backed by one is the
 host's, through a binding's package: the reference asks for one JSON
 object, `{"allow": true or false, "reason": "..."}`, reads the first
 such object in the answer, and treats a model failure or an answer it
-cannot read as an error, so the chain fails closed.
+cannot read as an error, so the chain fails closed. Over an output it
+passes a turn that is not final without asking the model, unless the
+host says to judge every turn.
 
 The reference guards, informative:
 
@@ -800,7 +873,7 @@ The reference guards, informative:
 | `limit` | all | block when the byte length of the items' JSON encoding, plus the byte length of an input's instructions, is over a bound: `K is N bytes, over the M byte limit`, `K` being `input`, `message` or `output` |
 | `deny` | all | block on the first pattern matching an input's instructions, or any text of the items: `matched denied pattern "P"` |
 | `secrets` | all | block on the first secret shape found: `secret detected: NAME` |
-| `redact` | input, message | rewrite every secret to `[REDACTED NAME]`: `redacted N secret: NAME` for one and `redacted N secrets: NAMES` for more, the distinct names in the order found joined by `, `; on an output, block as `secrets` does |
+| `redact` | input, message | rewrite every secret to `[REDACTED NAME]`: `redacted N secret: NAME` for one and `redacted N secrets: NAMES` for more, the distinct names in the order found joined by `, `; on an output, block as `secrets` does over the items that are not messages, since the messages were its to rewrite on the output guard and the output holds them as the model said them |
 
 The text of an item is a message's text parts, a function call's
 arguments, a function call output's text or text parts, and a
@@ -835,10 +908,10 @@ call's `decision` entry, under agentsession RFC 0001: block as
 answers a release or a reviewer builds name their decider, so the
 `proceed`, `reject` or `answer` that follows says who answered.
 
-What the decision entry cannot carry, the rule and its source and
-note, a guard's verdict, a grant, what confined a call, is written by
-the host beside it as a `custom` entry with `ns` set to
-`agentpolicy:verdict` and `data` a JSON object:
+What the decision entry cannot carry, the rule and its source, the
+source's hash and the rule's note, a guard's verdict, a grant, what
+confined a call, is written by the host beside it as a `custom` entry
+with `ns` set to `agentpolicy:verdict` and `data` a JSON object:
 
 | member | value |
 | --- | --- |
@@ -846,6 +919,7 @@ the host beside it as a `custom` entry with `ns` set to
 | `action` | `"allow"`, `"block"` or `"defer"`; always present |
 | `rule` | the rule's string form |
 | `source` | the rule's source's name |
+| `source_hash` | the rule's source's hash, the digest of the settings file or the skill frontmatter the rule was read from, so a reader says which version of the source a decision or a grant was built from and not only its name |
 | `note` | the rule's note, whatever its source |
 | `reason`, `by`, `held`, `subject`, `confined` | as the verdict names them |
 
@@ -869,7 +943,12 @@ the ask rules, as the reference does not ask about a sandboxed
 command; confinement is one bit, so under a sandbox that permits
 writes, suggest allows every confined command auto-edit does. The
 reference also confines each mode to a sandbox, which is the host's to
-arrange.
+arrange. The default is the host's to replace, in one documented
+place, which is how #16 was answered: a host whose tools are
+discovered at run time, from an MCP server or a plugin, trades the
+guard over a tool the split never named for a run that does not park
+on it, or keeps the guard by naming the discovered tools in the split
+and replacing the policy as its tool list changes.
 
 ## Bindings
 
@@ -882,29 +961,30 @@ The root module of this repository is the reference binding.
 | rule | `Rule{Tool, Spec, Source, Note}`; `String`, `Bare`, `Glob`, `MatchesTool`, `CarveOut` |
 | grammar | `ParseRules(s)`; every error begins `agentpolicy: rule "<token>": ` and ends with the kind's text, `unbalanced parentheses`, `missing tool name`, `empty specifier`, `empty carve-out`, `text after the specifier` |
 | source | `Source{Name, Path, Hash, Trusted, Rank}` |
-| policy | `Policy{Allow, Deny, Ask, Default, Sources, Withheld}`; `Allow()`, `Deny()`, `Ask()`; the zero `Default` is unset |
+| policy | `Policy{Allow, Deny, Ask, Default, Sources, Withheld}`; `Allow()`, `Deny()`, `Ask()`; the zero `Default` is unset; `Policy.WithDefault(d)` |
 | merge | `RuleSet{Source, Allow, Deny, Ask}`, `Merge(sets…)` |
 | matcher | `Matcher func(spec, args) bool`; `PrefixMatcher(field)`, `GlobMatcher(field)` |
 | splitter, subject | `Subjects func(args) ([]Subject, error)`, `Subject{Args, Tool, Text}`; `ToolMatcher{Match, Subjects}` per tool |
 | aliases | `WithAliases(map[string][]string)` |
 | build | `Build(policy, matchers, opts…)`; `ErrNoDefault`, `ErrNoMatcher`, `ErrToolGlob` for the kinds, and a plain error for `invalid_rule` |
 | engine | `Engine`; `Policy`, `PolicyOf(source)`, `Sources`, `Withheld`, `SetPolicy` |
-| decision | `Engine.Decide`, `Engine.BeforeToolCall()` for `agentturn.Config.BeforeToolCall` |
+| decision | `Engine.Decide`, `Engine.BeforeToolCall()` for `agentturn.Config.BeforeToolCall`; `Engine.Would(ctx, info)`, the verdict Decide would give before the hold, with no deferral remembered and no verdict reported |
 | confinement | `agenttool.ConfinedBy` by default; `WithConfinement(fn)`, `nil` to turn it off |
-| sibling tools | `WithTools(lookup)` |
+| sibling tools | `WithTools(lookup)`, `WithToolsFor(lookup)` for one given the decision's context |
+| model-backed output | `classify.WithEveryTurn()` to judge a turn that is not final |
 | hooks | `WithHooks(fns…)` |
 | offering tools | `Engine.Removes(tool)`, `Engine.Filter(tools)`, `Engine.ToolProvider(base)` for `agentturn.Config.ToolProvider` |
-| grants | `Engine.Grant`, `Engine.GrantOver`; `Engine.GrantSet` → granted and `[]Refusal{Rule, Reason}`, `Engine.Revoke`, `Engine.Grants` |
+| grants | `Engine.Grant`, `Engine.GrantOver`; `Engine.GrantSet` → granted and `[]Refusal{Rule, Reason}`, `Engine.Revoke`, `Engine.Grants`; the scope: `ContextWithGrantScope(ctx, scope)`, `GrantScopeFromContext(ctx)`, `Engine.GrantsFor(ctx)`, `Engine.RevokeScope(ctx)` |
 | deferred calls | `Engine.Deferred`, `Engine.Runs`, `Engine.Forget` |
 | release | `Engine.Release(ctx, end, answers…)`; `ErrUnanswered` |
-| reviewer | `Reviewer`, `ReviewerFunc`, `Review{Outcome, Reason, Args, Note, By}`, `Outcome` (`Refused`, `Approved`, `TimedOut`); `Engine.Answers(ctx, r, end)` |
-| cut-off calls | `WithNeverStarted(fn)`; the tool from the pending call or `WithTools` |
+| reviewer | `Reviewer`, `ReviewerFunc`, `Review{Outcome, Reason, Args, Note, By}`, `Outcome` (`Refused`, `Approved`, `TimedOut`); `Engine.Answers(ctx, r, end)`, whose refusals carry the verdict's reason as `agentturn.Answer.Reason`; a call that may have run is `agentturn.PendingCall.MayHaveRun` |
+| cut-off calls | `WithNeverStarted(fn)`, `WithRan(fn)`; the tool from the pending call or `WithTools`; `agentturn.PendingUndispatched` is approved for the resume, `agentturn.PendingRejected` answered as refused |
 | denial bound | `DenialBound{Consecutive, Total, Window}`, `DefaultDenialBound`, `WithDenialBound`, `ErrDenialBound`, `Engine.ResetReviews` |
 | decider | `ByPolicy`, `ByAgent`, `ByHuman` |
 | verdict | `Verdict{RunID, Turn, CallID, Tool, Guard, Action, Rule, Reason, By, Held, Subject, Confined}`; `WithObserver(fn)`, which adds an observer |
 | record | `VerdictNS = "agentpolicy:verdict"`; `Verdict.Record()` → namespace and bytes |
 | presets | `Tools{Read, Edit, Execute}`; `Suggest`, `AutoEdit`, `FullAuto` |
-| guard | `guard.Guard{Name, Check}`, `guard.New`; `guard.Input{Items, Instructions}`, `guard.Message`, `guard.Output`; `guard.Verdict{Action, Reason, Items, Instructions}` |
+| guard | `guard.Guard{Name, Check}`, `guard.New`; `guard.Input{Items, Instructions}`, `guard.Message`, `guard.Output{Response, Final}`; `guard.Verdict{Action, Reason, Items, Instructions}` |
 | chain | `guard.Chain{Guards, Observer, Placeholder, Stop}`; `BeforeModelCall`, `OutputGuard`, `ShouldStopAfterTurn`; `guard.Withheld` |
 | guard stop | `guard.BlockedError{Guard, Subject, Reason}`, which wraps `agentturn.ErrGuard` |
 | reference guards | `guard.Limit`, `guard.Deny`, `guard.Secrets`, `guard.Redact`, `guard.Pattern`, `guard.DefaultSecrets` |
@@ -1068,38 +1148,31 @@ listed in the changelog as one.
 
 ## Open questions
 
-- **A grant set per run** (#18). One engine serves every agent of a
-  host and remembers deferred calls per run, but a grant set has no
-  run, so a skill the main agent opened grants its tools to a
-  sub-agent that never opened it. Keying sets by run, or a scope on
-  the set, are the options.
-- **A context for the sibling lookup** (#43). The lookup that reads a
-  sibling's confinement takes a tool name alone, so an engine shared
-  by concurrent runs whose tool lists differ reads one list for all of
-  them, and a batch hold can be defeated. A lookup given the decision's
-  context is proposed.
-- **Cut-off calls and the reviewer** (#51, #52, #53). The
-  answers without a human are the least settled section. A reviewer's refusal,
-  timeout or failure on a call that may have run tells the model it
-  did not run (#51); a never-started call is refused where the loop
-  would put it to the policy (#52); a call the record shows rejected
-  goes to the reviewer, and an approval of it fails the resume (#53).
-  Each fix changes text this document states.
-- **Presets for an open tool set** (#16). Every preset's default is
-  ask, so a host with MCP or plugin tools either prompts for all of
-  them or overrides the default and loses the guard for tools added
-  later. A preset that names known-safe tools beside the split is
-  proposed.
-- **Redact over a finished turn** (#17). Redact blocks an output on
-  the secret it has already removed from each message through the
-  output guard, since the rule predates that hook.
-- **One chain on both output hooks** (#20). A chain wired to the
-  output guard and the stop hook judges every message twice, and an
-  output cannot tell a turn that called tools from an answer.
-- **The placeholder's message** (#22). The placeholder is built from
-  the message the model produced, not the one the chain's rewrites
-  left, so a redaction ahead of a blocking guard is undone in what the
-  front shows.
+- Answered in v0.0.11, in the answers without a human: a reviewer's
+  refusal, timeout or failure on a call that may have run says so
+  (#51); a never-started call is approved for the loop to decide
+  (#52); a rejected call is answered as refused without the reviewer
+  (#53); a reviewer's rewrite of a keyed call that may have run is
+  refused unless its tool says the rewrite is safe (#62); and a call
+  the record shows completed elsewhere is answered with its output
+  (#63).
+- **What the loop's pending call does not carry** (#53, #63). The
+  binding reads the record through the host, `WithNeverStarted` and
+  `WithRan`, for what agentturn v0.0.15's `PendingCall` does not say:
+  the output of a call that completed on a branch a rebase left, which
+  agentturn/session's `ReplayAnswers` holds on a private field, and
+  the reason of the reject a rejected call is owed, which this
+  document answers with fixed text. agentturn's next release carries
+  the first as `PendingCall.Ran` and `PendingCall.RanWhere`; once the
+  binding requires it, the loop's word is read first and the host's
+  second, and when the reject's reason follows, the rejected call's
+  answer becomes it.
+- Answered in v0.0.11: `redact` reads only the items that are not
+  messages over a finished turn, since the messages were its to
+  rewrite on the output guard (#17); the output subject says whether
+  the turn is final, and the chain's doc says the two output hooks see
+  the same words (#20); the placeholder is built from the message as
+  the guards before the blocking one left it (#22).
 - **The reason in the placeholder** (#49). The default placeholder
   puts the guard's reason, a deny pattern, in the answer a caller
   receives, which is the rule a caller could phrase around. A chain

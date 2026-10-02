@@ -4,13 +4,13 @@
 // request's input, OutputGuard over each assistant message as the
 // stream completes it and ShouldStopAfterTurn over a finished turn.
 //
-//	chain := guard.Chain{
+//	input := guard.Chain{
 //		Guards:   []guard.Guard{guard.Limit(1 << 20), guard.Redact(), guard.Deny(pattern)},
 //		Observer: record,
 //	}
-//	cfg.BeforeModelCall = chain.BeforeModelCall()
-//	cfg.OutputGuard = chain.OutputGuard()
-//	cfg.ShouldStopAfterTurn = chain.ShouldStopAfterTurn()
+//	output := guard.Chain{Guards: []guard.Guard{guard.Redact()}, Observer: record}
+//	cfg.BeforeModelCall = input.BeforeModelCall()
+//	cfg.OutputGuard = output.OutputGuard()
 //
 // A guard returns the loop's own vocabulary: Allow passes the content,
 // with a rewrite when it sets Items or Instructions, of the input
@@ -25,6 +25,15 @@
 // reported as that guard's Block. Every verdict
 // reaches the observer as an agentpolicy.Verdict whose Guard names the
 // guard, so a product records it beside the engine's.
+//
+// The two output hooks see the same words: OutputGuard sees each
+// assistant message once, as it completes, and may rewrite or withhold
+// it; ShouldStopAfterTurn sees the whole response afterwards, as the
+// model produced it, and can only stop. A chain wired to both judges
+// every message twice, so a product wires a rewriting chain to
+// OutputGuard and keeps ShouldStopAfterTurn for a check over the
+// finished turn that no rewrite answers, reading Output.Final to pass
+// a turn that only called tools; see [Chain].
 //
 // Nothing here calls a model. The classify package has a guard that
 // does.
@@ -57,9 +66,20 @@ type Input struct {
 }
 
 // Output is the subject of a check after a turn: the response the
-// model produced, its output items in the transcript already.
+// model produced, its output items in the transcript already. The
+// response is the model's, not what the transcript kept: a message
+// [Chain.OutputGuard] rewrote or withheld is here as the model said
+// it, so a guard over what the user will read belongs on that hook,
+// and a guard here reads what that hook never sees, a function call's
+// arguments, a reasoning summary.
 type Output struct {
 	Response *openresponses.Response
+	// Final is set when the model called no tools, so the response is
+	// the run's answer unless a queued follow-up keeps it going, as
+	// agentturn.TurnInfo.Final says. A guard over the answer passes a
+	// turn that is not one rather than judging, and paying for, a turn
+	// that produced nothing but tool calls.
+	Final bool
 }
 
 // Message is the subject of a check on one assistant message as the
@@ -138,12 +158,31 @@ func (e *BlockedError) Unwrap() error { return agentturn.ErrGuard }
 // a rewrite feeds the next check. The observer, when set, receives
 // every verdict as an agentpolicy.Verdict with Guard set, the same
 // shape the engine reports, exactly once per guard per hook call.
+//
+// One chain wired to both output hooks judges every assistant message
+// twice: once as a [Message] on OutputGuard, as the stream completes
+// it, and once inside an [Output] on ShouldStopAfterTurn, among the
+// turn's other items, where the response is the one the model
+// produced and not what the output guard's rewrites left in the
+// transcript. The two hooks are for different checks. A guard that
+// rewrites, or that judges what the user will read, belongs on
+// OutputGuard alone; ShouldStopAfterTurn is for a check over the
+// finished turn that no rewrite can answer, a secret in a function
+// call's arguments or a reasoning summary, say, and a guard there
+// reads Output.Final to pass a turn that only called tools. A product
+// therefore wires one chain per hook rather than one chain to all
+// three, as the package example does.
 type Chain struct {
 	Guards   []Guard
 	Observer func(context.Context, agentpolicy.Verdict)
 	// Placeholder builds the message OutputGuard puts in place of one a
-	// guard withheld. nil means [Withheld].
-	Placeholder func(original *openresponses.Message, guard, reason string) *openresponses.Message
+	// guard withheld. It is handed the message as the guards before
+	// the one that blocked left it, with their rewrites applied, and
+	// not the message as the model produced it, so a placeholder that
+	// keeps part of the message, or counts what it withheld, never
+	// reads text a guard ahead of it already redacted. nil means
+	// [Withheld].
+	Placeholder func(left *openresponses.Message, guard, reason string) *openresponses.Message
 	// Stop makes a Block of OutputGuard stop the run as a guard stop,
 	// as a Block of the input does, rather than put a placeholder in
 	// the message's place and go on. Neither the message nor the
@@ -227,7 +266,10 @@ func (c Chain) OutputGuard() func(context.Context, agentturn.OutputInfo) (*openr
 				if build == nil {
 					build = Withheld
 				}
-				return build(info.Message, g.Name(), v.Reason), nil
+				// The placeholder is built from the message as the chain
+				// left it, not as the model produced it: a guard before
+				// this one may have redacted what this one must not see.
+				return build(msg, g.Name(), v.Reason), nil
 			default:
 				return nil, fmt.Errorf("agentpolicy/guard: %s: Defer is not valid for content", g.Name())
 			}
@@ -242,12 +284,12 @@ func (c Chain) OutputGuard() func(context.Context, agentturn.OutputInfo) (*openr
 // Withheld is the placeholder [Chain.OutputGuard] puts in place of a
 // message a guard withheld when the chain sets none: an assistant
 // message reading "Withheld by <guard>: <reason>", with the ID, status
-// and phase of the original so the front's item_end matches its
-// item_start.
-func Withheld(original *openresponses.Message, guard, reason string) *openresponses.Message {
+// and phase of the withheld message so the front's item_end matches
+// its item_start. It reads nothing else of the message.
+func Withheld(withheld *openresponses.Message, guard, reason string) *openresponses.Message {
 	m := openresponses.AssistantText("Withheld by " + guard + ": " + reason)
-	if original != nil {
-		m.ID, m.Status, m.Phase = original.ID, original.Status, original.Phase
+	if withheld != nil {
+		m.ID, m.Status, m.Phase = withheld.ID, withheld.Status, withheld.Phase
 	}
 	return m
 }
@@ -261,7 +303,7 @@ func Withheld(original *openresponses.Message, guard, reason string) *openrespon
 func (c Chain) ShouldStopAfterTurn() func(context.Context, agentturn.TurnInfo) (bool, error) {
 	return func(ctx context.Context, info agentturn.TurnInfo) (bool, error) {
 		for _, g := range c.Guards {
-			v, err := g.Check(ctx, Output{Response: info.Response})
+			v, err := g.Check(ctx, Output{Response: info.Response, Final: info.Final})
 			if err != nil {
 				return false, c.fail(ctx, agentpolicy.Verdict{RunID: info.RunID, Turn: info.Turn, Guard: g.Name()}, err)
 			}

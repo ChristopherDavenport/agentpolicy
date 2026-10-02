@@ -188,6 +188,30 @@ func TestChainShouldStopAfterTurn(t *testing.T) {
 	if stop, err := ShouldStopAfterTurn(fixed("a", block("x"), nil))(ctx, info); !stop || !errors.Is(err, agentturn.ErrGuard) {
 		t.Errorf("ShouldStopAfterTurn = %v, %v", stop, err)
 	}
+	// The subject says whether the turn is the run's answer, from the
+	// loop's TurnInfo, so a guard over what the user will read passes a
+	// turn that only called tools (#20).
+	var finals []bool
+	answerOnly := New("answer", func(_ context.Context, subject any) (Verdict, error) {
+		out := subject.(Output)
+		finals = append(finals, out.Final)
+		if !out.Final {
+			return allow, nil
+		}
+		return block("judged the answer"), nil
+	})
+	hook := Chain{Guards: []Guard{answerOnly}}.ShouldStopAfterTurn()
+	toolTurn := agentturn.TurnInfo{RunID: "run_2", Turn: 1, Response: response(&openresponses.FunctionCall{CallID: "c1", Name: "lookup", Arguments: "{}"})}
+	if stop, err := hook(ctx, toolTurn); stop || err != nil {
+		t.Errorf("tool turn: stop = %v, %v", stop, err)
+	}
+	final := agentturn.TurnInfo{RunID: "run_2", Turn: 2, Response: response(openresponses.AssistantText("hi")), Final: true}
+	if stop, err := hook(ctx, final); !stop || !errors.Is(err, agentturn.ErrGuard) {
+		t.Errorf("final turn: stop = %v, %v", stop, err)
+	}
+	if fmt.Sprint(finals) != "[false true]" {
+		t.Errorf("Final seen = %v", finals)
+	}
 }
 
 func TestChainOutputGuard(t *testing.T) {
@@ -278,6 +302,23 @@ func TestChainOutputGuard(t *testing.T) {
 	// message is passed without a guard seeing text.
 	if m, err := OutputGuard(fixed("a", block("x"), nil))(ctx, agentturn.OutputInfo{}); err != nil || m == nil || m.Text() != "Withheld by a: x" || m.ID != "" {
 		t.Errorf("OutputGuard = %+v, %v", m, err)
+	}
+	// The placeholder is handed the message as the guards before the
+	// blocking one left it: a redaction ahead of a block is not undone
+	// in what the front shows (#22).
+	key := "sk-proj-" + "abcdefghijklmnopqrstuvwxyz0123"
+	var handed string
+	redacting := Chain{Guards: []Guard{Redact(), fixed("b", block("x"), nil)}, Placeholder: func(left *openresponses.Message, guard, reason string) *openresponses.Message {
+		handed = left.Text()
+		return Withheld(left, guard, reason)
+	}}
+	leaky := &openresponses.Message{ID: "msg_2", Status: openresponses.StatusCompleted, Role: openresponses.RoleAssistant, Content: openresponses.Contents{&openresponses.OutputText{Text: "Your key is " + key}}}
+	m, err := redacting.OutputGuard()(ctx, agentturn.OutputInfo{RunID: "run_3", Turn: 2, Message: leaky})
+	if err != nil || m == nil || m.ID != "msg_2" || m.Text() != "Withheld by b: x" {
+		t.Errorf("placeholder after a redaction = %+v, %v", m, err)
+	}
+	if handed != "Your key is [REDACTED openai_key]" {
+		t.Errorf("the placeholder was handed %q", handed)
 	}
 }
 
@@ -377,9 +418,23 @@ func TestSecretsAndRedact(t *testing.T) {
 		if got := v.Items[0].(*openresponses.Message).Text(); got != "token: [REDACTED "+name+"] end" {
 			t.Errorf("Redact %s: %q", name, got)
 		}
+		// A message in a finished turn is the output guard's, which
+		// rewrote it before the transcript kept it: Redact does not stop
+		// the run on the secret it already removed (#17). A function
+		// call's arguments are nobody's to rewrite, so a secret there
+		// still stops the run.
 		v, _ = redact.Check(ctx, Output{Response: response(openresponses.AssistantText(text))})
+		if v.Action != agentturn.Allow || v.Reason != "" {
+			t.Errorf("Redact output message %s: %+v", name, v)
+		}
+		leak := &openresponses.FunctionCall{CallID: "c1", Name: "post", Arguments: `{"body":` + fmt.Sprintf("%q", text) + `}`}
+		v, _ = redact.Check(ctx, Output{Response: response(openresponses.AssistantText(text), leak)})
 		if v.Action != agentturn.Block || v.Reason != "secret detected: "+name {
-			t.Errorf("Redact output %s: %+v", name, v)
+			t.Errorf("Redact output call %s: %+v", name, v)
+		}
+		v, _ = secrets.Check(ctx, Output{Response: response(openresponses.AssistantText(text))})
+		if v.Action != agentturn.Block || v.Reason != "secret detected: "+name {
+			t.Errorf("Secrets output %s: %+v", name, v)
 		}
 		// A message is not in the transcript yet, so it is rewritten.
 		v, _ = redact.Check(ctx, Message{Message: openresponses.AssistantText(text)})

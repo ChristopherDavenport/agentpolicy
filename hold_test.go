@@ -195,8 +195,8 @@ func TestRelease(t *testing.T) {
 	stop := agentturn.Refuse(openresponses.NewFunctionCallOutput("call_c", "no, stop"))
 	got = released(ctx, t, e, end, stop)
 	want = []agentturn.Answer{
-		agentturn.Output(openresponses.NewFunctionCallOutput("call_a", "The call was held for an approval and the turn was stopped; the call did not run.")).WithBy(ByPolicy),
-		agentturn.Output(openresponses.NewFunctionCallOutput("call_b", "The call was held for an approval and the turn was stopped; the call did not run.")).WithBy(ByPolicy),
+		agentturn.Output(openresponses.NewFunctionCallOutput("call_a", "The call was held for an approval and the turn was stopped; the call did not run.")).WithBy(ByPolicy).WithReason("not released: the turn was stopped"),
+		agentturn.Output(openresponses.NewFunctionCallOutput("call_b", "The call was held for an approval and the turn was stopped; the call did not run.")).WithBy(ByPolicy).WithReason("not released: the turn was stopped"),
 		stop,
 	}
 	if !reflect.DeepEqual(got, want) {

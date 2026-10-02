@@ -847,3 +847,80 @@ func TestObserversAccumulate(t *testing.T) {
 		t.Errorf("observed %q", got)
 	}
 }
+
+// Would is Decide without the hold and without a trace: the same
+// verdict, from the same rules, grants and hooks, with nothing
+// remembered and nothing observed, so a front shows which rule will
+// match and a kit tells a call the policy allows from one only a grant
+// allowed. (agentkit#76)
+func TestWouldDecidesWithoutDeciding(t *testing.T) {
+	ctx := context.Background()
+	j := &journal{}
+	note := func(_ context.Context, info agentturn.ToolCallInfo) (*agentturn.ToolDecision, error) {
+		if strings.Contains(string(info.Args), "force") {
+			return &agentturn.ToolDecision{Action: agentturn.Defer, Reason: "a force push needs a person", By: ByHuman}, nil
+		}
+		return nil, nil
+	}
+	e, err := Build(Policy{
+		Allow:   rules(t, "bash(git add:*)"),
+		Ask:     rules(t, "bash(git push:*)"),
+		Deny:    rules(t, "bash(rm:*)"),
+		Default: Ask(),
+	}, testMatchers, WithObserver(j.observe), WithHooks(note))
+	if err != nil {
+		t.Fatal(err)
+	}
+	scoped := ContextWithGrantScope(ctx, "A")
+	e.GrantSet(scoped, RuleSet{Source: Source{Name: "skill:commit", Trusted: true}, Allow: rules(t, "bash(git commit:*)")})
+	before := len(j.all())
+	for _, tc := range []struct {
+		name   string
+		ctx    context.Context
+		cmd    string
+		action agentturn.ToolAction
+		rule   string
+		reason string
+	}{
+		{"allowed", ctx, "git add -A", agentturn.Allow, "bash(git add:*)", "allowed by bash(git add:*)"},
+		{"asked", ctx, "git push", agentturn.Defer, "bash(git push:*)", "approval required by bash(git push:*)"},
+		{"denied", ctx, "rm -rf /", agentturn.Block, "bash(rm:*)", "denied by bash(rm:*)"},
+		{"the default", ctx, "git commit -m x", agentturn.Defer, "", "no rule allows bash: approval required by default"},
+		{"a scoped grant", scoped, "git commit -m x", agentturn.Allow, "bash(git commit:*)", "allowed by bash(git commit:*)"},
+		{"a hook's ask", ctx, "git add --force", agentturn.Defer, "", "a force push needs a person"},
+	} {
+		// The call sits in a batch whose sibling asks, which Decide would
+		// hold it for; Would reads the call alone.
+		infos := batch("run_w", tc.cmd, "git push")
+		v, err := e.Would(tc.ctx, infos[0])
+		if err != nil {
+			t.Fatalf("%s: %v", tc.name, err)
+		}
+		rule := ""
+		if v.Rule != nil {
+			rule = v.Rule.String()
+		}
+		if v.Action != tc.action || rule != tc.rule || v.Reason != tc.reason || v.Held || v.RunID != "run_w" || v.CallID != "call_a" || v.Tool != "bash" {
+			t.Errorf("%s: Would = %+v", tc.name, v)
+		}
+		if tc.name == "a hook's ask" && v.By != ByHuman {
+			t.Errorf("%s: By = %q", tc.name, v.By)
+		}
+	}
+	if got := len(j.all()); got != before {
+		t.Errorf("Would observed %d verdicts", got-before)
+	}
+	if runs := e.Runs(); len(runs) != 0 {
+		t.Errorf("Would remembered a deferral: %v", runs)
+	}
+	// A hook's error is Decide's.
+	failing, err := Build(Policy{Default: Allow()}, testMatchers, WithHooks(func(context.Context, agentturn.ToolCallInfo) (*agentturn.ToolDecision, error) {
+		return nil, errors.New("boom")
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := failing.Would(ctx, call("c", "bash", `{"command":"ls"}`)); err == nil || err.Error() != "boom" {
+		t.Errorf("hook error = %v", err)
+	}
+}

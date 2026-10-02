@@ -64,6 +64,21 @@ type Policy struct {
 	Withheld []Rule
 }
 
+// WithDefault returns p with its default replaced. A preset's default
+// is Ask because a tool it has never heard of should not run unseen;
+// a host whose tool set is discovered at run time, from an MCP server
+// or a plugin, says here what such a tool gets, in one documented
+// place rather than by assigning the field, and knows what it gives
+// up: Allow() runs every tool the split does not name, those added
+// later included. A host that would rather keep the guard names the
+// discovered tools in the split and replaces the policy with
+// [Engine.SetPolicy] when its tool list changes, which
+// [Engine.ToolProvider] already follows per turn.
+func (p Policy) WithDefault(d Default) Policy {
+	p.Default = d
+	return p
+}
+
 // RuleSet is the lists of one source, the input to [Merge].
 type RuleSet struct {
 	Source Source

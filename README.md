@@ -89,7 +89,10 @@ Precedence is deny, then ask, then allow, then the default, always. A
 deny blocks the call with `denied by bash(rm:*)` as its error output;
 an ask defers it, the run ends with the call pending, and the front
 answers through `Agent.Resume`. The default must be set: a deny list
-on its own never allows everything else by accident.
+on its own never allows everything else by accident. `Engine.Would`
+gives the verdict `Decide` would, without the batch hold and without
+deciding anything, for a front that shows which rule will match before
+the call is made.
 
 A deny with no specifier denies every call of its tool, so the tool is
 not offered at all: the model never sees it and plans nothing around
@@ -280,6 +283,28 @@ read the deny rules a decision reads, so under `ToolProvider` the tool
 leaves the request on the turn after the set is activated and comes
 back on the turn after `Revoke`.
 
+One engine serves every agent of a product, so a set with no scope
+decides every call the engine sees, a sub-agent's and another
+conversation's included. A grant scope on the context keeps a skill to
+the conversation that opened it:
+
+```go
+ctx = agentpolicy.ContextWithGrantScope(ctx, sessionID)
+eng.GrantSet(ctx, agentpolicy.RuleSet{Source: skill, Allow: rules}) // decides calls under this scope only
+defer eng.RevokeScope(ctx)                                           // when the conversation ends
+```
+
+A set is activated under the scope of its context, a call is decided
+against the unscoped sets and those of its own context's scope, and
+`Revoke` removes the set of its context's scope; a context with no
+scope is the unscoped one, as before. Run every hook of the
+conversation, and `GrantSet` and `Revoke` for it, under the same
+context. A context derived from a scoped one carries the scope, so a
+sub-agent run from a tool call is decided under its parent's scope
+unless its context is given one of its own. `Engine.GrantsFor(ctx)`
+lists the sets a call under `ctx` consults; `Engine.Grants` spans
+every scope.
+
 ## A reviewer instead of a human
 
 ```go
@@ -309,13 +334,20 @@ safe under its first run's key, `ReplayKeyed`, and the loop carries
 that key, it is decided under the policy first, since a call a seeded
 transcript left may have been waiting on the user: it runs again when
 the policy allows it, goes to the reviewer when the policy asks, and is
-refused when the policy denies it. It is refused as never
-run when the loop never handed it over, `PendingUndispatched`, or the
-session says it never started, through `WithNeverStarted`; and
-otherwise it is refused with text that says it may have run, as is a
-call pending as `PendingAnswered`. A deferred call held after its
-dispatch is reviewed when it may run again and refused when it may
-not. After three consecutive refusals, or ten within the
+refused when the policy denies it. When the reviewer does not approve
+such a call, the model reads that it was cut off and may have run; an
+approval with other arguments than the call would run with is refused
+unless the tool says the rewrite is safe, since the loop would refuse
+to run a keyed call again with them. A call the loop never handed over,
+`PendingUndispatched`, is approved for the loop to put to the policy on
+resume; one the session says never started, through
+`WithNeverStarted`, is refused as never run; one the session says ran
+to completion on a branch a rebase left, through `WithRan`, is answered
+with that output; one pending as `PendingRejected` is answered as
+refused before it ran; and otherwise it is refused with text that says
+it may have run, as is a call pending as `PendingAnswered`. A deferred
+call held after its dispatch is reviewed when it may run again and
+refused when it may not. After three consecutive refusals, or ten within the
 last fifty reviews, the refusals are built with `agentturn.Refuse`, so
 resuming with them appends the outputs and ends the run without a
 model call, and `ErrDenialBound` tells the front why.
@@ -323,13 +355,13 @@ model call, and `ErrDenialBound` tells the front why.
 ## Guards
 
 ```go
-chain := guard.Chain{
+input := guard.Chain{
 	Guards:   []guard.Guard{guard.Limit(1 << 20), guard.Redact(), guard.Deny(injection)},
 	Observer: record,
 }
-cfg.BeforeModelCall = chain.BeforeModelCall()
-cfg.OutputGuard = chain.OutputGuard()
-cfg.ShouldStopAfterTurn = chain.ShouldStopAfterTurn()
+output := guard.Chain{Guards: []guard.Guard{guard.Redact()}, Observer: record}
+cfg.BeforeModelCall = input.BeforeModelCall()
+cfg.OutputGuard = output.OutputGuard()
 ```
 
 An input guard sees the request's instructions beside its items, which
@@ -345,14 +377,26 @@ rewrite the message or withhold it behind a placeholder, `Withheld by
 deny: matched denied pattern "..."` unless the chain sets its own, and
 the run goes on. A chain that sets `Stop` stops the run instead, as a
 guard stop with the message withheld, so neither the message nor the
-pattern reaches the caller. A
-guard over a finished turn can only stop the run, since the turn's
+pattern reaches the caller. The placeholder a chain builds is handed
+the message as the guards before the blocking one left it, so a
+placeholder that keeps part of the message never reads text a guard
+ahead of it redacted. A guard over a finished turn,
+`ShouldStopAfterTurn`, sees the response as the model produced it,
+with the turn's other items, and can only stop the run, since those
 items are already in the transcript; it does so as a guard stop, with
 a `BlockedError` wrapping `agentturn.ErrGuard` on the run's end, so a
-policy stop is told from a failure. `Limit` bounds the wire size,
-`Deny` matches patterns, `Secrets` blocks on a key or token and
+policy stop is told from a failure. Its subject says whether the turn
+is `Final`, the run's answer rather than a turn of tool calls, so a
+guard over what the user will read skips the rest. The two output
+hooks see the same words, so a chain wired to both judges every
+message twice: a rewriting chain belongs on `OutputGuard`, as above,
+and `ShouldStopAfterTurn` is for a check no rewrite can answer, a
+secret in a function call's arguments say. `Limit` bounds the wire
+size, `Deny` matches patterns, `Secrets` blocks on a key or token and
 `Redact` replaces one before the model reads it, or before a message
-of the model's is kept. `classify.New` builds a guard that asks a
+of the model's is kept; over a finished turn `Redact` reads only the
+items the output guard never sees, so it does not stop the run on a
+secret it already removed. `classify.New` builds a guard that asks a
 model with a rubric.
 
 ## The record
