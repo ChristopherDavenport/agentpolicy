@@ -154,7 +154,11 @@ One engine serves every agent: what it defers is remembered under the
 call's own run, so a sub-agent deciding a call while the user reads a
 question costs the main agent nothing. `Release` and `Answers` forget
 a call as they answer it, and `Engine.Forget(runID)` drops what an
-abandoned run left behind.
+abandoned run left behind. A nested call, one a tool made with
+`agentturn.Invoke`, has a `ToolCallInfo.Parent`; its deferral is
+reported as a verdict and not remembered, since the loop settles it
+inline with the invoking tool's elicitor and it never ends the run
+pending.
 
 When a tool's `Subjects` splits a call, a shell command into its
 subcommands say, every subject is decided and the verdicts fold: the
@@ -341,11 +345,14 @@ unless the tool says the rewrite is safe, since the loop would refuse
 to run a keyed call again with them. A call the loop never handed over,
 `PendingUndispatched`, is approved for the loop to put to the policy on
 resume; one the session says never started, through
-`WithNeverStarted`, is refused as never run; one the session says ran
-to completion on a branch a rebase left, through `WithRan`, is answered
-with that output; one pending as `PendingRejected` is answered as
-refused before it ran; and otherwise it is refused with text that says
-it may have run, as is a call pending as `PendingAnswered`. A deferred
+`WithNeverStarted`, is refused as never run; one whose pending call
+carries the output it has where it ran off the path, `PendingCall.Ran`,
+on a branch a rebase left or in the session a fork was made from, is
+answered with that output, giving `RanWhere` as the reason; one
+pending as `PendingRejected` is answered as refused before it ran, with
+the reason the refusing decision gave, `PendingCall.Refused`, when the
+record has one; and otherwise it is refused with text that says it may
+have run, as is a call pending as `PendingAnswered`. A deferred
 call held after its dispatch is reviewed when it may run again and
 refused when it may not. After three consecutive refusals, or ten within the
 last fifty reviews, the refusals are built with `agentturn.Refuse`, so

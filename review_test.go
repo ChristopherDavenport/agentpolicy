@@ -488,10 +488,10 @@ func TestAnswersReleasesHeldCalls(t *testing.T) {
 
 // A cut-off call runs again when its tool says a second run is safe,
 // is refused as never run when the record says it never started, is
-// answered with its output when the record says it ran elsewhere, and
-// is approved for the loop to decide when the loop never handed it
-// over. The rest are refused as calls that may have run. (#52, #53,
-// #63)
+// answered with its output when the pending call carries one from where
+// it ran, and is approved for the loop to decide when the loop never
+// handed it over. The rest are refused as calls that may have run.
+// (#52, #53, #63)
 func TestAnswersCutOffCallsReadTheirTools(t *testing.T) {
 	ctx := context.Background()
 	replays := func(name string, r agenttool.Replay) agenttool.Tool {
@@ -513,21 +513,15 @@ func TestAnswersCutOffCallsReadTheirTools(t *testing.T) {
 	never := func(_ context.Context, runID, callID string) bool {
 		return runID == "r" && strings.HasPrefix(callID, "never")
 	}
-	// The record shows the "ran" calls completed on a branch a rebase
-	// left, and knows nothing of the others.
+	// The loop's pending call carries the output a call has where it
+	// ran off the path, as agentturn/session's Pending fills it. The
+	// output's call ID and item ID are not the answer's.
 	const where = "ran on a branch the rebase left"
-	ran := func(_ context.Context, runID, callID string) (*openresponses.FunctionCallOutput, string) {
-		if runID != "r" || !strings.Contains(callID, "ran") {
-			return nil, ""
-		}
-		out := &openresponses.FunctionCallOutput{ID: "fco_1", CallID: "other", Status: openresponses.StatusCompleted, Output: openresponses.FunctionCallOutputData{Text: "branch output for " + callID}}
-		if callID == "ran-somewhere" {
-			return out, ""
-		}
-		return out, where
+	ranOut := func(id string) *openresponses.FunctionCallOutput {
+		return &openresponses.FunctionCallOutput{ID: "fco_1", CallID: "other", Status: openresponses.StatusCompleted, Output: openresponses.FunctionCallOutputData{Text: "branch output for " + id}}
 	}
 	j := &journal{}
-	e, err := Build(Policy{Default: Allow()}, nil, WithObserver(j.observe), WithTools(lookup), WithNeverStarted(never), WithRan(ran))
+	e, err := Build(Policy{Default: Allow()}, nil, WithObserver(j.observe), WithTools(lookup), WithNeverStarted(never))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -558,19 +552,22 @@ func TestAnswersCutOffCallsReadTheirTools(t *testing.T) {
 		// The record shows these ran to completion elsewhere: each is
 		// answered with that output, and the keyed one is not dispatched
 		// again although the replay rule would run it.
-		{Call: fc("ran-aborted", "bash"), Reason: agentturn.PendingAborted, Tool: tools["bash"]},
-		{Call: fc("ran-keyed", "remind"), Reason: agentturn.PendingAborted, Tool: tools["remind"], IdempotencyKey: "r/ran-keyed"},
+		{Call: fc("ran-aborted", "bash"), Reason: agentturn.PendingAborted, Tool: tools["bash"], Ran: ranOut("ran-aborted"), RanWhere: where},
+		{Call: fc("ran-keyed", "remind"), Reason: agentturn.PendingAborted, Tool: tools["remind"], IdempotencyKey: "r/ran-keyed", Ran: ranOut("ran-keyed"), RanWhere: where},
 		// A call held after its dispatch whose dispatch completed on the
 		// branch, which is how session.Pending lists one: it is owed the
 		// output, not a review, although its tool would run again.
-		{Call: fc("ran-held", "read"), Reason: agentturn.PendingDeferred, Dispatched: true, Tool: tools["read"]},
+		{Call: fc("ran-held", "read"), Reason: agentturn.PendingDeferred, Dispatched: true, Tool: tools["read"], Ran: ranOut("ran-held"), RanWhere: where},
 		// A record that says the call ran but not where.
-		{Call: fc("ran-somewhere", "bash"), Reason: agentturn.PendingUnknown},
+		{Call: fc("ran-somewhere", "bash"), Reason: agentturn.PendingUnknown, Ran: ranOut("ran-somewhere")},
+		// The record's words alone are not the output: a call that says
+		// where it ran and carries nothing is a call that may have run.
+		{Call: fc("where-only", "bash"), Reason: agentturn.PendingAborted, Tool: tools["bash"], RanWhere: where},
 		// The record says it never started, so it did not run anywhere.
 		{Call: fc("never-nowhere", "bash"), Reason: agentturn.PendingUnknown},
 		// A record whose path never started the call holds its completed
 		// dispatch on a branch a rebase left: the output wins.
-		{Call: fc("never-but-ran", "bash"), Reason: agentturn.PendingAborted, Tool: tools["bash"]},
+		{Call: fc("never-but-ran", "bash"), Reason: agentturn.PendingAborted, Tool: tools["bash"], Ran: ranOut("never-but-ran"), RanWhere: where},
 	}}
 	reviewer := ReviewerFunc(func(context.Context, agentturn.ToolCallInfo, Verdict) (Review, error) {
 		t.Error("a cut-off call reached the reviewer")
@@ -610,6 +607,7 @@ func TestAnswersCutOffCallsReadTheirTools(t *testing.T) {
 		agentturn.Output(branch("ran-keyed")).WithBy(ByPolicy).WithReason(where),
 		agentturn.Output(branch("ran-held")).WithBy(ByPolicy).WithReason(where),
 		agentturn.Output(branch("ran-somewhere")).WithBy(ByPolicy).WithReason("ran elsewhere"),
+		agentturn.Output(openresponses.NewFunctionCallOutput("where-only", cut)).WithBy(ByPolicy).WithReason("not reviewed: aborted"),
 		agentturn.Output(openresponses.NewFunctionCallOutput("never-nowhere", notRun)).WithBy(ByPolicy).WithReason("not run: the call never started"),
 		agentturn.Output(branch("never-but-ran")).WithBy(ByPolicy).WithReason(where),
 	}
@@ -637,6 +635,7 @@ func TestAnswersCutOffCallsReadTheirTools(t *testing.T) {
 		fmt.Sprintf("ran-keyed %v %s", agentturn.Allow, where),
 		fmt.Sprintf("ran-held %v %s", agentturn.Allow, where),
 		fmt.Sprintf("ran-somewhere %v ran elsewhere", agentturn.Allow),
+		fmt.Sprintf("where-only %v not reviewed: aborted", agentturn.Block),
 		fmt.Sprintf("never-nowhere %v not run: the call never started", agentturn.Block),
 		fmt.Sprintf("never-but-ran %v %s", agentturn.Allow, where),
 	}
@@ -649,7 +648,7 @@ func TestAnswersCutOffCallsReadTheirTools(t *testing.T) {
 		}
 	}
 	// None of these counts toward the denial bound.
-	e, err = Build(Policy{Default: Allow()}, nil, WithTools(lookup), WithNeverStarted(never), WithRan(ran), WithDenialBound(DenialBound{Consecutive: 1}))
+	e, err = Build(Policy{Default: Allow()}, nil, WithTools(lookup), WithNeverStarted(never), WithDenialBound(DenialBound{Consecutive: 1}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1084,6 +1083,74 @@ func TestAnswersCutOffNonApprovalsSayTheCallMayHaveRun(t *testing.T) {
 					t.Errorf("verdict = %+v", v)
 				}
 			})
+		}
+	}
+}
+
+// A call pending as rejected is owed the refusal a decision made before
+// it ran. When the loop's PendingCall carries that decision's reason,
+// the answer and the verdict carry it; otherwise the fixed text stands.
+// Neither reaches the reviewer or counts toward the denial bound. (#53)
+func TestAnswersARejectedCallInTheRecordsWords(t *testing.T) {
+	ctx := context.Background()
+	j := &journal{}
+	e, err := Build(Policy{Default: Allow()}, nil, WithObserver(j.observe), WithDenialBound(DenialBound{Consecutive: 1}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	fc := func(id string) *openresponses.FunctionCall {
+		return &openresponses.FunctionCall{CallID: id, Name: "bash", Arguments: `{}`}
+	}
+	end := &agentturn.RunEnd{RunID: "r", Reason: agentturn.ReasonAborted, Pending: []agentturn.PendingCall{
+		{Call: fc("why"), Reason: agentturn.PendingRejected, Refused: "denied by bash(rm:*)"},
+		// A closing period and surrounding space are not doubled.
+		{Call: fc("period"), Reason: agentturn.PendingRejected, Refused: "  the user said no.\n"},
+		// The record holds no reason: fixed text.
+		{Call: fc("none"), Reason: agentturn.PendingRejected},
+		{Call: fc("blank"), Reason: agentturn.PendingRejected, Refused: " \n"},
+		// A reason on a call that is not rejected is not read.
+		{Call: fc("answered"), Reason: agentturn.PendingAnswered, Refused: "stray"},
+	}}
+	reviewer := ReviewerFunc(func(context.Context, agentturn.ToolCallInfo, Verdict) (Review, error) {
+		t.Error("a rejected call reached the reviewer")
+		return Review{}, nil
+	})
+	answers, err := e.Answers(ctx, reviewer, end)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const (
+		fixed  = "The call was refused before it ran; it did not run."
+		prefix = "The call was refused before it ran; it did not run: "
+		base   = "not run: the call was refused before it ran"
+	)
+	want := []agentturn.Answer{
+		agentturn.Output(openresponses.NewFunctionCallOutput("why", prefix+"denied by bash(rm:*).")).WithBy(ByPolicy).WithReason(base + ": denied by bash(rm:*)"),
+		agentturn.Output(openresponses.NewFunctionCallOutput("period", prefix+"the user said no.")).WithBy(ByPolicy).WithReason(base + ": the user said no"),
+		agentturn.Output(openresponses.NewFunctionCallOutput("none", fixed)).WithBy(ByPolicy).WithReason(base),
+		agentturn.Output(openresponses.NewFunctionCallOutput("blank", fixed)).WithBy(ByPolicy).WithReason(base),
+		agentturn.Output(openresponses.NewFunctionCallOutput("answered", "The call was cut off before it finished and may have run; it was not run again.")).WithBy(ByPolicy).WithReason("not reviewed: answered"),
+	}
+	if !reflect.DeepEqual(answers, want) {
+		t.Errorf("answers = %s\nwant %s", dump(answers), dump(want))
+	}
+	var got []string
+	for _, v := range j.all() {
+		got = append(got, fmt.Sprintf("%s %v %s", v.CallID, v.Action, v.Reason))
+	}
+	wantVerdicts := []string{
+		fmt.Sprintf("why %v %s: denied by bash(rm:*)", agentturn.Block, base),
+		fmt.Sprintf("period %v %s: the user said no", agentturn.Block, base),
+		fmt.Sprintf("none %v %s", agentturn.Block, base),
+		fmt.Sprintf("blank %v %s", agentturn.Block, base),
+		fmt.Sprintf("answered %v not reviewed: answered", agentturn.Block),
+	}
+	if !reflect.DeepEqual(got, wantVerdicts) {
+		t.Errorf("verdicts = %q\nwant %q", got, wantVerdicts)
+	}
+	for _, a := range answers {
+		if a.Terminate {
+			t.Errorf("%s counted toward the bound", a.CallID)
 		}
 	}
 }

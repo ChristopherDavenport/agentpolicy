@@ -261,11 +261,10 @@ type Engine struct {
 	confine   func(context.Context, agenttool.Tool, json.RawMessage) (bool, string)
 	lookup    func(context.Context, string) (agenttool.Tool, bool)
 	// hooks are folded into every decision after the policy's, and
-	// neverStarted and ran read the record for a cut-off call. All
-	// three are set at Build and never written after.
+	// neverStarted reads the record for a cut-off call. Both are set
+	// at Build and never written after.
 	hooks        []func(context.Context, agentturn.ToolCallInfo) (*agentturn.ToolDecision, error)
 	neverStarted func(context.Context, string, string) bool
-	ran          func(context.Context, string, string) (*openresponses.FunctionCallOutput, string)
 
 	mu     sync.Mutex
 	policy Policy
@@ -642,6 +641,14 @@ func (e *Engine) BeforeToolCall() func(context.Context, agentturn.ToolCallInfo) 
 // the observer before Decide returns, and the same policy and the same
 // call in the same batch always give the same verdict.
 //
+// A nested call, one a tool made with agentturn.Invoke, has a Parent
+// on its info. Its deferral is reported as a verdict, but nothing is
+// remembered for it: the loop settles it inline, with the elicitor on
+// the invoking tool's context or with a refusal, and it never ends the
+// run pending, so no [Engine.Answers] or [Engine.Release] would
+// forget it and [Engine.Deferred] would list it for as long as the
+// run lives.
+//
 // One engine serves every agent of a product. What it defers is
 // remembered under the call's own run, so a decision in a sub-agent's
 // run never forgets what the main agent is waiting on. The rule sets
@@ -671,7 +678,7 @@ func (e *Engine) Decide(ctx context.Context, info agentturn.ToolCallInfo) (*agen
 		d.allowed = v.Reason
 		v.Action, v.Held, v.Reason = agentturn.Defer, true, "held for approval: "+v.Reason
 	}
-	if v.Action == agentturn.Defer {
+	if v.Action == agentturn.Defer && info.Parent == "" {
 		d.verdict = v
 		e.remember(info.RunID, callID, d)
 	}

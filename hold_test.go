@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -610,5 +611,71 @@ func TestHooksAreInsideTheHold(t *testing.T) {
 	}
 	if _, err := e.Decide(ctx, infos[1]); err == nil || err.Error() != "meter unavailable" {
 		t.Errorf("failing hook: err = %v", err)
+	}
+}
+
+// A nested call, one a tool made with agentturn.Invoke, is decided and
+// reported as any call is, but the engine remembers no deferral for
+// it: the loop settles it inline, with the invoking tool's elicitor or
+// a refusal, and it never ends the run pending, so nothing would
+// forget it. A call the model made, asking in the same run, is
+// remembered as before. (agentturn#208)
+func TestDecideRemembersNoDeferralForANestedCall(t *testing.T) {
+	ctx := context.Background()
+	j := &journal{}
+	e, err := Build(Policy{
+		Allow:   rules(t, "bash(git add:*)"),
+		Ask:     rules(t, "bash(git push:*)"),
+		Default: Ask(),
+	}, testMatchers, WithObserver(j.observe))
+	if err != nil {
+		t.Fatal(err)
+	}
+	model := call("call_model", "bash", `{"command":"git push origin"}`)
+	model.RunID = "run_main"
+	model.Batch = []*openresponses.FunctionCall{model.Call}
+	nested := call("call_nested", "bash", `{"command":"git push origin"}`)
+	nested.RunID = "run_main"
+	nested.Parent = "call_model"
+	nested.Batch = []*openresponses.FunctionCall{nested.Call}
+	allowed := call("call_nested_add", "bash", `{"command":"git add -A"}`)
+	allowed.RunID = "run_main"
+	allowed.Parent = "call_model"
+	allowed.Batch = []*openresponses.FunctionCall{allowed.Call}
+
+	for _, info := range []agentturn.ToolCallInfo{model, nested, allowed} {
+		if _, err := e.Decide(ctx, info); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Each call is a verdict through the observer, the nested one's
+	// included, with the policy's reason.
+	var got []string
+	for _, v := range j.all() {
+		got = append(got, fmt.Sprintf("%s %v held=%v %s", v.CallID, v.Action, v.Held, v.Reason))
+	}
+	want := []string{
+		fmt.Sprintf("call_model %v held=false approval required by bash(git push:*)", agentturn.Defer),
+		fmt.Sprintf("call_nested %v held=false approval required by bash(git push:*)", agentturn.Defer),
+		fmt.Sprintf("call_nested_add %v held=false allowed by bash(git add:*)", agentturn.Allow),
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("verdicts = %q\nwant %q", got, want)
+	}
+	if _, ok := e.Deferred("run_main", "call_model"); !ok {
+		t.Error("the model's deferred call is not remembered")
+	}
+	if _, ok := e.Deferred("run_main", "call_nested"); ok {
+		t.Error("a nested call's deferral is remembered")
+	}
+
+	// The run ends with the model's call pending alone, and the
+	// release forgets the run: nothing the nested call left behind.
+	end := &agentturn.RunEnd{RunID: "run_main", Reason: agentturn.ReasonInputRequired, Pending: []agentturn.PendingCall{{Call: model.Call, Reason: agentturn.PendingDeferred}}}
+	if _, err := e.Release(ctx, end, agentturn.Approve("call_model")); err != nil {
+		t.Fatal(err)
+	}
+	if runs := e.Runs(); len(runs) != 0 {
+		t.Errorf("runs after the release = %v", runs)
 	}
 }

@@ -669,6 +669,13 @@ decision in one run never touches another's. It forgets a call as it
 answers it, and forgets a run on the host's word when the run ends
 another way.
 
+A call a tool made, a nested call, has a parent: the call whose tool
+made it. The loop settles a nested call it defers inline, by asking the
+user through the invoking tool's elicitor or by refusing it, so the
+nested call never ends the run pending and no answer or release would
+forget it. The engine reports a nested call's deferral as a verdict, as
+for any call, and remembers nothing for it.
+
 ### Release
 
 A held call's answer follows from the answers to the calls that asked.
@@ -715,14 +722,17 @@ order:
   decide there. This answer is no verdict: the decision on resume is,
   and one here would say allow for a call the policy may then block.
 - A call that may have run, a held call dispatched before it was held
-  included, that the record shows completed elsewhere, on a branch a
-  rebase left or in the session this one forks, is answered with that
-  output, by `policy`, with the record's reason for where it ran, `ran
-  on a branch the rebase left`, or `ran elsewhere` when the record
-  gives none, as the answer's reason and the verdict's: it is owed that
-  output and must not run again. This is read before anything else of
-  the call, the record's word that it never started included, since a
-  record whose path never started the call may hold its completed
+  included, whose pending entry carries the output it has where it ran
+  off the path the agent continues, on a branch a rebase left or in the
+  session this one forks, is answered with that output, by `policy`,
+  with the entry's word for where it ran, such as `ran on a branch the
+  rebase left`, or `ran elsewhere` when it gives none, as the answer's
+  reason and the verdict's: it is owed that output and must not run
+  again. A call carries the output or it does not; the words for where
+  it ran are only the reason, and a call with those words and no
+  output is not read as having run. This is read before anything else
+  of the call, the record's word that it never started included, since
+  a record whose path never started the call may hold its completed
   dispatch on a branch a rebase left.
 - A call the record says never started but that the loop lists under
   another reason is refused with `The call was cut off before it
@@ -733,7 +743,12 @@ order:
   rejected, is owed that refusal and nothing else. It is answered
   without the reviewer, by `policy`, with `The call was refused before
   it ran; it did not run.` and the verdict `not run: the call was
-  refused before it ran`.
+  refused before it ran`. When the pending entry carries the reason
+  the refusing decision gave, the answer and the verdict carry it: the
+  answer is `The call was refused before it ran; it did not run: R.`
+  and the verdict `not run: the call was refused before it ran: R`,
+  `R` the reason trimmed of surrounding whitespace and of one trailing
+  full stop. An empty reason, or one of whitespace, reads as none.
 - A call that may have run, cut off by an abort or found unanswered in
   a seeded transcript, is not the reviewer's to approve. When its tool
   says a second run is safe, or safe under its first run's key and the
@@ -978,7 +993,8 @@ The root module of this repository is the reference binding.
 | deferred calls | `Engine.Deferred`, `Engine.Runs`, `Engine.Forget` |
 | release | `Engine.Release(ctx, end, answers…)`; `ErrUnanswered` |
 | reviewer | `Reviewer`, `ReviewerFunc`, `Review{Outcome, Reason, Args, Note, By}`, `Outcome` (`Refused`, `Approved`, `TimedOut`); `Engine.Answers(ctx, r, end)`, whose refusals carry the verdict's reason as `agentturn.Answer.Reason`; a call that may have run is `agentturn.PendingCall.MayHaveRun` |
-| cut-off calls | `WithNeverStarted(fn)`, `WithRan(fn)`; the tool from the pending call or `WithTools`; `agentturn.PendingUndispatched` is approved for the resume, `agentturn.PendingRejected` answered as refused |
+| cut-off calls | `WithNeverStarted(fn)`; the tool from the pending call or `WithTools`; the output a call has where it ran from `agentturn.PendingCall.Ran` and `RanWhere`; `agentturn.PendingUndispatched` is approved for the resume, `agentturn.PendingRejected` answered as refused, in `PendingCall.Refused`'s words when it has them |
+| nested calls | `agentturn.ToolCallInfo.Parent` non-empty: decided and reported, no deferral remembered |
 | denial bound | `DenialBound{Consecutive, Total, Window}`, `DefaultDenialBound`, `WithDenialBound`, `ErrDenialBound`, `Engine.ResetReviews` |
 | decider | `ByPolicy`, `ByAgent`, `ByHuman` |
 | verdict | `Verdict{RunID, Turn, CallID, Tool, Guard, Action, Rule, Reason, By, Held, Subject, Confined}`; `WithObserver(fn)`, which adds an observer |
@@ -1156,17 +1172,20 @@ listed in the changelog as one.
   refused unless its tool says the rewrite is safe (#62); and a call
   the record shows completed elsewhere is answered with its output
   (#63).
-- **What the loop's pending call does not carry** (#53, #63). The
-  binding reads the record through the host, `WithNeverStarted` and
-  `WithRan`, for what agentturn v0.0.15's `PendingCall` does not say:
-  the output of a call that completed on a branch a rebase left, which
-  agentturn/session's `ReplayAnswers` holds on a private field, and
-  the reason of the reject a rejected call is owed, which this
-  document answers with fixed text. agentturn's next release carries
-  the first as `PendingCall.Ran` and `PendingCall.RanWhere`; once the
-  binding requires it, the loop's word is read first and the host's
-  second, and when the reject's reason follows, the rejected call's
-  answer becomes it.
+- Answered in v0.0.11, from what agentturn v0.0.16's pending call
+  carries (#53, #63): the output of a call that completed off the path,
+  `PendingCall.Ran` with `RanWhere`, is read from the loop's word alone,
+  and the reason of the reject a rejected call is owed,
+  `PendingCall.Refused`, is the answer's. The binding first offered
+  `WithRan`, a host's lookup in the record for the output, for the
+  release that did not carry it; it was removed before it shipped, since
+  a second source for the same word would need a rule for when the two
+  disagree, and the session's `Pending`, which fills both, is the one
+  reader of the record. `WithNeverStarted` stays: no field of the
+  pending call says a call never started under a reason the loop lists
+  otherwise.
+- Answered in v0.0.11: a nested call's deferral is not remembered
+  (agentturn#208), since the loop settles it inline.
 - Answered in v0.0.11: `redact` reads only the items that are not
   messages over a finished turn, since the messages were its to
   rewrite on the output guard (#17); the output subject says whether
