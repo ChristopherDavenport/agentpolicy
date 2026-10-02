@@ -7,6 +7,11 @@ versions may break the API.
 
 ## Unreleased
 
+- Requires `agentturn` v0.0.16, up from v0.0.15, `agenttool` v0.0.15,
+  up from v0.0.14, and `openresponses` v0.0.14, up from v0.0.12.
+  agentturn v0.0.16 is the release that adds `PendingCall.Ran`,
+  `RanWhere`, `Refused` and `ToolCallInfo.Parent`, which the entries
+  below read.
 - `Verdict.Record` writes `source_hash`, the rule's `Source.Hash`, so a
   session says which skill frontmatter or settings file a grant or a
   decision was built from and not only the source's name. Omitted
@@ -33,7 +38,13 @@ versions may break the API.
   without the reviewer, by policy, with `The call was refused before
   it ran; it did not run.` and the verdict `not run: the call was
   refused before it ran`; it sent the call to the reviewer, and an
-  approval failed the resume with `ErrCallAnswered` (#53).
+  approval failed the resume with `ErrCallAnswered`. When the pending
+  call carries the reason the refusing decision gave,
+  `agentturn.PendingCall.Refused`, the answer is `The call was refused
+  before it ran; it did not run: R.` and the verdict `not run: the
+  call was refused before it ran: R`, `R` the reason trimmed of space
+  and of one closing full stop; the fixed text stands without one
+  (#53).
 - A reviewer's refusal, timeout or failure on a call that may have run
   tells the model so: the output begins `The call was cut off before
   it finished and may have run; it was not run again.` and the timeout
@@ -44,19 +55,26 @@ versions may break the API.
   the turn was stopped, now carries the verdict's reason as
   `agentturn.Answer.Reason`, so the session's answer decision says why
   (#51).
-- `WithRan` tells `Engine.Answers` which cut-off calls the record shows
-  completed elsewhere, on a branch a rebase left or in the session
-  this one forks, and what they returned: such a call is answered
-  with that output, by policy, with the record's reason, `ran on a
-  branch the rebase left`, or `ran elsewhere` when the record gives
-  none, before the reviewer and before the replay rule, a deferred
-  call held after its dispatch included, as agentturn/session's
-  `ReplayAnswers` answers an aborted one. It was refused as one that
-  may have run, reviewed, or dispatched again. agentturn v0.0.15's `PendingCall` does
-  not carry the output, so the host reads the record; agentturn's next
-  release carries it as `PendingCall.Ran` and `PendingCall.RanWhere`,
-  and once this module requires it the loop's word is read first and
-  `WithRan` second (#63, waiting on an agentturn release).
+- `Engine.Answers` answers a call that may have run, a deferred call
+  held after its dispatch included, with the output the loop's pending
+  call carries from where it ran, `agentturn.PendingCall.Ran`, on a
+  branch a rebase left or in the session this one forks: by policy,
+  with `RanWhere` as the reason, `ran elsewhere` when it is empty,
+  before the reviewer and before the replay rule, as agentturn/session's
+  `ReplayAnswers` answers an aborted one. It is read from `Ran` being
+  set, not from `RanWhere`'s words, and such a call was refused as one
+  that may have run, reviewed, or dispatched again. There is no
+  `WithRan`: the option that stood in for the loop's word until it
+  carried the output was removed before any release shipped it, since
+  agentturn/session's `Pending` is the one reader of the record, and a
+  second source would need a rule for when the two disagree (#63).
+- `Engine.Decide` remembers no deferral for a nested call, one a tool
+  made with `agentturn.Invoke`, whose `ToolCallInfo.Parent` is the
+  call that made it. The verdict is still reported, but the loop
+  settles the call inline with the invoking tool's elicitor and it
+  never ends the run pending, so nothing would answer it and
+  `Engine.Deferred` and `Engine.Runs` kept it until the run was
+  forgotten (agentturn#208).
 - `ContextWithGrantScope` and `GrantScopeFromContext`: a grant set is
   activated under the scope its context carries, a decision consults
   the unscoped sets and those of its own context's scope, and

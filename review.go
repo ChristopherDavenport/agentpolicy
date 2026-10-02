@@ -116,22 +116,6 @@ func WithNeverStarted(fn func(ctx context.Context, runID, callID string) bool) O
 	return func(e *Engine) { e.neverStarted = fn }
 }
 
-// WithRan tells [Engine.Answers] which cut-off calls the session's record
-// says ran to completion elsewhere, and what they returned: a call whose
-// only dispatch is on a branch a rebase left, or in the session this one
-// forks, which agentturn/session's ReplayAnswers answers with that output.
-// fn is called with the run and the call and returns the output and where
-// it ran, as the record says it ("ran on a branch the rebase left"), or
-// nil for a call the record does not show completed; an empty where is
-// recorded as "ran elsewhere". It is read for every call that may have
-// run, a deferred call held after its dispatch included, before the
-// reviewer and before the replay rule. The loop's PendingCall does not
-// yet carry the output; once it does, as PendingCall.Ran and
-// PendingCall.RanWhere, the loop's word is read first and fn second.
-func WithRan(fn func(ctx context.Context, runID, callID string) (output *openresponses.FunctionCallOutput, where string)) Option {
-	return func(e *Engine) { e.ran = fn }
-}
-
 // ErrDenialBound is returned by [Engine.Answers], with the answers,
 // when the [DenialBound] was reached.
 var ErrDenialBound = errors.New("agentpolicy: reviewer denial bound reached")
@@ -153,6 +137,7 @@ const (
 	cutOffText           = "The call was cut off before it finished and may have run; it was not run again."
 	neverStartedText     = "The call was cut off before it started; it did not run."
 	rejectedText         = "The call was refused before it ran; it did not run."
+	rejectedWhyText      = "The call was refused before it ran; it did not run: "
 	noWorkaroundText     = "Do not pursue the same outcome through a workaround, indirect execution or policy circumvention."
 )
 
@@ -163,7 +148,7 @@ const (
 	neverStartedReason    = "not run: the call never started"
 	rejectedReason        = "not run: the call was refused before it ran"
 	// ranElsewhereReason stands in for the record's word on where a
-	// call ran when WithRan gives none.
+	// call ran when PendingCall.RanWhere gives none.
 	ranElsewhereReason = "ran elsewhere"
 )
 
@@ -184,11 +169,17 @@ func refusalText(reason, by string) string {
 	if by == ByPolicy {
 		who = "policy"
 	}
-	reason = strings.TrimSuffix(strings.TrimSpace(reason), ".")
+	reason = cleanReason(reason)
 	if reason == "" {
 		return "Denied by " + who + ". " + noWorkaroundText
 	}
 	return "Denied by " + who + ": " + reason + ". " + noWorkaroundText
+}
+
+// cleanReason trims a reason's space and its closing period, so a
+// sentence can end with it.
+func cleanReason(reason string) string {
+	return strings.TrimSuffix(strings.TrimSpace(reason), ".")
 }
 
 // Answers reviews the calls end left pending and returns one Answer
@@ -231,9 +222,10 @@ func refusalText(reason, by string) string {
 // stopped, so a replay is never approved on the tool's word alone. The
 // tool is the pending call's, or the one [WithTools] names for a call
 // from a seeded transcript. A call the record shows ran to completion
-// elsewhere, through [WithRan], is answered with that output before
-// the replay rule, by policy, with the record's word on where it ran
-// as the reason. When the call was never handed to its tool, pending
+// elsewhere, one the loop's PendingCall carries the output of as
+// agentturn.PendingCall.Ran, is answered with that output before the
+// replay rule, by policy, with PendingCall.RanWhere, the record's word
+// on where it ran, as the reason. When the call was never handed to its tool, pending
 // as agentturn.PendingUndispatched, nothing has decided it, and
 // agentturn's Resume puts an approval of it to BeforeToolCall as a
 // run would: it is approved, by policy, with the reason "not started:
@@ -244,7 +236,9 @@ func refusalText(reason, by string) string {
 // not run, since Resume would hold an approval of it to the replay
 // rule and refuse it. A call pending as agentturn.PendingRejected was
 // refused before it ran and is owed that refusal: it is answered, by
-// policy, with text that says it was refused and did not run.
+// policy, with text that says it was refused and did not run, and the
+// reason the record gives for the refusal,
+// agentturn.PendingCall.Refused, when it gives one.
 // Otherwise it is answered with a refusal that says it may have run,
 // so the model decides whether to ask for it again, as is a call
 // pending as agentturn.PendingAnswered, which is owed its output and
@@ -300,7 +294,7 @@ func (e *Engine) Answers(ctx context.Context, r Reviewer, end *agentturn.RunEnd)
 			answers = append(answers, agentturn.Approve(call.CallID).WithBy(ByPolicy).WithReason(decidedOnResumeReason))
 			continue
 		}
-		if ans, v, ok := e.ranElsewhere(ctx, end.RunID, p); ok {
+		if ans, v, ok := e.ranElsewhere(end.RunID, p); ok {
 			answers = append(answers, ans)
 			e.observe(ctx, v)
 			continue
@@ -386,29 +380,26 @@ func (e *Engine) unreviewed(ctx context.Context, p agentturn.PendingCall) bool {
 }
 
 // ranElsewhere answers a call that may have run, a deferred call held
-// after its dispatch included, when the record shows it ran to
-// completion elsewhere, on a branch a rebase left or in the session
-// this one forks: it is owed that output and must not run again, nor
+// after its dispatch included, when the loop's PendingCall carries the
+// output it has where it ran, agentturn.PendingCall.Ran, off the path
+// the agent continues: on a branch a rebase left or in the session
+// this one forks. It is owed that output and must not run again, nor
 // be reviewed, so it is read before the replay rule and before the
-// reviewer. The record is read through [WithRan] until agentturn's
-// PendingCall carries the output, as PendingCall.Ran and
-// PendingCall.RanWhere; then the loop's word is read first and the
-// option second. It reports false for a call the record does not show
-// completed.
-func (e *Engine) ranElsewhere(ctx context.Context, runID string, p agentturn.PendingCall) (agentturn.Answer, Verdict, bool) {
-	if e.ran == nil || !p.MayHaveRun() {
+// reviewer. The call is read by Ran being set, not by RanWhere's
+// words, which are the answer's reason and may be anything; an empty
+// RanWhere reads as "ran elsewhere". It reports false for a call that
+// carries no output.
+func (e *Engine) ranElsewhere(runID string, p agentturn.PendingCall) (agentturn.Answer, Verdict, bool) {
+	if p.Ran == nil || !p.MayHaveRun() {
 		return agentturn.Answer{}, Verdict{}, false
 	}
 	call := p.Call
-	out, where := e.ran(ctx, runID, call.CallID)
-	if out == nil {
-		return agentturn.Answer{}, Verdict{}, false
-	}
+	where := p.RanWhere
 	if where == "" {
 		where = ranElsewhereReason
 	}
 	v := Verdict{RunID: runID, CallID: call.CallID, Tool: call.Name, Action: agentturn.Allow, Reason: where, By: ByPolicy}
-	ans := agentturn.Output(&openresponses.FunctionCallOutput{CallID: call.CallID, Status: out.Status, Output: out.Output})
+	ans := agentturn.Output(&openresponses.FunctionCallOutput{CallID: call.CallID, Status: p.Ran.Status, Output: p.Ran.Output})
 	return ans.WithBy(ByPolicy).WithReason(where), v, true
 }
 
@@ -440,10 +431,15 @@ func (e *Engine) cutOff(ctx context.Context, runID string, p agentturn.PendingCa
 		}
 		if p.Reason == agentturn.PendingRejected {
 			// The call is owed the refusal a decision made before it
-			// ran. When agentturn's PendingCall carries that reject's
-			// reason, the owed refusal will be written from it.
+			// ran, in that decision's words when the loop's PendingCall
+			// carries them, and in fixed text when it does not.
 			v.Reason = rejectedReason
-			return refuse(rejectedText)
+			text := rejectedText
+			if why := cleanReason(p.Refused); why != "" {
+				v.Reason = rejectedReason + ": " + why
+				text = rejectedWhyText + why + "."
+			}
+			return refuse(text)
 		}
 		if r, again := e.replay(ctx, p); again {
 			tool := p.Tool

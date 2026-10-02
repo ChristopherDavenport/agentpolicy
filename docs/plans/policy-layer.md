@@ -430,7 +430,9 @@ in a seeded transcript, which the loop marks as such on `PendingCall`,
 is not the reviewer's to approve, since its tool may have run. Outside
 the denial bound, it runs again when its tool says
 `agenttool.ReplaySafe`, it is refused as never run when the record
-says it never started (`WithNeverStarted`), and it is refused with
+says it never started (`WithNeverStarted`), it is answered with its
+output when the pending call carries the output it has where it ran
+(`PendingCall.Ran`), and it is refused with
 text that says it may have run otherwise, so the model decides whether
 to ask for it again. The note is the reviewer's,
 or the user's through the front: the engine sets none on its own
