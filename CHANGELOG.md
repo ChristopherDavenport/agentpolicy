@@ -5,6 +5,90 @@ All user-visible changes to this library. The format follows
 uses [Semantic Versioning](https://semver.org/); before v1.0.0 minor
 versions may break the API.
 
+## Unreleased
+
+- `Verdict.Record` writes `source_hash`, the rule's `Source.Hash`, so a
+  session says which skill frontmatter or settings file a grant or a
+  decision was built from and not only the source's name. Omitted
+  when empty, so every existing record is unchanged (#64).
+- `Engine.Answers` refuses a reviewer's approval of a call that may
+  have run when its arguments differ from those the call would run
+  with and the tool does not say the rewrite is `agenttool.ReplaySafe`,
+  as it already refused a hook's rewrite: the model reads `The call
+  was cut off before it finished and may have run; it was not run
+  again.` and the verdict is `not run again: the reviewer rewrote the
+  arguments, and replay is X for the rewrite`, by policy, not counted
+  toward the denial bound. `Resume` refused such an approval with
+  `ErrAmbiguousCall` and the whole resume failed with it (#62).
+- `Engine.Answers` answers a call pending as
+  `agentturn.PendingUndispatched` with an approval, by policy, reason
+  `not started: decided on resume`, since agentturn's `Resume` puts it
+  to `BeforeToolCall` as a run would; it refused it as never run. The
+  approval is no verdict: the decision on resume is. A call the record
+  says never started through `WithNeverStarted` is still refused with
+  `The call was cut off before it started; it did not run.` (#52).
+- `Engine.Answers` answers a call pending as `agentturn.PendingRejected`
+  without the reviewer, by policy, with `The call was refused before
+  it ran; it did not run.` and the verdict `not run: the call was
+  refused before it ran`; it sent the call to the reviewer, and an
+  approval failed the resume with `ErrCallAnswered` (#53).
+- A reviewer's refusal, timeout or failure on a call that may have run
+  tells the model so: the output begins `The call was cut off before
+  it finished and may have run; it was not run again.` and the timeout
+  and failure texts no longer say the call did not run, reading `The
+  reviewer did not answer in time.` and `The reviewer could not
+  evaluate the call.` after it. Every refusal, timeout and failure
+  `Answers` builds now carries the verdict's reason as
+  `agentturn.Answer.Reason`, so the session's answer decision says why
+  (#51).
+- `WithRan` tells `Engine.Answers` which cut-off calls the record shows
+  completed elsewhere, on a branch a rebase left or in the session
+  this one forks, and what they returned: such a call is answered
+  with that output, by policy, with the record's reason, `ran on a
+  branch the rebase left`, before the replay rule, as
+  agentturn/session's `ReplayAnswers` answers it. It was refused as one
+  that may have run, or dispatched again. The loop's `PendingCall` does
+  not yet carry the output, so the host reads the record; when it
+  does, the loop's word will be read first (#63, waiting on an
+  agentturn release).
+- `ContextWithGrantScope` and `GrantScopeFromContext`: a grant set is
+  activated under the scope its context carries, a decision consults
+  the unscoped sets and those of its own context's scope, and
+  `Engine.Revoke` removes the set of its context's scope alone;
+  `Engine.RevokeScope` removes every set of a scope when a conversation
+  ends, journaled as `revoked the rules granted under S`, and
+  `Engine.GrantsFor` lists the sets a decision consults. A context with
+  no scope is the unscoped one, where a set decides every call as
+  before. `Engine.ToolProvider` reads the scope of the context the
+  loop consults it with; `Engine.Filter` and `Engine.Removes`, which
+  take none, read the unscoped sets (#18).
+- `WithToolsFor` is `WithTools` with the decision's context, so a
+  lookup answers for the run whose batch is decided, through
+  `agentturn.RunIDFromContext`; `Engine.Answers` puts the ended run's
+  ID on the context when the caller's carries none (#43).
+- `Policy.WithDefault` replaces a policy's default, so a host whose
+  tools are discovered at run time says in one documented place what
+  a tool a preset's split never named gets; each preset's doc says
+  what that trades (#16).
+- `guard.Redact` over a finished turn reads only the items that are
+  not messages, since the messages were its to rewrite on
+  `OutputGuard` and the output holds them as the model said them; it
+  stopped the run on a secret it had already removed (#17).
+- `guard.Output` carries `Final` from the loop's `TurnInfo`, so a
+  guard over the answer passes a turn that only called tools; the
+  `Chain` and package docs say the two output hooks see the same
+  words, and the example wires a chain per hook (#20).
+- `Chain.Placeholder` is handed the message as the guards before the
+  blocking one left it, not as the model produced it, so a redaction
+  ahead of a block is not undone in what the front shows (#22).
+- RFC 0001: the answers without a human state every change above; the
+  grant scope, the context on the sibling lookup and the preset's
+  default are in their sections; the verdict record gains
+  `source_hash`; the output subject says whether the turn is final;
+  #16, #17, #18, #20, #22, #43 and #51 to #53 leave the open
+  questions, and what the loop's pending call does not yet carry
+  (#53, #63) enters them.
+
 ## v0.0.10 - 2026-10-01
 
 - Requires `agentturn` v0.0.15, up from v0.0.13, and `agenttool`
