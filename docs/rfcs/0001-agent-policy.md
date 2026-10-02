@@ -677,10 +677,28 @@ Answering a run's pending calls with a reviewer, per pending call in
 order:
 
 - A held call is left to the release, which runs last.
-- A call the loop never handed to its tool, or one the record says
-  never started, is refused with `The call was cut off before it
+- A call the loop never handed to its tool, pending as undispatched,
+  was decided by nothing, and the loop puts an approval of it to its
+  decision hook on resume as a run would. It is approved, by `policy`,
+  with the reason `not started: decided on resume`, for the policy to
+  decide there. This answer is no verdict: the decision on resume is,
+  and one here would say allow for a call the policy may then block.
+- A call the record says never started but that the loop lists under
+  another reason is refused with `The call was cut off before it
   started; it did not run.` and the verdict `not run: the call never
-  started`.
+  started`, since the loop would hold an approval of it to the replay
+  rule and refuse it.
+- A call the record says a decision refused before it ran, pending as
+  rejected, is owed that refusal and nothing else. It is answered
+  without the reviewer, by `policy`, with `The call was refused before
+  it ran; it did not run.` and the verdict `not run: the call was
+  refused before it ran`.
+- A call the record shows completed elsewhere, on a branch a rebase
+  left or in the session this one forks, is answered with that output,
+  by `policy`, with the record's reason for where it ran, such as `ran
+  on a branch the rebase left`, as the answer's reason and the
+  verdict's, before the replay rule: it is owed that output and must
+  not run again.
 - A call that may have run, cut off by an abort or found unanswered in
   a seeded transcript, is not the reviewer's to approve. When its tool
   says a second run is safe, or safe under its first run's key and the
@@ -715,9 +733,9 @@ A reviewer's answer becomes:
 | outcome | answer | verdict reason | decider |
 | --- | --- | --- | --- |
 | approved | approve, with the reviewer's arguments when given, else a hook's rewrite when there was one, and its note | `approved by reviewer`, `: reason` when given | the reviewer's |
-| refused | the refusal text below, and its note | `denied by reviewer`, `: reason` when given | the reviewer's |
-| timed out | `The reviewer did not answer in time; the call did not run.` | `reviewer timed out` | `policy` |
-| the review failed | `The reviewer could not evaluate the call; the call did not run.` | `reviewer failed: E` | `policy` |
+| refused | the refusal text below, and its note; for a call that may have run, `The call was cut off before it finished and may have run; it was not run again.`, a space, and the refusal text | `denied by reviewer`, `: reason` when given | the reviewer's |
+| timed out | `The reviewer did not answer in time; the call did not run.`; for a call that may have run, `The call was cut off before it finished and may have run; it was not run again. The reviewer did not answer in time.` | `reviewer timed out` | `policy` |
+| the review failed | `The reviewer could not evaluate the call; the call did not run.`; for a call that may have run, `The call was cut off before it finished and may have run; it was not run again. The reviewer could not evaluate the call.` | `reviewer failed: E` | `policy` |
 
 The refusal text is `Denied by W: reason. ` or `Denied by W. ` with no
 reason, where `W` is `policy` when the reviewer names the policy as
@@ -725,15 +743,31 @@ its decider and `reviewer` otherwise, and the reason is trimmed of
 surrounding whitespace and then of one trailing full stop, so the stop
 is not doubled, followed by `Do not pursue the same outcome
 through a workaround, indirect execution or policy circumvention.`
-Every answer names its decider, and every answer is a verdict: allow
-for an approval, block otherwise.
+A call that may have run is one the policy asked about running again,
+or one held after its dispatch that may run again. Every answer names
+its decider; a refusal, a timeout and a failed review also carry the
+verdict's reason, so the record's decision says why without the
+verdict beside it. Every answer is a verdict: allow for an approval,
+block otherwise.
+
+An approval of a call that may have run whose arguments differ from
+those the call would run with, a hook's rewrite when there was one,
+else those of the dispatch it repeats, compared as values, is refused
+with `The call was cut off before it finished and may have run; it was
+not run again.`, by `policy`, with the verdict `not run again: the
+reviewer rewrote the arguments, and replay is X for the rewrite`, `X`
+being what the tool says of running the rewrite, unless its tool says
+the rewrite is safe to run, since the loop runs a keyed call again only
+with the arguments of the dispatch it repeats. It is not a refusal of
+the reviewer's and does not count toward the bound.
 
 A **denial bound** stops a reviewer that refuses and refuses: after a
 number of consecutive refusals, or a number within a window of recent
 reviews, every refusal among the answers ends the run, and the host is
 told the bound was reached. Every answer that is not an approval
 counts, a timeout and a failed review included; a call answered
-without the reviewer does not. The reference bound is three
+without the reviewer does not, nor does the refusal of a reviewer's
+rewrite above. The reference bound is three
 consecutive, or ten within the last fifty. The count persists across
 answers until the host resets it, which it does at each new user
 message.
@@ -901,8 +935,8 @@ The root module of this repository is the reference binding.
 | grants | `Engine.Grant`, `Engine.GrantOver`; `Engine.GrantSet` → granted and `[]Refusal{Rule, Reason}`, `Engine.Revoke`, `Engine.Grants` |
 | deferred calls | `Engine.Deferred`, `Engine.Runs`, `Engine.Forget` |
 | release | `Engine.Release(ctx, end, answers…)`; `ErrUnanswered` |
-| reviewer | `Reviewer`, `ReviewerFunc`, `Review{Outcome, Reason, Args, Note, By}`, `Outcome` (`Refused`, `Approved`, `TimedOut`); `Engine.Answers(ctx, r, end)` |
-| cut-off calls | `WithNeverStarted(fn)`; the tool from the pending call or `WithTools` |
+| reviewer | `Reviewer`, `ReviewerFunc`, `Review{Outcome, Reason, Args, Note, By}`, `Outcome` (`Refused`, `Approved`, `TimedOut`); `Engine.Answers(ctx, r, end)`, whose refusals carry the verdict's reason as `agentturn.Answer.Reason`; a call that may have run is `agentturn.PendingCall.MayHaveRun` |
+| cut-off calls | `WithNeverStarted(fn)`, `WithRan(fn)`; the tool from the pending call or `WithTools`; `agentturn.PendingUndispatched` is approved for the resume, `agentturn.PendingRejected` answered as refused |
 | denial bound | `DenialBound{Consecutive, Total, Window}`, `DefaultDenialBound`, `WithDenialBound`, `ErrDenialBound`, `Engine.ResetReviews` |
 | decider | `ByPolicy`, `ByAgent`, `ByHuman` |
 | verdict | `Verdict{RunID, Turn, CallID, Tool, Guard, Action, Rule, Reason, By, Held, Subject, Confined}`; `WithObserver(fn)`, which adds an observer |

@@ -239,10 +239,11 @@ type Engine struct {
 	confine   func(context.Context, agenttool.Tool, json.RawMessage) (bool, string)
 	lookup    func(string) (agenttool.Tool, bool)
 	// hooks are folded into every decision after the policy's, and
-	// neverStarted reads the record for a cut-off call. Both are set
-	// at Build and never written after.
+	// neverStarted and ran read the record for a cut-off call. All
+	// three are set at Build and never written after.
 	hooks        []func(context.Context, agentturn.ToolCallInfo) (*agentturn.ToolDecision, error)
 	neverStarted func(context.Context, string, string) bool
+	ran          func(context.Context, string, string) (*openresponses.FunctionCallOutput, string)
 
 	mu     sync.Mutex
 	policy Policy
