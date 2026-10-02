@@ -176,7 +176,29 @@ func WithConfinement(fn func(ctx context.Context, tool agenttool.Tool, args json
 // reads it too, for the tool of a cut-off call found in a seeded
 // transcript, which the loop does not name, to ask whether the call
 // may run again.
+//
+// The lookup is given the tool's name alone, so one engine shared by
+// runs whose tool lists differ reads one list for all of them;
+// [WithToolsFor] gives it the decision's context as well.
 func WithTools(lookup func(name string) (agenttool.Tool, bool)) Option {
+	return func(e *Engine) {
+		if lookup == nil {
+			e.lookup = nil
+			return
+		}
+		e.lookup = func(_ context.Context, name string) (agenttool.Tool, bool) { return lookup(name) }
+	}
+}
+
+// WithToolsFor is [WithTools] with the context of the decision, so a
+// lookup answers for the run whose batch is decided: the context is
+// the hook's for a sibling, which carries the run's ID
+// (agentturn.RunIDFromContext), and [Engine.Answers]' for a cut-off
+// call, carrying the ended run's ID when the caller's context carries
+// none. An engine shared by concurrent runs whose tool lists differ
+// answers per run through it; a lookup that ignores the context is
+// WithTools.
+func WithToolsFor(lookup func(ctx context.Context, name string) (agenttool.Tool, bool)) Option {
 	return func(e *Engine) { e.lookup = lookup }
 }
 
@@ -237,7 +259,7 @@ type Engine struct {
 	observers []func(context.Context, Verdict)
 	bound     DenialBound
 	confine   func(context.Context, agenttool.Tool, json.RawMessage) (bool, string)
-	lookup    func(string) (agenttool.Tool, bool)
+	lookup    func(context.Context, string) (agenttool.Tool, bool)
 	// hooks are folded into every decision after the policy's, and
 	// neverStarted reads the record for a cut-off call. Both are set
 	// at Build and never written after.
@@ -246,12 +268,13 @@ type Engine struct {
 
 	mu     sync.Mutex
 	policy Policy
-	// grants are the scoped rule sets in force beside the policy, in
-	// activation order, one per source; withheld holds the allow rules
-	// of the untrusted ones, which apply to nothing. gen counts every
-	// change to the rules, so the batch cache is never read across one.
-	grants   []RuleSet
-	withheld map[string][]Rule
+	// grants are the rule sets in force beside the policy, in
+	// activation order, one per grant scope and source; withheld holds
+	// the allow rules of the untrusted ones, which apply to nothing,
+	// under the same key. gen counts every change to the rules, so the
+	// batch cache is never read across one.
+	grants   []grant
+	withheld map[grantKey][]Rule
 	gen      uint64
 	// batch is the last batch's verdicts, so the product's splitter
 	// runs once per call of a batch rather than once per pair.
@@ -307,7 +330,7 @@ func Build(p Policy, matchers map[string]ToolMatcher, opts ...Option) (*Engine, 
 		bound:    DefaultDenialBound,
 		confine:  agenttool.ConfinedBy,
 		deferred: make(map[string]map[string]deferredCall),
-		withheld: make(map[string][]Rule),
+		withheld: make(map[grantKey][]Rule),
 	}
 	for _, opt := range opts {
 		opt(e)
@@ -567,17 +590,18 @@ func (e *Engine) Sources() []Source {
 
 // Withheld returns the allow rules withheld from the untrusted
 // sources: those the merge withheld, and those of the rule sets
-// [Engine.GrantSet] activated from a source the user has not trusted.
-// The engine never consults them: they are what a front shows when it
-// asks whether to trust a folder or a skill, so the user reads what
-// trusting it would allow rather than agreeing blind. Trusting a
+// [Engine.GrantSet] activated from a source the user has not trusted,
+// under every grant scope, in the order [Engine.Grants] lists the
+// sets. The engine never consults them: they are what a front shows
+// when it asks whether to trust a folder or a skill, so the user reads
+// what trusting it would allow rather than agreeing blind. Trusting a
 // source means merging or granting again with Source.Trusted set.
 func (e *Engine) Withheld() []Rule {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	out := append([]Rule(nil), e.policy.Withheld...)
-	for _, g := range e.grants {
-		out = append(out, e.withheld[g.Source.Name]...)
+	for _, g := range e.ordered() {
+		out = append(out, e.withheld[g.key()]...)
 	}
 	return out
 }
@@ -619,7 +643,11 @@ func (e *Engine) BeforeToolCall() func(context.Context, agentturn.ToolCallInfo) 
 //
 // One engine serves every agent of a product. What it defers is
 // remembered under the call's own run, so a decision in a sub-agent's
-// run never forgets what the main agent is waiting on.
+// run never forgets what the main agent is waiting on. The rule sets
+// consulted are the policy's, the unscoped sets [Engine.GrantSet]
+// activated, and those of the grant scope ctx carries, see
+// [ContextWithGrantScope], so a skill one conversation opened does not
+// decide another's calls.
 func (e *Engine) Decide(ctx context.Context, info agentturn.ToolCallInfo) (*agentturn.ToolDecision, error) {
 	name, callID := "", ""
 	if info.Call != nil {
@@ -627,7 +655,7 @@ func (e *Engine) Decide(ctx context.Context, info agentturn.ToolCallInfo) (*agen
 	}
 	v := Verdict{RunID: info.RunID, Turn: info.Turn, CallID: callID, Tool: name, By: ByPolicy}
 
-	a := e.active()
+	a := e.active(ctx)
 
 	out, err := e.judge(ctx, a, info, &v)
 	if err != nil {
@@ -742,9 +770,10 @@ func (e *Engine) decide(a active, name string, c confinement, args json.RawMessa
 // batchCache is whether each call of one batch asks, by its position
 // in the batch, kept for the rest of that batch's decisions. key names
 // the batch, its run and turn, every call's ID, name and arguments,
-// and the rules it was decided under, so a batch is never read against
-// another's calls, even one whose provider numbers its calls the same
-// way, or against a policy that has changed since.
+// and the rules it was decided under, the grant scope included, so a
+// batch is never read against another's calls, even one whose provider
+// numbers its calls the same way, against a policy that has changed
+// since, or against another scope's grants.
 type batchCache struct {
 	key  string
 	asks map[int]bool
@@ -770,7 +799,7 @@ func (e *Engine) batchAsks(ctx context.Context, a active, info agentturn.ToolCal
 		return false
 	}
 	self := position(info)
-	key := batchKey(info, a.gen)
+	key := batchKey(info, a.gen, a.scope)
 	e.mu.Lock()
 	if e.batch.key != key {
 		e.batch = batchCache{key: key, asks: make(map[int]bool, len(info.Batch))}
@@ -815,7 +844,7 @@ func (e *Engine) batchAsks(ctx context.Context, a active, info agentturn.ToolCal
 func (e *Engine) siblingAsks(ctx context.Context, a active, info agentturn.ToolCallInfo, i int) bool {
 	c := info.Batch[i]
 	args := callArgs(c)
-	sib := agentturn.ToolCallInfo{RunID: info.RunID, Turn: info.Turn, Call: c, Tool: e.sibling(c.Name), Args: args, Batch: info.Batch, Index: i}
+	sib := agentturn.ToolCallInfo{RunID: info.RunID, Turn: info.Turn, Call: c, Tool: e.sibling(ctx, c.Name), Args: args, Batch: info.Batch, Index: i}
 	v := Verdict{}
 	if _, err := e.judge(ctx, a, sib, &v); err != nil {
 		return true
@@ -833,12 +862,13 @@ func position(info agentturn.ToolCallInfo) int {
 	return slices.Index(info.Batch, info.Call)
 }
 
-// sibling returns the tool [WithTools] names, or nil.
-func (e *Engine) sibling(name string) agenttool.Tool {
+// sibling returns the tool [WithTools] or [WithToolsFor] names for the
+// decision ctx belongs to, or nil.
+func (e *Engine) sibling(ctx context.Context, name string) agenttool.Tool {
 	if e.lookup == nil {
 		return nil
 	}
-	t, ok := e.lookup(name)
+	t, ok := e.lookup(ctx, name)
 	if !ok {
 		return nil
 	}
@@ -846,10 +876,12 @@ func (e *Engine) sibling(name string) agenttool.Tool {
 }
 
 // batchKey names a batch by its run, its turn, its calls and the rules
-// of the moment.
-func batchKey(info agentturn.ToolCallInfo, gen uint64) string {
+// of the moment, the grant scope they were read under included.
+func batchKey(info agentturn.ToolCallInfo, gen uint64, scope string) string {
 	var b strings.Builder
 	b.WriteString(strconv.FormatUint(gen, 10))
+	b.WriteByte(0)
+	b.WriteString(strconv.Quote(scope))
 	b.WriteByte(0)
 	b.WriteString(info.RunID)
 	b.WriteByte(0)

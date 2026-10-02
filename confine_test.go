@@ -3,6 +3,7 @@ package agentpolicy
 import (
 	"context"
 	"encoding/json"
+	"reflect"
 	"testing"
 
 	"github.com/ChristopherDavenport/agenttool"
@@ -252,5 +253,115 @@ func TestHookRewriteIsDecidedAgain(t *testing.T) {
 				t.Errorf("verdict confined %q reason %q, want %q %q", v.Confined, v.Reason, tt.confined, tt.reason)
 			}
 		})
+	}
+}
+
+// The lookup WithTools names takes a tool name alone, so one engine
+// shared by runs whose tool lists differ read one list for all of
+// them, and a batch hold could be defeated. WithToolsFor gives the
+// lookup the decision's context, which carries the run's ID. (#43)
+func TestWithToolsForAnswersPerRun(t *testing.T) {
+	ctx := context.Background()
+	policy := AutoEdit(Tools{Read: []string{"read"}, Execute: []string{"bash"}})
+	// Run A's shell claims no sandbox; run B's runs every command
+	// confined.
+	lookup := func(ctx context.Context, name string) (agenttool.Tool, bool) {
+		if name != "bash" {
+			return nil, false
+		}
+		switch agentturn.RunIDFromContext(ctx) {
+		case "run_A":
+			return localBash(), true
+		case "run_B":
+			return sandboxedBash(), true
+		}
+		return nil, false
+	}
+	e, err := Build(policy, nil, WithToolsFor(lookup))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		run    string
+		action agentturn.ToolAction
+		held   bool
+	}{{"run_A", agentturn.Defer, true}, {"run_B", agentturn.Allow, false}} {
+		calls := []*openresponses.FunctionCall{
+			{CallID: "call_a", Name: "read", Arguments: `{"path":"go.mod"}`},
+			{CallID: "call_b", Name: "bash", Arguments: `{"command":"ls"}`},
+		}
+		// The read is decided before the hook has been handed the
+		// command, so the sibling's tool is the lookup's.
+		info := agentturn.ToolCallInfo{RunID: tc.run, Turn: 1, Call: calls[0], Args: json.RawMessage(calls[0].Arguments), Batch: calls, Index: 0}
+		d, err := e.Decide(agentturn.ContextWithRunID(ctx, tc.run), info)
+		if err != nil {
+			t.Fatal(err)
+		}
+		v, _ := e.Deferred(tc.run, "call_a")
+		if d.Action != tc.action || v.Held != tc.held {
+			t.Errorf("%s: read = %v held=%v %q, want %v held=%v", tc.run, d.Action, v.Held, d.Reason, tc.action, tc.held)
+		}
+	}
+}
+
+// Answers looks a cut-off call's tool up with the ended run's ID on
+// the context when the caller's carries none, and leaves a run ID the
+// caller's context carries alone.
+func TestAnswersLooksUpWithTheRunID(t *testing.T) {
+	ctx := context.Background()
+	read := agenttool.New("read", "A tool", func(context.Context, agenttool.NoArgs) (string, error) { return "", nil },
+		agenttool.WithReplay(func(context.Context, json.RawMessage) agenttool.Replay { return agenttool.ReplaySafe }))
+	var seen []string
+	lookup := func(ctx context.Context, name string) (agenttool.Tool, bool) {
+		run := agentturn.RunIDFromContext(ctx)
+		seen = append(seen, run)
+		if run == "r" && name == "read" {
+			return read, true
+		}
+		return nil, false
+	}
+	e, err := Build(Policy{Default: Allow()}, nil, WithToolsFor(lookup))
+	if err != nil {
+		t.Fatal(err)
+	}
+	reviewer := ReviewerFunc(func(context.Context, agentturn.ToolCallInfo, Verdict) (Review, error) {
+		t.Error("a cut-off call reached the reviewer")
+		return Review{}, nil
+	})
+	end := func() *agentturn.RunEnd {
+		return &agentturn.RunEnd{RunID: "r", Reason: agentturn.ReasonAborted, Pending: []agentturn.PendingCall{
+			// A call from a seeded transcript names no tool; the lookup does.
+			{Call: &openresponses.FunctionCall{CallID: "seeded", Name: "read", Arguments: `{}`}, Reason: agentturn.PendingUnknown},
+		}}
+	}
+	const cut = "The call was cut off before it finished and may have run; it was not run again."
+	for _, tc := range []struct {
+		name string
+		ctx  context.Context
+		want agentturn.Answer
+	}{
+		{"no run ID on the context", ctx, agentturn.Approve("seeded").WithBy(ByPolicy).WithReason("run again: replay safe; allowed by default")},
+		{"another run's ID on the context", agentturn.ContextWithRunID(ctx, "other"), agentturn.Output(openresponses.NewFunctionCallOutput("seeded", cut)).WithBy(ByPolicy).WithReason("not reviewed: unknown")},
+	} {
+		seen = nil
+		answers, err := e.Answers(tc.ctx, reviewer, end())
+		if err != nil {
+			t.Fatalf("%s: %v", tc.name, err)
+		}
+		if len(answers) != 1 || !reflect.DeepEqual(answers[0], tc.want) {
+			t.Errorf("%s: answers = %+v, want %+v", tc.name, answers, tc.want)
+		}
+		if len(seen) == 0 {
+			t.Fatalf("%s: the lookup was not consulted", tc.name)
+		}
+		want := agentturn.RunIDFromContext(tc.ctx)
+		if want == "" {
+			want = "r"
+		}
+		for _, run := range seen {
+			if run != want {
+				t.Errorf("%s: the lookup saw run %q, want %q", tc.name, run, want)
+			}
+		}
 	}
 }

@@ -152,3 +152,69 @@ func TestFilterRemovesDeniedTools(t *testing.T) {
 		t.Error("Removes(edit) after the revoke")
 	}
 }
+
+// The provider reads the grant scope of the context the loop consults
+// it with, so a scoped set's bare deny takes the tool out of the offer
+// for the runs under its scope and no other; Filter and Removes take
+// no context and read the unscoped sets. (#18)
+func TestToolProviderIsScoped(t *testing.T) {
+	ctx := context.Background()
+	a := ContextWithGrantScope(ctx, "A")
+	b := ContextWithGrantScope(ctx, "B")
+	tool := func(name string) agenttool.Tool {
+		return agenttool.New(name, "a tool", func(context.Context, struct{}) (string, error) { return "", nil })
+	}
+	base := []agenttool.Tool{tool("read"), tool("bash"), tool("edit")}
+	names := func(tools []agenttool.Tool) string {
+		var out []string
+		for _, t := range tools {
+			out = append(out, t.Name())
+		}
+		return strings.Join(out, " ")
+	}
+	e, err := Build(Policy{Default: Allow()}, testMatchers)
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider := e.ToolProvider(func(context.Context) []agenttool.Tool { return base })
+	skill := Source{Name: "skill:review", Rank: 1}
+	e.GrantSet(a, RuleSet{Source: skill, Deny: rules(t, "edit")})
+	for name, tc := range map[string]struct {
+		ctx  context.Context
+		want string
+	}{"A": {a, "read bash"}, "B": {b, "read bash edit"}, "none": {ctx, "read bash edit"}} {
+		if got := names(provider(tc.ctx)); got != tc.want {
+			t.Errorf("provider under %s = %q, want %q", name, got, tc.want)
+		}
+	}
+	if got := names(e.Filter(base)); got != "read bash edit" {
+		t.Errorf("Filter = %q", got)
+	}
+	if r, ok := e.Removes("edit"); ok {
+		t.Errorf("Removes(edit) = %v under a scoped set", r)
+	}
+
+	// An unscoped set removes the tool for every scope, and Filter and
+	// Removes read it.
+	e.GrantSet(ctx, RuleSet{Source: Source{Name: "skill:safe", Rank: 1}, Deny: rules(t, "bash")})
+	for name, tc := range map[string]struct {
+		ctx  context.Context
+		want string
+	}{"A": {a, "read"}, "B": {b, "read edit"}, "none": {ctx, "read edit"}} {
+		if got := names(provider(tc.ctx)); got != tc.want {
+			t.Errorf("provider under %s with the unscoped set = %q, want %q", name, got, tc.want)
+		}
+	}
+	if got := names(e.Filter(base)); got != "read edit" {
+		t.Errorf("Filter with the unscoped set = %q", got)
+	}
+	if r, ok := e.Removes("bash"); !ok || r.String() != "bash" {
+		t.Errorf("Removes(bash) = %v, %v", r, ok)
+	}
+	if n := e.RevokeScope(a); n != 1 {
+		t.Errorf("RevokeScope(A) removed %d rules", n)
+	}
+	if got := names(provider(a)); got != "read edit" {
+		t.Errorf("provider under A after RevokeScope = %q", got)
+	}
+}

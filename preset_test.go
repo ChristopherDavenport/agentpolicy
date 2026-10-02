@@ -39,3 +39,45 @@ func TestPresets(t *testing.T) {
 		t.Error(err)
 	}
 }
+
+// A preset's default is the host's to replace, in one documented place,
+// and a preset is a value: replacing the default of one copy leaves
+// the original asking. (#16)
+func TestWithDefault(t *testing.T) {
+	ctx := context.Background()
+	tools := Tools{Read: []string{"read"}, Execute: []string{"bash"}}
+	full := FullAuto(tools)
+	open := full.WithDefault(Allow())
+	if full.Default != Ask() {
+		t.Errorf("FullAuto's default after WithDefault = %v, want ask", full.Default)
+	}
+	if open.Default != Allow() {
+		t.Errorf("WithDefault(Allow()) = %v", open.Default)
+	}
+	for _, tc := range []struct {
+		name   string
+		policy Policy
+		action agentturn.ToolAction
+		reason string
+	}{
+		{"the original asks", full, agentturn.Defer, "no rule allows mcp__shell__exec: approval required by default"},
+		{"the replaced default allows", open, agentturn.Allow, "allowed by default"},
+		{"a replaced default denies", Suggest(tools).WithDefault(Deny()), agentturn.Block, "no rule allows mcp__shell__exec: denied by default"},
+	} {
+		e, err := Build(tc.policy, nil)
+		if err != nil {
+			t.Fatalf("%s: %v", tc.name, err)
+		}
+		d, err := e.Decide(ctx, call("c", "mcp__shell__exec", `{}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if d.Action != tc.action || d.Reason != tc.reason {
+			t.Errorf("%s: %v %q, want %v %q", tc.name, d.Action, d.Reason, tc.action, tc.reason)
+		}
+		// The split's own tools are decided as before.
+		if d, _ := e.Decide(ctx, call("c", "read", `{}`)); d.Action != agentturn.Allow {
+			t.Errorf("%s: read = %v", tc.name, d.Action)
+		}
+	}
+}

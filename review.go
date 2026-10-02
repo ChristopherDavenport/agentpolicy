@@ -212,6 +212,10 @@ func (e *Engine) Answers(ctx context.Context, r Reviewer, end *agentturn.RunEnd)
 	if r == nil {
 		return nil, errors.New("agentpolicy: no reviewer")
 	}
+	if agentturn.RunIDFromContext(ctx) == "" {
+		// The lookup WithToolsFor names answers for the ended run.
+		ctx = agentturn.ContextWithRunID(ctx, end.RunID)
+	}
 	answers := make([]agentturn.Answer, 0, len(end.Pending))
 	bounded := false
 	for _, p := range end.Pending {
@@ -312,14 +316,14 @@ func (e *Engine) cutOff(ctx context.Context, runID string, p agentturn.PendingCa
 		if r, again := e.replay(ctx, p); again {
 			tool := p.Tool
 			if tool == nil {
-				tool = e.sibling(call.Name)
+				tool = e.sibling(ctx, call.Name)
 			}
 			// The policy decides the arguments the call would run with:
 			// those of the dispatch it repeats, which a decision may
 			// have rewritten, as Resume runs an approval with them.
 			args := pendingArgs(p)
 			info := agentturn.ToolCallInfo{RunID: runID, Call: call, Tool: tool, Args: args, Index: -1}
-			out, err := e.judge(ctx, e.active(), info, &v)
+			out, err := e.judge(ctx, e.active(ctx), info, &v)
 			if err != nil {
 				v.Action, v.Rule, v.Subject, v.By = agentturn.Defer, nil, "", ByPolicy
 				v.Reason = call.Name + " hook failed: " + err.Error()
@@ -376,7 +380,7 @@ type review struct {
 func (e *Engine) replay(ctx context.Context, p agentturn.PendingCall) (agenttool.Replay, bool) {
 	tool := p.Tool
 	if tool == nil {
-		tool = e.sibling(p.Call.Name)
+		tool = e.sibling(ctx, p.Call.Name)
 	}
 	if tool == nil {
 		return agenttool.ReplayUnknown, false

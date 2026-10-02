@@ -15,15 +15,18 @@ import (
 // offered, and so does a deny rule with none that a carve-out of the
 // list reaches, since the carve-out lets some calls through.
 //
-// It reads the deny rules a decision reads: the policy's, and those of
-// every rule set [Engine.GrantSet] activated, so a grant set's bare
-// deny, a skill's disallowed-tools, removes the tool as the policy's
-// does for as long as the set is active, and [Engine.Revoke] gives it
-// back. It is the engine's own tool-name test, so a front that lists
-// what a policy withholds and the list the model is offered cannot
-// disagree.
+// It reads the deny rules a decision under no grant scope reads: the
+// policy's, and those of every rule set [Engine.GrantSet] activated
+// under no scope, so a grant set's bare deny, a skill's
+// disallowed-tools, removes the tool as the policy's does for as long
+// as the set is active, and [Engine.Revoke] gives it back. It takes no
+// context, so a set activated under a scope, see
+// [ContextWithGrantScope], is not read here; [Engine.ToolProvider]
+// reads the scope of the context the loop consults it with. It is the
+// engine's own tool-name test, so a front that lists what a policy
+// withholds and the list the model is offered cannot disagree.
 func (e *Engine) Removes(tool string) (Rule, bool) {
-	return removes(e.active().policy.Deny, tool)
+	return removes(e.activeScope("").policy.Deny, tool)
 }
 
 // removes returns the first bare deny rule of list that names the tool
@@ -54,14 +57,20 @@ func reopened(list []Rule, r Rule) bool {
 // order. It is the Offer the round 1 study asked for: a bare-name deny,
 // or a deny whose tool-name glob matches, withholds the tool from the
 // model rather than refusing its calls one at a time. The rules are
-// read once for the list, as [Engine.Removes] reads them.
+// read once for the list, as [Engine.Removes] reads them: the
+// policy's and the unscoped grant sets', since it takes no context;
+// [Engine.ToolProvider] reads a scope's sets too.
 //
 // The filtering is not journalled. It answers what the model is
 // offered, once per turn, not what was decided about a call, and a
 // front that shows the user what a policy withheld reads
 // [Engine.Removes] for the rule.
 func (e *Engine) Filter(tools []agenttool.Tool) []agenttool.Tool {
-	deny := e.active().policy.Deny
+	return filter(e.activeScope("").policy.Deny, tools)
+}
+
+// filter returns the tools of the list no rule of deny removes.
+func filter(deny []Rule, tools []agenttool.Tool) []agenttool.Tool {
 	out := make([]agenttool.Tool, 0, len(tools))
 	for _, t := range tools {
 		if t == nil {
@@ -82,6 +91,14 @@ func (e *Engine) Filter(tools []agenttool.Tool) []agenttool.Tool {
 // turn, and a tool a server announces mid-session is filtered as it
 // appears.
 //
+// The deny rules read are those a decision under the context the loop
+// consults it with reads: the policy's, the unscoped grant sets', and
+// those of the sets activated under the grant scope that context
+// carries, see [ContextWithGrantScope], so a scoped set's bare deny
+// takes the tool out of the offer for the runs under its scope and no
+// other. [Engine.Filter] and [Engine.Removes] take no context and read
+// the unscoped sets alone.
+//
 // base is a provider rather than a list because the list is what
 // changes; a product whose list is fixed passes one that returns it,
 // or filters it once with [Engine.Filter] and sets Config.Tools.
@@ -90,6 +107,6 @@ func (e *Engine) ToolProvider(base func(context.Context) []agenttool.Tool) func(
 		if base == nil {
 			return nil
 		}
-		return e.Filter(base(ctx))
+		return filter(e.active(ctx).policy.Deny, base(ctx))
 	}
 }
