@@ -344,9 +344,11 @@ matcher to read the specifier with.
 ## Deciding a subject
 
 A subject is decided against the **active lists**: the policy's lists,
-followed by the kept lists of every active grant set in activation
-order (see [Grant sets](#grant-sets)). The inputs are the tool whose
-rules apply, the subject's arguments, and the call's confinement.
+followed by the kept lists of the active grant sets the decision
+consults, in activation order: the sets activated under no grant
+scope, then those activated under the scope of the decision's context
+(see [Grant sets](#grant-sets)). The inputs are the tool whose rules
+apply, the subject's arguments, and the call's confinement.
 
 A rule **fires** for a tool `T` and arguments `A`, within the list `L`
 it belongs to, when all of these hold:
@@ -496,17 +498,20 @@ batch holds, and a deferred call is deferred on its own account.
 
 A sibling's confinement is read from its own tool when the harness has
 handed the engine that sibling's call, and otherwise from the tool a
-host-supplied lookup names for it, or read as unconfined when there is
-none. So without a lookup, a call before a confined command that a
+host-supplied lookup names for it, given the decision's context, which
+carries the run's ID, so an engine shared by runs whose tool lists
+differ reads each run's list (this answers #43), or read as unconfined
+when there is none. So without a lookup, a call before a confined command that a
 bare ask rule names is held for it. A reading only ever moves toward
 asking within a batch: a sibling once read as asking stays so, and a
 call decided twice is held at least as often as the first time, so it
 never runs beside an ask.
 
 A batch is identified by its run, its turn, every call's ID, name and
-arguments, and the rules in force. A binding MAY cache the siblings'
-readings for a batch, and MUST NOT read a cache across two batches or
-across a change of rules.
+arguments, and the rules in force, the grant scope of the decision's
+context included. A binding MAY cache the siblings' readings for a
+batch, and MUST NOT read a cache across two batches, across a change
+of rules or across two grant scopes.
 
 The loop decides every call of a batch before any executes, under
 agentturn RFC 0001, which is what lets the engine see an ask wherever
@@ -528,7 +533,11 @@ with a specifier denies some calls and leaves the tool offered.
 
 The removal test and the decision's tool-name test are one test, so a
 front that lists what a policy withheld and the list the model is
-offered cannot disagree. Removing a tool is not a verdict and is not
+offered cannot disagree. The active deny list the offer reads is the
+one a decision under the offer's context reads: the policy's and the
+unscoped grant sets' always, and a scoped set's for the turns of the
+runs under its scope; a test with no context reads the unscoped sets
+alone. Removing a tool is not a verdict and is not
 recorded: it answers what the model is offered, once per turn, not
 what was decided about a call.
 
@@ -614,20 +623,36 @@ about a subject, and shadowing answers it at the decision. Nor is a
 bare rule a carve-out reaches, as the offer reads one: the carve-out
 lets some subjects past it, and the decision tells which.
 
-Sets are keyed by source name: activating a set under a name already
-active replaces it in place, and **revoking** a name removes its set,
-which is what a host does at the turn boundary for a grant that lasts
-one turn. A set's bare deny, a skill's `disallowed-tools`, removes the
-tool from the offer for as long as the set is active.
+Sets are keyed by **grant scope** and source name. The scope is a key
+the host gives the conversation, agent or run whose calls a set should
+decide, a session ID say, carried on the context: a set is activated
+under the scope of the context it is activated with, a subject is
+decided against the unscoped sets and those of its context's scope,
+and revoking a name removes the set of that name under the context's
+scope alone. A context with no scope is the **unscoped** scope, the
+default, under which a set decides every call the engine sees; an
+unscoped revoke never removes a scoped set, nor a scoped one the
+unscoped set. Revoking a scope removes every set under it, which a
+host does when a conversation ends. One engine serves every agent of a
+host, and a grant set had no run, so a skill the main agent opened
+granted its tools to a sub-agent that never opened it; the scope is
+how that question (#18) was answered.
+
+Activating a set under a name and scope already active replaces it in
+place, and **revoking** a name removes its set under the scope, which
+is what a host does at the turn boundary for a grant that lasts one
+turn. A set's bare deny, a skill's `disallowed-tools`, removes the
+tool from the offer for as long as the set is active, for the runs
+under its scope.
 
 Every grant, every grant set's refusal, and every revocation that
 removed a rule is a verdict: allow with the rule and `granted G` for a
 grant, `granted G over R` for a grant over and `granted G by N` for a
 grant set, `N` its source's name or `the product` when it has none;
 block with the rule and `not granted G: reason` for a grant set's
-refusal; block
-with `revoked the rules granted by N` for a revocation. The decider is
-`policy`.
+refusal; block with `revoked the rules granted by N` for a revocation
+and `revoked the rules granted under S` for a scope's, `S` the scope or
+`no scope` for the unscoped one. The decider is `policy`.
 
 ## Deferred calls
 
@@ -907,7 +932,12 @@ the ask rules, as the reference does not ask about a sandboxed
 command; confinement is one bit, so under a sandbox that permits
 writes, suggest allows every confined command auto-edit does. The
 reference also confines each mode to a sandbox, which is the host's to
-arrange.
+arrange. The default is the host's to replace, in one documented
+place, which is how #16 was answered: a host whose tools are
+discovered at run time, from an MCP server or a plugin, trades the
+guard over a tool the split never named for a run that does not park
+on it, or keeps the guard by naming the discovered tools in the split
+and replacing the policy as its tool list changes.
 
 ## Bindings
 
@@ -920,7 +950,7 @@ The root module of this repository is the reference binding.
 | rule | `Rule{Tool, Spec, Source, Note}`; `String`, `Bare`, `Glob`, `MatchesTool`, `CarveOut` |
 | grammar | `ParseRules(s)`; every error begins `agentpolicy: rule "<token>": ` and ends with the kind's text, `unbalanced parentheses`, `missing tool name`, `empty specifier`, `empty carve-out`, `text after the specifier` |
 | source | `Source{Name, Path, Hash, Trusted, Rank}` |
-| policy | `Policy{Allow, Deny, Ask, Default, Sources, Withheld}`; `Allow()`, `Deny()`, `Ask()`; the zero `Default` is unset |
+| policy | `Policy{Allow, Deny, Ask, Default, Sources, Withheld}`; `Allow()`, `Deny()`, `Ask()`; the zero `Default` is unset; `Policy.WithDefault(d)` |
 | merge | `RuleSet{Source, Allow, Deny, Ask}`, `Merge(sets…)` |
 | matcher | `Matcher func(spec, args) bool`; `PrefixMatcher(field)`, `GlobMatcher(field)` |
 | splitter, subject | `Subjects func(args) ([]Subject, error)`, `Subject{Args, Tool, Text}`; `ToolMatcher{Match, Subjects}` per tool |
@@ -929,10 +959,10 @@ The root module of this repository is the reference binding.
 | engine | `Engine`; `Policy`, `PolicyOf(source)`, `Sources`, `Withheld`, `SetPolicy` |
 | decision | `Engine.Decide`, `Engine.BeforeToolCall()` for `agentturn.Config.BeforeToolCall` |
 | confinement | `agenttool.ConfinedBy` by default; `WithConfinement(fn)`, `nil` to turn it off |
-| sibling tools | `WithTools(lookup)` |
+| sibling tools | `WithTools(lookup)`, `WithToolsFor(lookup)` for one given the decision's context |
 | hooks | `WithHooks(fns…)` |
 | offering tools | `Engine.Removes(tool)`, `Engine.Filter(tools)`, `Engine.ToolProvider(base)` for `agentturn.Config.ToolProvider` |
-| grants | `Engine.Grant`, `Engine.GrantOver`; `Engine.GrantSet` → granted and `[]Refusal{Rule, Reason}`, `Engine.Revoke`, `Engine.Grants` |
+| grants | `Engine.Grant`, `Engine.GrantOver`; `Engine.GrantSet` → granted and `[]Refusal{Rule, Reason}`, `Engine.Revoke`, `Engine.Grants`; the scope: `ContextWithGrantScope(ctx, scope)`, `GrantScopeFromContext(ctx)`, `Engine.GrantsFor(ctx)`, `Engine.RevokeScope(ctx)` |
 | deferred calls | `Engine.Deferred`, `Engine.Runs`, `Engine.Forget` |
 | release | `Engine.Release(ctx, end, answers…)`; `ErrUnanswered` |
 | reviewer | `Reviewer`, `ReviewerFunc`, `Review{Outcome, Reason, Args, Note, By}`, `Outcome` (`Refused`, `Approved`, `TimedOut`); `Engine.Answers(ctx, r, end)`, whose refusals carry the verdict's reason as `agentturn.Answer.Reason`; a call that may have run is `agentturn.PendingCall.MayHaveRun` |
@@ -1106,28 +1136,23 @@ listed in the changelog as one.
 
 ## Open questions
 
-- **A grant set per run** (#18). One engine serves every agent of a
-  host and remembers deferred calls per run, but a grant set has no
-  run, so a skill the main agent opened grants its tools to a
-  sub-agent that never opened it. Keying sets by run, or a scope on
-  the set, are the options.
-- **A context for the sibling lookup** (#43). The lookup that reads a
-  sibling's confinement takes a tool name alone, so an engine shared
-  by concurrent runs whose tool lists differ reads one list for all of
-  them, and a batch hold can be defeated. A lookup given the decision's
-  context is proposed.
-- **Cut-off calls and the reviewer** (#51, #52, #53). The
-  answers without a human are the least settled section. A reviewer's refusal,
-  timeout or failure on a call that may have run tells the model it
-  did not run (#51); a never-started call is refused where the loop
-  would put it to the policy (#52); a call the record shows rejected
-  goes to the reviewer, and an approval of it fails the resume (#53).
-  Each fix changes text this document states.
-- **Presets for an open tool set** (#16). Every preset's default is
-  ask, so a host with MCP or plugin tools either prompts for all of
-  them or overrides the default and loses the guard for tools added
-  later. A preset that names known-safe tools beside the split is
-  proposed.
+- Answered in v0.0.11, in the answers without a human: a reviewer's
+  refusal, timeout or failure on a call that may have run says so
+  (#51); a never-started call is approved for the loop to decide
+  (#52); a rejected call is answered as refused without the reviewer
+  (#53); a reviewer's rewrite of a keyed call that may have run is
+  refused unless its tool says the rewrite is safe (#62); and a call
+  the record shows completed elsewhere is answered with its output
+  (#63).
+- **What the loop's pending call does not carry** (#53, #63). The
+  binding reads the record through the host, `WithNeverStarted` and
+  `WithRan`, for what agentturn's `PendingCall` does not say: the
+  output of a call that completed on a branch a rebase left, which
+  agentturn/session's `ReplayAnswers` holds on a private field, and
+  the reason of the reject a rejected call is owed, which this
+  document answers with fixed text. When the loop carries them, the
+  loop's word is read first and the host's second, and the rejected
+  call's answer becomes the reject's own reason.
 - Answered in v0.0.11: `redact` reads only the items that are not
   messages over a finished turn, since the messages were its to
   rewrite on the output guard (#17); the output subject says whether

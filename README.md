@@ -280,6 +280,25 @@ read the deny rules a decision reads, so under `ToolProvider` the tool
 leaves the request on the turn after the set is activated and comes
 back on the turn after `Revoke`.
 
+One engine serves every agent of a product, so a set with no scope
+decides every call the engine sees, a sub-agent's and another
+conversation's included. A grant scope on the context keeps a skill to
+the conversation that opened it:
+
+```go
+ctx = agentpolicy.ContextWithGrantScope(ctx, sessionID)
+eng.GrantSet(ctx, agentpolicy.RuleSet{Source: skill, Allow: rules}) // decides calls under this scope only
+defer eng.RevokeScope(ctx)                                           // when the conversation ends
+```
+
+A set is activated under the scope of its context, a call is decided
+against the unscoped sets and those of its own context's scope, and
+`Revoke` removes the set of its context's scope; a context with no
+scope is the unscoped one, as before. Run every hook of the
+conversation, and `GrantSet` and `Revoke` for it, under the same
+context. `Engine.GrantsFor(ctx)` lists the sets a call under `ctx`
+consults; `Engine.Grants` spans every scope.
+
 ## A reviewer instead of a human
 
 ```go

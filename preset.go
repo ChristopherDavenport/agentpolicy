@@ -36,6 +36,10 @@ type Tools struct {
 // whose sandbox permits writes passes WithConfinement(nil) with
 // Suggest, or a reading that answers confined only for a read-only
 // sandbox, so its commands ask.
+//
+// A host whose tools are discovered at run time replaces the default
+// with [Policy.WithDefault], or names the discovered tools in the
+// split and follows its tool list with [Engine.SetPolicy].
 func Suggest(t Tools) Policy {
 	return Policy{
 		Allow:   bare(t.Read),
@@ -48,7 +52,10 @@ func Suggest(t Tools) Policy {
 // commands ask unless their tool says they run confined, and a tool
 // the split does not name asks. The reference confines the edits to
 // the workspace, which is the product's to arrange. A confined command
-// is allowed whatever its sandbox permits; see [Suggest].
+// is allowed whatever its sandbox permits; see [Suggest]. A host whose
+// tools are discovered at run time replaces the default with
+// [Policy.WithDefault], or names the discovered tools in the split and
+// follows its tool list with [Engine.SetPolicy].
 func AutoEdit(t Tools) Policy {
 	return Policy{
 		Allow:   bare(t.Read, t.Edit),
@@ -60,7 +67,11 @@ func AutoEdit(t Tools) Policy {
 // FullAuto approximates Codex's unattended mode: every tool the split
 // names runs without asking, and the confinement is the sandbox's,
 // which is the product's to arrange. A tool the split does not name
-// still asks, so a tool added later by a plugin does not run unseen.
+// still asks, so a tool added later by a plugin does not run unseen; a
+// host that wants such a tool to run replaces the default with
+// [Policy.WithDefault], knowing what it gives up, or names the
+// discovered tools in the split and follows its tool list with
+// [Engine.SetPolicy].
 func FullAuto(t Tools) Policy {
 	return Policy{
 		Allow:   bare(t.Read, t.Edit, t.Execute),
