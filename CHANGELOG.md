@@ -7,6 +7,11 @@ versions may break the API.
 
 ## Unreleased
 
+- Requires `agentturn` v0.0.16, up from v0.0.15, `agenttool` v0.0.15,
+  up from v0.0.14, and `openresponses` v0.0.14, up from v0.0.12.
+  agentturn v0.0.16 is the release that adds `PendingCall.Ran`,
+  `RanWhere`, `Refused` and `ToolCallInfo.Parent`, which the entries
+  below read.
 - `Verdict.Record` writes `source_hash`, the rule's `Source.Hash`, so a
   session says which skill frontmatter or settings file a grant or a
   decision was built from and not only the source's name. Omitted
