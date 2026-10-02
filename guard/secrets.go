@@ -58,10 +58,14 @@ func Secrets(patterns ...Pattern) Guard {
 // Redact rewrites the input before a model call, its instructions with
 // its items, and a message before the transcript keeps it, replacing
 // every secret with "[REDACTED <name>]", so the model never reads one
-// and the session records what the model saw and said. The output of a
-// turn cannot be rewritten, since it is in the transcript already, so
-// there Redact stops the run as [Secrets] does. With no patterns it
-// uses [DefaultSecrets].
+// and the session records what the model saw and said. An assistant
+// message is rewritten on [Chain.OutputGuard], before the transcript
+// keeps it; the output of a finished turn carries what that hook never
+// sees, a function call's arguments and a reasoning item's text, and a
+// secret there cannot be removed, so there Redact stops the run as
+// [Secrets] does, reading every item but the messages, which it has
+// already rewritten or would have. With no patterns it uses
+// [DefaultSecrets].
 func Redact(patterns ...Pattern) Guard {
 	patterns = orDefault(patterns)
 	return New("redact", func(_ context.Context, subject any) (Verdict, error) {
@@ -101,13 +105,30 @@ func Redact(patterns ...Pattern) Guard {
 			}
 			return Verdict{Action: allow.Action, Reason: fmt.Sprintf("redacted %d %s: %s", count, word, strings.Join(names, ", ")), Items: out, Instructions: instr}, nil
 		case Output:
+			// The messages are the output guard's: it rewrote them before
+			// the transcript kept them, and the response here holds them
+			// as the model said them, so blocking on one would stop the
+			// run on a secret already removed (#17).
 			items, _ := items(s)
-			if name := find(items, patterns); name != "" {
+			if name := find(withoutMessages(items), patterns); name != "" {
 				return block("secret detected: " + name), nil
 			}
 		}
 		return allow, nil
 	})
+}
+
+// withoutMessages returns the items that are not assistant or other
+// messages: what a finished turn carries that the output guard never
+// saw.
+func withoutMessages(items openresponses.Items) openresponses.Items {
+	out := make(openresponses.Items, 0, len(items))
+	for _, it := range items {
+		if _, ok := it.(*openresponses.Message); !ok {
+			out = append(out, it)
+		}
+	}
+	return out
 }
 
 func orDefault(patterns []Pattern) []Pattern {

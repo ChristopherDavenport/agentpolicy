@@ -323,13 +323,13 @@ model call, and `ErrDenialBound` tells the front why.
 ## Guards
 
 ```go
-chain := guard.Chain{
+input := guard.Chain{
 	Guards:   []guard.Guard{guard.Limit(1 << 20), guard.Redact(), guard.Deny(injection)},
 	Observer: record,
 }
-cfg.BeforeModelCall = chain.BeforeModelCall()
-cfg.OutputGuard = chain.OutputGuard()
-cfg.ShouldStopAfterTurn = chain.ShouldStopAfterTurn()
+output := guard.Chain{Guards: []guard.Guard{guard.Redact()}, Observer: record}
+cfg.BeforeModelCall = input.BeforeModelCall()
+cfg.OutputGuard = output.OutputGuard()
 ```
 
 An input guard sees the request's instructions beside its items, which
@@ -345,14 +345,26 @@ rewrite the message or withhold it behind a placeholder, `Withheld by
 deny: matched denied pattern "..."` unless the chain sets its own, and
 the run goes on. A chain that sets `Stop` stops the run instead, as a
 guard stop with the message withheld, so neither the message nor the
-pattern reaches the caller. A
-guard over a finished turn can only stop the run, since the turn's
+pattern reaches the caller. The placeholder a chain builds is handed
+the message as the guards before the blocking one left it, so a
+placeholder that keeps part of the message never reads text a guard
+ahead of it redacted. A guard over a finished turn,
+`ShouldStopAfterTurn`, sees the response as the model produced it,
+with the turn's other items, and can only stop the run, since those
 items are already in the transcript; it does so as a guard stop, with
 a `BlockedError` wrapping `agentturn.ErrGuard` on the run's end, so a
-policy stop is told from a failure. `Limit` bounds the wire size,
-`Deny` matches patterns, `Secrets` blocks on a key or token and
+policy stop is told from a failure. Its subject says whether the turn
+is `Final`, the run's answer rather than a turn of tool calls, so a
+guard over what the user will read skips the rest. The two output
+hooks see the same words, so a chain wired to both judges every
+message twice: a rewriting chain belongs on `OutputGuard`, as above,
+and `ShouldStopAfterTurn` is for a check no rewrite can answer, a
+secret in a function call's arguments say. `Limit` bounds the wire
+size, `Deny` matches patterns, `Secrets` blocks on a key or token and
 `Redact` replaces one before the model reads it, or before a message
-of the model's is kept. `classify.New` builds a guard that asks a
+of the model's is kept; over a finished turn `Redact` reads only the
+items the output guard never sees, so it does not stop the run on a
+secret it already removed. `classify.New` builds a guard that asks a
 model with a rubric.
 
 ## The record

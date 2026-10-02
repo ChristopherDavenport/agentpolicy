@@ -752,7 +752,10 @@ A guard checks content. Its **subject** is one of:
 - a **message**: one assistant message as the stream completes it,
   before the transcript, the record or the front keeps it;
 - an **output**: a finished turn's response, its items already in the
-  transcript.
+  transcript, as the model produced it and not as the output guard's
+  rewrites left it, and whether the turn is **final**, one in which
+  the model called no tools, so the response is the run's answer. A
+  guard over the answer passes a turn that is not final.
 
 A guard answers with an action and a reason, and for an input or a
 message MAY rewrite: replacement items for an input, a replacement
@@ -767,7 +770,7 @@ check:
 | hook | subject | allow | block | error or defer |
 | --- | --- | --- | --- | --- |
 | before model call | input | a rewrite replaces the request's input or instructions for this call | the run stops as a guard stop, before the model is called | the model call is blocked and the run fails |
-| output guard | message | a rewrite replaces the message for the guards after and for the transcript | the message is withheld behind a placeholder, or, when the chain stops on a block, withheld and the run stops as a guard stop; the guards after are not consulted | fails the run |
+| output guard | message | a rewrite replaces the message for the guards after and for the transcript | the message is withheld behind a placeholder built from the message as the guards before left it, or, when the chain stops on a block, withheld and the run stops as a guard stop; the guards after are not consulted | fails the run |
 | should stop after turn | output | — | the run stops after the turn as a guard stop, and the guards after are not consulted | fails the run |
 
 A guard's error that is a guard stop, one that wraps agentturn's guard
@@ -800,7 +803,7 @@ The reference guards, informative:
 | `limit` | all | block when the byte length of the items' JSON encoding, plus the byte length of an input's instructions, is over a bound: `K is N bytes, over the M byte limit`, `K` being `input`, `message` or `output` |
 | `deny` | all | block on the first pattern matching an input's instructions, or any text of the items: `matched denied pattern "P"` |
 | `secrets` | all | block on the first secret shape found: `secret detected: NAME` |
-| `redact` | input, message | rewrite every secret to `[REDACTED NAME]`: `redacted N secret: NAME` for one and `redacted N secrets: NAMES` for more, the distinct names in the order found joined by `, `; on an output, block as `secrets` does |
+| `redact` | input, message | rewrite every secret to `[REDACTED NAME]`: `redacted N secret: NAME` for one and `redacted N secrets: NAMES` for more, the distinct names in the order found joined by `, `; on an output, block as `secrets` does over the items that are not messages, since the messages were its to rewrite on the output guard and the output holds them as the model said them |
 
 The text of an item is a message's text parts, a function call's
 arguments, a function call output's text or text parts, and a
@@ -835,10 +838,10 @@ call's `decision` entry, under agentsession RFC 0001: block as
 answers a release or a reviewer builds name their decider, so the
 `proceed`, `reject` or `answer` that follows says who answered.
 
-What the decision entry cannot carry, the rule and its source and
-note, a guard's verdict, a grant, what confined a call, is written by
-the host beside it as a `custom` entry with `ns` set to
-`agentpolicy:verdict` and `data` a JSON object:
+What the decision entry cannot carry, the rule and its source, the
+source's hash and the rule's note, a guard's verdict, a grant, what
+confined a call, is written by the host beside it as a `custom` entry
+with `ns` set to `agentpolicy:verdict` and `data` a JSON object:
 
 | member | value |
 | --- | --- |
@@ -846,6 +849,7 @@ the host beside it as a `custom` entry with `ns` set to
 | `action` | `"allow"`, `"block"` or `"defer"`; always present |
 | `rule` | the rule's string form |
 | `source` | the rule's source's name |
+| `source_hash` | the rule's source's hash, the digest of the settings file or the skill frontmatter the rule was read from, so a reader says which version of the source a decision or a grant was built from and not only its name |
 | `note` | the rule's note, whatever its source |
 | `reason`, `by`, `held`, `subject`, `confined` | as the verdict names them |
 
@@ -1090,16 +1094,12 @@ listed in the changelog as one.
   them or overrides the default and loses the guard for tools added
   later. A preset that names known-safe tools beside the split is
   proposed.
-- **Redact over a finished turn** (#17). Redact blocks an output on
-  the secret it has already removed from each message through the
-  output guard, since the rule predates that hook.
-- **One chain on both output hooks** (#20). A chain wired to the
-  output guard and the stop hook judges every message twice, and an
-  output cannot tell a turn that called tools from an answer.
-- **The placeholder's message** (#22). The placeholder is built from
-  the message the model produced, not the one the chain's rewrites
-  left, so a redaction ahead of a blocking guard is undone in what the
-  front shows.
+- Answered in v0.0.11: `redact` reads only the items that are not
+  messages over a finished turn, since the messages were its to
+  rewrite on the output guard (#17); the output subject says whether
+  the turn is final, and the chain's doc says the two output hooks see
+  the same words (#20); the placeholder is built from the message as
+  the guards before the blocking one left it (#22).
 - **The reason in the placeholder** (#49). The default placeholder
   puts the guard's reason, a deny pattern, in the answer a caller
   receives, which is the rule a caller could phrase around. A chain
