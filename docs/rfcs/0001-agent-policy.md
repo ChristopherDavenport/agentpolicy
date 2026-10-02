@@ -714,6 +714,16 @@ order:
   with the reason `not started: decided on resume`, for the policy to
   decide there. This answer is no verdict: the decision on resume is,
   and one here would say allow for a call the policy may then block.
+- A call that may have run, a held call dispatched before it was held
+  included, that the record shows completed elsewhere, on a branch a
+  rebase left or in the session this one forks, is answered with that
+  output, by `policy`, with the record's reason for where it ran, `ran
+  on a branch the rebase left`, or `ran elsewhere` when the record
+  gives none, as the answer's reason and the verdict's: it is owed that
+  output and must not run again. This is read before anything else of
+  the call, the record's word that it never started included, since a
+  record whose path never started the call may hold its completed
+  dispatch on a branch a rebase left.
 - A call the record says never started but that the loop lists under
   another reason is refused with `The call was cut off before it
   started; it did not run.` and the verdict `not run: the call never
@@ -724,14 +734,6 @@ order:
   without the reviewer, by `policy`, with `The call was refused before
   it ran; it did not run.` and the verdict `not run: the call was
   refused before it ran`.
-- A call that may have run, a held call dispatched before it was held
-  included, that the record shows completed elsewhere, on a branch a
-  rebase left or in the session this one forks, is answered with that
-  output, by `policy`, with the record's reason for where it ran, `ran
-  on a branch the rebase left`, or `ran elsewhere` when the record
-  gives none, as the answer's reason and the verdict's, before the
-  reviewer and before the replay rule: it is owed that output and must
-  not run again.
 - A call that may have run, cut off by an abort or found unanswered in
   a seeded transcript, is not the reviewer's to approve. When its tool
   says a second run is safe, or safe under its first run's key and the
@@ -784,8 +786,7 @@ verdict beside it. Every answer is a verdict: allow for an approval,
 block otherwise.
 
 An approval of a call that may have run whose arguments differ, as
-values, both from the rewrite a hook gave the call, when one did, and
-from those of the dispatch it repeats, is refused
+values, from those of the dispatch it repeats, is refused
 with `The call was cut off before it finished and may have run; it was
 not run again.`, by `policy`, with the verdict `not run again: the
 reviewer rewrote the arguments, and replay is X for the rewrite`, `X`

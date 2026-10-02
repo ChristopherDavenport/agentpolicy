@@ -517,7 +517,7 @@ func TestAnswersCutOffCallsReadTheirTools(t *testing.T) {
 	// left, and knows nothing of the others.
 	const where = "ran on a branch the rebase left"
 	ran := func(_ context.Context, runID, callID string) (*openresponses.FunctionCallOutput, string) {
-		if runID != "r" || !strings.HasPrefix(callID, "ran") {
+		if runID != "r" || !strings.Contains(callID, "ran") {
 			return nil, ""
 		}
 		out := &openresponses.FunctionCallOutput{ID: "fco_1", CallID: "other", Status: openresponses.StatusCompleted, Output: openresponses.FunctionCallOutputData{Text: "branch output for " + callID}}
@@ -567,7 +567,10 @@ func TestAnswersCutOffCallsReadTheirTools(t *testing.T) {
 		// A record that says the call ran but not where.
 		{Call: fc("ran-somewhere", "bash"), Reason: agentturn.PendingUnknown},
 		// The record says it never started, so it did not run anywhere.
-		{Call: fc("never-ran", "bash"), Reason: agentturn.PendingUnknown},
+		{Call: fc("never-nowhere", "bash"), Reason: agentturn.PendingUnknown},
+		// A record whose path never started the call holds its completed
+		// dispatch on a branch a rebase left: the output wins.
+		{Call: fc("never-but-ran", "bash"), Reason: agentturn.PendingAborted, Tool: tools["bash"]},
 	}}
 	reviewer := ReviewerFunc(func(context.Context, agentturn.ToolCallInfo, Verdict) (Review, error) {
 		t.Error("a cut-off call reached the reviewer")
@@ -607,7 +610,8 @@ func TestAnswersCutOffCallsReadTheirTools(t *testing.T) {
 		agentturn.Output(branch("ran-keyed")).WithBy(ByPolicy).WithReason(where),
 		agentturn.Output(branch("ran-held")).WithBy(ByPolicy).WithReason(where),
 		agentturn.Output(branch("ran-somewhere")).WithBy(ByPolicy).WithReason("ran elsewhere"),
-		agentturn.Output(openresponses.NewFunctionCallOutput("never-ran", notRun)).WithBy(ByPolicy).WithReason("not run: the call never started"),
+		agentturn.Output(openresponses.NewFunctionCallOutput("never-nowhere", notRun)).WithBy(ByPolicy).WithReason("not run: the call never started"),
+		agentturn.Output(branch("never-but-ran")).WithBy(ByPolicy).WithReason(where),
 	}
 	if !reflect.DeepEqual(answers, want) {
 		t.Errorf("answers = %s\nwant %s", dump(answers), dump(want))
@@ -633,7 +637,8 @@ func TestAnswersCutOffCallsReadTheirTools(t *testing.T) {
 		fmt.Sprintf("ran-keyed %v %s", agentturn.Allow, where),
 		fmt.Sprintf("ran-held %v %s", agentturn.Allow, where),
 		fmt.Sprintf("ran-somewhere %v ran elsewhere", agentturn.Allow),
-		fmt.Sprintf("never-ran %v not run: the call never started", agentturn.Block),
+		fmt.Sprintf("never-nowhere %v not run: the call never started", agentturn.Block),
+		fmt.Sprintf("never-but-ran %v %s", agentturn.Allow, where),
 	}
 	if !reflect.DeepEqual(got, wantVerdicts) {
 		t.Errorf("verdicts = %q\nwant %q", got, wantVerdicts)

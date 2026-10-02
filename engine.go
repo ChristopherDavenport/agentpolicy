@@ -695,6 +695,9 @@ func (e *Engine) Decide(ctx context.Context, info agentturn.ToolCallInfo) (*agen
 //
 // The verdict is the one Decide would report before the hold, down to
 // its rule, reason, subject and confinement; its Held is never set.
+// What the hooks add to a decision besides its action, a rewrite of
+// the arguments, a note and Terminate, is not returned, though a
+// rewrite's rule, reason and confinement are the verdict's.
 // Deciding the call afterwards may differ when the rules changed in
 // between, or when another call of its batch asks.
 func (e *Engine) Would(ctx context.Context, info agentturn.ToolCallInfo) (Verdict, error) {

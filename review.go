@@ -256,9 +256,8 @@ func refusalText(reason, by string) string {
 // policy asked about running again, tells the model so: the text that
 // says it was cut off and was not run again comes first, and a
 // timeout and a failed review do not say the call did not run. An
-// approval of such a call whose arguments differ from those it would
-// otherwise run with, a hook's rewrite or those of the dispatch it
-// repeats, is refused the same way, with the reason "not run again:
+// approval of such a call whose arguments differ from those of the
+// dispatch it repeats is refused the same way, with the reason "not run again:
 // the reviewer rewrote the arguments, and replay is X for the
 // rewrite", unless its tool says the rewrite is agenttool.ReplaySafe,
 // since Resume runs a keyed call again only with the arguments of the
@@ -339,7 +338,7 @@ func (e *Engine) Answers(ctx context.Context, r Reviewer, end *agentturn.RunEnd)
 			// rewrite runs only when its tool says it is safe to; the
 			// refusal is the engine's and does not count toward the
 			// bound.
-			if ans, verdict, ok := e.rewriteRefused(ctx, p, info, rev.Args, args); ok {
+			if ans, verdict, ok := e.rewriteRefused(ctx, p, info, rev.Args); ok {
 				answers = append(answers, ans)
 				e.observe(ctx, verdict)
 				continue
@@ -507,19 +506,19 @@ type review struct {
 }
 
 // rewriteRefused refuses a reviewer's approval of a call that may have
-// run when revArgs, the arguments the approval carries, differ both
-// from the rewrite a hook gave the call, when one did, and from those
-// of the dispatch it repeats, and the call's tool does not say running
+// run when revArgs, the arguments the approval carries, differ from
+// those of the dispatch it repeats and the call's tool does not say running
 // the rewrite is safe: Resume would refuse a keyed
 // call run again with other arguments under its dispatch's key. It
 // reports false when the approval stands.
-func (e *Engine) rewriteRefused(ctx context.Context, p agentturn.PendingCall, info agentturn.ToolCallInfo, revArgs, rewrite json.RawMessage) (agentturn.Answer, Verdict, bool) {
+func (e *Engine) rewriteRefused(ctx context.Context, p agentturn.PendingCall, info agentturn.ToolCallInfo, revArgs json.RawMessage) (agentturn.Answer, Verdict, bool) {
 	call := p.Call
-	// The approval stands with the arguments a hook rewrote the call
-	// to, and with those of the dispatch it repeats, which Resume runs
-	// under the dispatch's key: a reviewer that puts a hook's rewrite
-	// back rewrote nothing.
-	if revArgs == nil || rewrite != nil && sameArgs(revArgs, rewrite) || sameArgs(revArgs, pendingArgs(p)) {
+	// The approval stands with the arguments of the dispatch it
+	// repeats, which Resume runs under the dispatch's key, so a
+	// reviewer that puts a hook's rewrite back rewrote nothing; any
+	// other arguments stand only when the tool says they are safe to
+	// run, a hook's rewrite the engine already let through included.
+	if revArgs == nil || sameArgs(revArgs, pendingArgs(p)) {
 		return agentturn.Answer{}, Verdict{}, false
 	}
 	tool := p.Tool

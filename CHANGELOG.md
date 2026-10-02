@@ -18,9 +18,9 @@ versions may break the API.
   was cut off before it finished and may have run; it was not run
   again.` and the verdict is `not run again: the reviewer rewrote the
   arguments, and replay is X for the rewrite`, by policy, not counted
-  toward the denial bound. An approval that puts a hook's rewrite back
-  to the dispatch's own arguments stands, since `Resume` runs those
-  under the dispatch's key. `Resume` refused the rewrite with
+  toward the denial bound. An approval with the dispatch's own
+  arguments stands, a hook's rewrite put back included, since `Resume`
+  runs those under the dispatch's key. `Resume` refused the rewrite with
   `ErrAmbiguousCall` and the whole resume failed with it (#62).
 - `Engine.Answers` answers a call pending as
   `agentturn.PendingUndispatched` with an approval, by policy, reason
@@ -51,8 +51,8 @@ versions may break the API.
   branch the rebase left`, or `ran elsewhere` when the record gives
   none, before the reviewer and before the replay rule, a deferred
   call held after its dispatch included, as agentturn/session's
-  `ReplayAnswers` answers it. It was refused as one that may have run,
-  reviewed, or dispatched again. agentturn v0.0.15's `PendingCall` does
+  `ReplayAnswers` answers an aborted one. It was refused as one that
+  may have run, reviewed, or dispatched again. agentturn v0.0.15's `PendingCall` does
   not carry the output, so the host reads the record; agentturn's next
   release carries it as `PendingCall.Ran` and `PendingCall.RanWhere`,
   and once this module requires it the loop's word is read first and
