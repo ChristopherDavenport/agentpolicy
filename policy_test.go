@@ -28,9 +28,9 @@ func TestDefault(t *testing.T) {
 }
 
 func TestMerge(t *testing.T) {
-	managed := Source{Name: "managed", Path: "/etc/dex.json", Hash: "m", Rank: 3, Trusted: true}
-	project := Source{Name: "project", Path: ".dex/settings.json", Hash: "p", Rank: 2}
-	user := Source{Name: "user", Path: "~/.dex/settings.json", Hash: "u", Rank: 1, Trusted: true}
+	managed := Source{Name: "managed", Path: "/etc/dax.json", Hash: "m", Rank: 3, Trusted: true}
+	project := Source{Name: "project", Path: ".dax/settings.json", Hash: "p", Rank: 2}
+	user := Source{Name: "user", Path: "~/.dax/settings.json", Hash: "u", Rank: 1, Trusted: true}
 
 	p, err := Merge(
 		RuleSet{Source: user, Allow: rules(t, "read"), Ask: rules(t, "edit")},

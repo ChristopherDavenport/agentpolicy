@@ -18,10 +18,10 @@ import (
 // a verdict a skill does not have.
 func TestGrantSetShadowsAnAskRule(t *testing.T) {
 	ctx := context.Background()
-	project := Source{Name: "project", Path: ".dex/settings.json", Rank: 2, Trusted: true}
+	project := Source{Name: "project", Path: ".dax/settings.json", Rank: 2, Trusted: true}
 	skill := func(rank int, trusted bool) RuleSet {
 		return RuleSet{
-			Source: Source{Name: "skill:commit", Path: ".dex/skills/commit.md", Rank: rank, Trusted: trusted},
+			Source: Source{Name: "skill:commit", Path: ".dax/skills/commit.md", Rank: rank, Trusted: trusted},
 			Allow:  rules(t, "Bash(git add:*) Bash(git commit:*) Bash(git status:*)"),
 		}
 	}

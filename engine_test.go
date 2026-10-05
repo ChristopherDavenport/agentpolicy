@@ -479,8 +479,8 @@ func TestGrantOver(t *testing.T) {
 }
 
 func TestEngineSources(t *testing.T) {
-	a := Source{Name: "a", Path: "/etc/dex/settings.json", Hash: "h1", Rank: 2, Trusted: true}
-	b := Source{Name: "b", Path: ".dex/settings.json", Hash: "h2", Rank: 1}
+	a := Source{Name: "a", Path: "/etc/dax/settings.json", Hash: "h1", Rank: 2, Trusted: true}
+	b := Source{Name: "b", Path: ".dax/settings.json", Hash: "h2", Rank: 1}
 	policy, err := Merge(RuleSet{Source: b, Allow: rules(t, "read")}, RuleSet{Source: a, Deny: rules(t, "bash")})
 	if err != nil {
 		t.Fatal(err)
@@ -704,9 +704,9 @@ func ruleText(list []Rule) string {
 // product persists.
 func TestGrantOverCarveOutSourceAndPolicyOf(t *testing.T) {
 	ctx := context.Background()
-	managed := Source{Name: "managed", Path: "/etc/dex/managed.json", Rank: 3, Trusted: true}
-	project := Source{Name: "project", Path: ".dex/settings.json", Rank: 2, Trusted: true}
-	local := Source{Name: "local", Path: ".dex/settings.local.json", Rank: 2, Trusted: true}
+	managed := Source{Name: "managed", Path: "/etc/dax/managed.json", Rank: 3, Trusted: true}
+	project := Source{Name: "project", Path: ".dax/settings.json", Rank: 2, Trusted: true}
+	local := Source{Name: "local", Path: ".dax/settings.local.json", Rank: 2, Trusted: true}
 	policy, err := Merge(
 		RuleSet{Source: managed, Deny: rules(t, "bash(rm:*)")},
 		RuleSet{Source: project, Ask: rules(t, "bash(git push:*)")},
