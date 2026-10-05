@@ -482,7 +482,7 @@ func TestSecretsAndRedact(t *testing.T) {
 	// and Redact rewrites it, leaving the items alone.
 	memory := Input{
 		Items:        openresponses.Items{openresponses.UserText("what did I save?")},
-		Instructions: "You are dex.\n\n## Memory\n\nThe deploy key is " + samples["aws_access_key"] + ".",
+		Instructions: "You are dax.\n\n## Memory\n\nThe deploy key is " + samples["aws_access_key"] + ".",
 	}
 	if v, _ := secrets.Check(ctx, memory); v.Action != agentturn.Block || v.Reason != "secret detected: aws_access_key" {
 		t.Errorf("Secrets instructions: %+v", v)
@@ -494,11 +494,11 @@ func TestSecretsAndRedact(t *testing.T) {
 	if v.Instructions == nil || strings.Contains(*v.Instructions, samples["aws_access_key"]) || !strings.Contains(*v.Instructions, "[REDACTED aws_access_key]") {
 		t.Errorf("Redact instructions = %v", v.Instructions)
 	}
-	if memory.Instructions != "You are dex.\n\n## Memory\n\nThe deploy key is "+samples["aws_access_key"]+"." {
+	if memory.Instructions != "You are dax.\n\n## Memory\n\nThe deploy key is "+samples["aws_access_key"]+"." {
 		t.Error("Redact modified the original instructions")
 	}
 	// Clean instructions are no rewrite.
-	if v, _ := redact.Check(ctx, Input{Instructions: "You are dex."}); v.Action != agentturn.Allow || v.Instructions != nil || v.Reason != "" {
+	if v, _ := redact.Check(ctx, Input{Instructions: "You are dax."}); v.Action != agentturn.Allow || v.Instructions != nil || v.Reason != "" {
 		t.Errorf("Redact clean instructions: %+v", v)
 	}
 

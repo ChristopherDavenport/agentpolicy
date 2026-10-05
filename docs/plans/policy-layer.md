@@ -18,7 +18,7 @@ The reference shapes are Claude Code's permission rules
 (`Bash(git:*)`, allow and deny lists, ask by default) and Codex CLI's
 approval modes (suggest, auto-edit, full-auto) and its reviewer
 subagent. The study builds both on this module and wires them into
-dex. The findings of that study are in `../feedback.md`; this plan has
+dax. The findings of that study are in `../feedback.md`; this plan has
 them applied, and each place it changed says which finding changed it.
 
 ## Goals
@@ -594,7 +594,7 @@ the model's order and `Refuse` ends the turn with nothing run.
    constructors.
 5. `classify`: the guard and the reviewer.
 6. The Codex and Claude Code study: presets and rule files wired into
-   dex with an approval prompt in the TUI.
+   dax with an approval prompt in the TUI.
 7. The loop's seams from that study, agentturn v0.0.6: the batch hold
    and `Release`, `Refuse` at the denial bound, `By` on decisions and
    `Note` on answers, `ErrGuard` and `OutputGuard`.
@@ -626,7 +626,7 @@ the model's order and `Refuse` ends the turn with nothing run.
   next to the call. The hook cannot append; a product could. Reopen
   when replay needs verdicts in context order rather than by call ID.
 - Whether a spec grammar beyond `prefix:*` and exact match is worth
-  defining here. Claude Code's has globs; the study says whether dex
+  defining here. Claude Code's has globs; the study says whether dax
   needs them. Round 2 answered the tool-name half only: a `*` in
   `Rule.Tool` is the module's, because the deny and ask lists must
   honour `mcp__*` and nothing else can match a tool that has no
