@@ -375,9 +375,9 @@ func TestBatchIsDecidedOnce(t *testing.T) {
 	splits := 0
 	matchers := map[string]ToolMatcher{"bash": {
 		Match: PrefixMatcher("command"),
-		Subjects: func(args json.RawMessage) ([]Subject, error) {
+		Subjects: func(ctx context.Context, args json.RawMessage) ([]Subject, error) {
 			splits++
-			return shellSplit(args)
+			return shellSplit(ctx, args)
 		},
 	}}
 	e, err := Build(Policy{Allow: rules(t, "bash(git:*)"), Ask: rules(t, "bash(git push:*)"), Default: Ask()}, matchers)
@@ -677,5 +677,135 @@ func TestDecideRemembersNoDeferralForANestedCall(t *testing.T) {
 	}
 	if runs := e.Runs(); len(runs) != 0 {
 		t.Errorf("runs after the release = %v", runs)
+	}
+}
+
+// TestASiblingThatCouldNotBeReadHolds checks that a sibling the batch
+// hold could not read, its splitter or a hook having failed, holds the
+// call, and that the failed reading is not kept: a later call of the
+// same batch reads the sibling again and, the failure passed, is not
+// held.
+func TestASiblingThatCouldNotBeReadHolds(t *testing.T) {
+	command := func(args json.RawMessage) string {
+		c, _ := stringField(args, "command")
+		return c
+	}
+	tests := []struct {
+		name string
+		// failing is true for the first reading of the sibling only.
+		split func(ctx context.Context, failing bool) error
+		hook  func(failing bool) (*agentturn.ToolDecision, error)
+		// ctx is the context the first call is decided under.
+		ctx func() context.Context
+	}{
+		{name: "a splitter that fails once", split: func(_ context.Context, failing bool) error {
+			if failing {
+				return errors.New("the executor did not answer")
+			}
+			return nil
+		}},
+		{name: "a splitter whose context is done", split: func(ctx context.Context, _ bool) error {
+			return ctx.Err()
+		}, ctx: func() context.Context {
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+			return ctx
+		}},
+		{name: "a hook that fails once", hook: func(failing bool) (*agentturn.ToolDecision, error) {
+			if failing {
+				return nil, errors.New("the hook did not answer")
+			}
+			return nil, nil
+		}},
+		{name: "a hook's rewrite that cannot be split once", hook: func(failing bool) (*agentturn.ToolDecision, error) {
+			if failing {
+				return &agentturn.ToolDecision{Args: json.RawMessage(`{"command":"git log $(x)"}`)}, nil
+			}
+			return nil, nil
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reads := 0
+			matchers := map[string]ToolMatcher{"bash": {
+				Match: PrefixMatcher("command"),
+				Subjects: func(ctx context.Context, args json.RawMessage) ([]Subject, error) {
+					if command(args) == "git log" {
+						reads++
+						if tt.split != nil {
+							if err := tt.split(ctx, reads == 1); err != nil {
+								return nil, err
+							}
+						}
+					}
+					return shellSplit(ctx, args)
+				},
+			}}
+			hookReads := 0
+			hook := func(_ context.Context, info agentturn.ToolCallInfo) (*agentturn.ToolDecision, error) {
+				if tt.hook == nil || command(info.Args) != "git log" {
+					return nil, nil
+				}
+				hookReads++
+				return tt.hook(hookReads == 1)
+			}
+			e, err := Build(Policy{Allow: rules(t, "bash(git:*)"), Default: Ask()}, matchers, WithHooks(hook))
+			if err != nil {
+				t.Fatal(err)
+			}
+			first := context.Background()
+			if tt.ctx != nil {
+				first = tt.ctx()
+			}
+			infos := batch("run_1", "git status", "git log", "git diff")
+			d, err := e.Decide(first, infos[0])
+			if err != nil {
+				t.Fatal(err)
+			}
+			if d.Action != agentturn.Defer || d.Reason != "held for approval: allowed by bash(git:*)" {
+				t.Errorf("beside a sibling that could not be read: %+v", d)
+			}
+			d, err = e.Decide(context.Background(), infos[2])
+			if err != nil {
+				t.Fatal(err)
+			}
+			if d.Action != agentturn.Allow || d.Reason != "allowed by bash(git:*)" {
+				t.Errorf("once the sibling can be read: %+v", d)
+			}
+		})
+	}
+}
+
+// TestADeniedSiblingDoesNotHold checks that a sibling a rule blocks is
+// not an ask: the call beside it is not held, and the reading is kept
+// for the batch, so the sibling is split once.
+func TestADeniedSiblingDoesNotHold(t *testing.T) {
+	ctx := context.Background()
+	splits := 0
+	matchers := map[string]ToolMatcher{"bash": {
+		Match: PrefixMatcher("command"),
+		Subjects: func(ctx context.Context, args json.RawMessage) ([]Subject, error) {
+			if c, _ := stringField(args, "command"); c == "rm -rf x" {
+				splits++
+			}
+			return shellSplit(ctx, args)
+		},
+	}}
+	e, err := Build(Policy{Allow: rules(t, "bash(git:*)"), Deny: rules(t, "bash(rm:*)"), Default: Ask()}, matchers)
+	if err != nil {
+		t.Fatal(err)
+	}
+	infos := batch("run_1", "git status", "rm -rf x", "git diff")
+	for _, i := range []int{0, 2} {
+		d, err := e.Decide(ctx, infos[i])
+		if err != nil {
+			t.Fatal(err)
+		}
+		if d.Action != agentturn.Allow || d.Reason != "allowed by bash(git:*)" {
+			t.Errorf("%s beside a denied sibling: %+v", infos[i].Call.Arguments, d)
+		}
+	}
+	if splits != 1 {
+		t.Errorf("the denied sibling was split %d times, want 1", splits)
 	}
 }

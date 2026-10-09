@@ -1,6 +1,7 @@
 package agentpolicy
 
 import (
+	"context"
 	"encoding/json"
 	"strings"
 )
@@ -101,7 +102,15 @@ type Subject struct {
 // itself, and register no splitter. The splitter is the product's; the
 // root package holds no shell parser. An error fails closed: the call
 // is blocked with the error as the reason.
-type Subjects func(args json.RawMessage) ([]Subject, error)
+//
+// ctx is the context of the decision that asked: [Engine.Decide]'s,
+// [Engine.Would]'s, or, when the batch hold reads a sibling of the call
+// being decided, that decision's. A splitter that makes a request, such
+// as one that asks a remote executor what a call would touch, makes it
+// under ctx, so the request ends with the decision and keeps its
+// deadline. A cancelled ctx is an error like any other: the call is
+// blocked.
+type Subjects func(ctx context.Context, args json.RawMessage) ([]Subject, error)
 
 // ToolMatcher is what a product registers for a tool: how a specifier
 // is matched and, when one call is several subjects, how it splits.

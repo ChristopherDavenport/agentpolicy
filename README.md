@@ -168,7 +168,10 @@ the model reads `denied by bash(rm:*) on "rm -rf /"; the call did not
 run`, so it does not report the other half as having run. A
 subject may name another tool, so a redirect target is checked against
 the file tool's rules. The splitter is the product's; there is no
-shell parser here. `Verdict.Subject` is the text of the subject the
+shell parser here. It is called with the decision's context, so one
+that asks a remote executor what a call would touch is cancelled with
+the decision, and an error, a cancelled context's included, blocks the
+call. `Verdict.Subject` is the text of the subject the
 verdict was made on, so a prompt about
 `npm run build && ./scripts/deploy.sh --prod` says that the deploy
 script is what it is asking about.

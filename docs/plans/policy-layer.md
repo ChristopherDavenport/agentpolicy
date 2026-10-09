@@ -125,7 +125,9 @@ type Subject struct {
 // Subjects splits one call into its subjects. A shell tool splits on
 // operators; most tools have none and are one subject. The splitter
 // is the product's; the root package holds no shell parser.
-type Subjects func(args json.RawMessage) ([]Subject, error)
+// ctx is the decision's, so a splitter that asks a remote executor
+// is cancelled with it.
+type Subjects func(ctx context.Context, args json.RawMessage) ([]Subject, error)
 
 type ToolMatcher struct {
     Match    Matcher

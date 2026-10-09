@@ -260,6 +260,13 @@ A splitter that fails blocks the call, with its error in the reason. A
 splitter that returns no subjects is a failure too, since a call with
 no subjects would be allowed by every rule.
 
+A splitter is given the context of the decision that asked: a
+decision's, a preview's, or, when the batch hold reads a sibling, that
+of the decision being held. A splitter that asks something remote,
+such as the executor a tool runs on, is cancelled with the decision
+and keeps its deadline. A splitter that fails because that context is done
+has failed: the call is blocked.
+
 ## Sources
 
 Every rule carries its **source**:
@@ -505,13 +512,17 @@ when there is none. So without a lookup, a call before a confined command that a
 bare ask rule names is held for it. A reading only ever moves toward
 asking within a batch: a sibling once read as asking stays so, and a
 call decided twice is held at least as often as the first time, so it
-never runs beside an ask.
+never runs beside an ask. A sibling that could not be read, because a
+hook failed or its subjects could not be evaluated, reads as asking,
+so the call beside it is held; a sibling a rule blocks does not ask.
 
 A batch is identified by its run, its turn, every call's ID, name and
 arguments, and the rules in force, the grant scope of the decision's
 context included. A binding MAY cache the siblings' readings for a
 batch, and MUST NOT read a cache across two batches, across a change
-of rules or across two grant scopes.
+of rules or across two grant scopes. It MUST NOT cache a reading that
+failed: the failure may pass, as a cancelled context or a remote
+executor that did not answer does.
 
 The loop decides every call of a batch before any executes, under
 agentturn RFC 0001, which is what lets the engine see an ask wherever
@@ -979,7 +990,7 @@ The root module of this repository is the reference binding.
 | policy | `Policy{Allow, Deny, Ask, Default, Sources, Withheld}`; `Allow()`, `Deny()`, `Ask()`; the zero `Default` is unset; `Policy.WithDefault(d)` |
 | merge | `RuleSet{Source, Allow, Deny, Ask}`, `Merge(sets…)` |
 | matcher | `Matcher func(spec, args) bool`; `PrefixMatcher(field)`, `GlobMatcher(field)` |
-| splitter, subject | `Subjects func(args) ([]Subject, error)`, `Subject{Args, Tool, Text}`; `ToolMatcher{Match, Subjects}` per tool |
+| splitter, subject | `Subjects func(ctx, args) ([]Subject, error)`, `Subject{Args, Tool, Text}`; `ToolMatcher{Match, Subjects}` per tool |
 | aliases | `WithAliases(map[string][]string)` |
 | build | `Build(policy, matchers, opts…)`; `ErrNoDefault`, `ErrNoMatcher`, `ErrToolGlob` for the kinds, and a plain error for `invalid_rule` |
 | engine | `Engine`; `Policy`, `PolicyOf(source)`, `Sources`, `Withheld`, `SetPolicy` |

@@ -307,7 +307,7 @@ func runDecisionCase(t *testing.T, defaults map[string]corpusMatcher, tc decisio
 	for name, m := range specs {
 		tm := ToolMatcher{Match: matcherOf(t, m.Match, m.Field)}
 		if m.Split {
-			tm.Subjects = func(args json.RawMessage) ([]Subject, error) {
+			tm.Subjects = func(_ context.Context, args json.RawMessage) ([]Subject, error) {
 				a := answers[name+"\x00"+string(args)]
 				if a.err != "" {
 					return nil, errors.New(a.err)
