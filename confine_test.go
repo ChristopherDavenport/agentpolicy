@@ -89,7 +89,7 @@ func TestConfinedCallSkipsABareAsk(t *testing.T) {
 		// A subject checked against another tool's rules is that tool's
 		// question, not the shell's sandbox's.
 		{name: "a subject of another tool is not skipped", policy: Policy{Ask: rules(t, "write"), Default: Allow()}, tool: sandboxedBash(), args: `{"command":"echo x > out.txt"}`,
-			matchers: map[string]ToolMatcher{"bash": {Match: PrefixMatcher("command"), Subjects: func(args json.RawMessage) ([]Subject, error) {
+			matchers: map[string]ToolMatcher{"bash": {Match: PrefixMatcher("command"), Subjects: func(_ context.Context, args json.RawMessage) ([]Subject, error) {
 				return []Subject{{Args: args, Text: "echo x"}, {Tool: "write", Args: json.RawMessage(`{"path":"out.txt"}`), Text: "> out.txt"}}, nil
 			}}},
 			action: agentturn.Defer, rule: "write", reason: "approval required by write", confined: "landlock+seccomp"},

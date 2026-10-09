@@ -375,9 +375,9 @@ func TestBatchIsDecidedOnce(t *testing.T) {
 	splits := 0
 	matchers := map[string]ToolMatcher{"bash": {
 		Match: PrefixMatcher("command"),
-		Subjects: func(args json.RawMessage) ([]Subject, error) {
+		Subjects: func(ctx context.Context, args json.RawMessage) ([]Subject, error) {
 			splits++
-			return shellSplit(args)
+			return shellSplit(ctx, args)
 		},
 	}}
 	e, err := Build(Policy{Allow: rules(t, "bash(git:*)"), Ask: rules(t, "bash(git push:*)"), Default: Ask()}, matchers)

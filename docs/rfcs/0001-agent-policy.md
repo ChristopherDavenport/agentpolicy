@@ -260,6 +260,13 @@ A splitter that fails blocks the call, with its error in the reason. A
 splitter that returns no subjects is a failure too, since a call with
 no subjects would be allowed by every rule.
 
+A splitter is given the context of the decision that asked: a
+decision's, a preview's, or, when the batch hold reads a sibling, that
+of the decision being held. A splitter that asks something remote,
+such as the executor a tool runs on, is cancelled with the decision
+and keeps its deadline. A splitter that fails because that context is done
+has failed: the call is blocked.
+
 ## Sources
 
 Every rule carries its **source**:
@@ -979,7 +986,7 @@ The root module of this repository is the reference binding.
 | policy | `Policy{Allow, Deny, Ask, Default, Sources, Withheld}`; `Allow()`, `Deny()`, `Ask()`; the zero `Default` is unset; `Policy.WithDefault(d)` |
 | merge | `RuleSet{Source, Allow, Deny, Ask}`, `Merge(sets…)` |
 | matcher | `Matcher func(spec, args) bool`; `PrefixMatcher(field)`, `GlobMatcher(field)` |
-| splitter, subject | `Subjects func(args) ([]Subject, error)`, `Subject{Args, Tool, Text}`; `ToolMatcher{Match, Subjects}` per tool |
+| splitter, subject | `Subjects func(ctx, args) ([]Subject, error)`, `Subject{Args, Tool, Text}`; `ToolMatcher{Match, Subjects}` per tool |
 | aliases | `WithAliases(map[string][]string)` |
 | build | `Build(policy, matchers, opts…)`; `ErrNoDefault`, `ErrNoMatcher`, `ErrToolGlob` for the kinds, and a plain error for `invalid_rule` |
 | engine | `Engine`; `Policy`, `PolicyOf(source)`, `Sources`, `Withheld`, `SetPolicy` |

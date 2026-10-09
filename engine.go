@@ -729,7 +729,7 @@ func (e *Engine) judge(ctx context.Context, a active, info agentturn.ToolCallInf
 		name = info.Call.Name
 	}
 	c := e.confinement(ctx, info.Tool, info.Args)
-	v.Action, v.Rule, v.Reason, v.Subject = e.decide(a, name, c, info.Args)
+	v.Action, v.Rule, v.Reason, v.Subject = e.decide(ctx, a, name, c, info.Args)
 	v.Confined = c.by
 	return e.foldHooks(ctx, a, name, info, v)
 }
@@ -769,7 +769,7 @@ func (e *Engine) foldHooks(ctx context.Context, a active, name string, info agen
 		if d.Args != nil {
 			out.Args, info.Args = d.Args, d.Args
 			c := e.confinement(ctx, info.Tool, d.Args)
-			act, rule, reason, subject := e.decide(a, name, c, d.Args)
+			act, rule, reason, subject := e.decide(ctx, a, name, c, d.Args)
 			if r, cur := restrictiveness(act), restrictiveness(v.Action); r > cur || policy && r == cur {
 				v.Action, v.Rule, v.Reason, v.Subject, v.By = act, rule, reason, subject, ByPolicy
 				policy = true
@@ -798,9 +798,10 @@ func (e *Engine) confinement(ctx context.Context, tool agenttool.Tool, args json
 	return confinement{ok: true, by: by}
 }
 
-// decide evaluates one call as Decide does, without recording it.
-func (e *Engine) decide(a active, name string, c confinement, args json.RawMessage) (agentturn.ToolAction, *Rule, string, string) {
-	subjects, err := e.split(name, args)
+// decide evaluates one call as Decide does, without recording it. ctx
+// is the decision's, handed to the tool's splitter.
+func (e *Engine) decide(ctx context.Context, a active, name string, c confinement, args json.RawMessage) (agentturn.ToolAction, *Rule, string, string) {
+	subjects, err := e.split(ctx, name, args)
 	if err != nil {
 		return agentturn.Block, nil, name + " call could not be evaluated: " + err.Error(), ""
 	}
@@ -947,14 +948,15 @@ func callArgs(c *openresponses.FunctionCall) json.RawMessage {
 }
 
 // split returns the subjects of a call: the splitter's, or the call
-// itself. A splitter that returns nothing is an error, since a call
-// with no subjects would be allowed by every rule.
-func (e *Engine) split(name string, args json.RawMessage) ([]Subject, error) {
+// itself, the splitter called with ctx. A splitter that returns nothing
+// is an error, since a call with no subjects would be allowed by every
+// rule.
+func (e *Engine) split(ctx context.Context, name string, args json.RawMessage) ([]Subject, error) {
 	m := e.matchers[name]
 	if m.Subjects == nil {
 		return []Subject{{Args: args}}, nil
 	}
-	subjects, err := m.Subjects(args)
+	subjects, err := m.Subjects(ctx, args)
 	if err != nil {
 		return nil, err
 	}

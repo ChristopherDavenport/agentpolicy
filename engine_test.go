@@ -55,7 +55,7 @@ func (j *journal) all() []Verdict {
 // shellSplit is a test splitter: it splits a command on the shell
 // operators and sends a "> path" redirect target to the edit tool. It
 // stands in for the product's real one.
-func shellSplit(args json.RawMessage) ([]Subject, error) {
+func shellSplit(_ context.Context, args json.RawMessage) ([]Subject, error) {
 	cmd, ok := stringField(args, "command")
 	if !ok {
 		return nil, errors.New("no command")
@@ -228,6 +228,126 @@ func TestDecideSplitterFailsClosed(t *testing.T) {
 		for _, v := range j.all() {
 			if v.Action != agentturn.Block || v.Rule != nil {
 				t.Errorf("verdict = %+v", v)
+			}
+		}
+	}
+}
+
+// decisionKey marks the context a decision is made under, so a test
+// splitter can tell which decision's context it was handed.
+type decisionKey struct{}
+
+// TestSubjectsGetsTheDecisionsContext checks that a splitter is called
+// with the context of the decision that asked: Decide's, Would's, the
+// batch hold's when it reads a sibling, and Decide's again for a
+// hook's rewrite.
+func TestSubjectsGetsTheDecisionsContext(t *testing.T) {
+	type seen struct {
+		command string
+		mark    any
+	}
+	tests := []struct {
+		name    string
+		hooks   []func(context.Context, agentturn.ToolCallInfo) (*agentturn.ToolDecision, error)
+		decide  func(e *Engine, ctx context.Context) error
+		command []string // the commands the splitter must have seen
+	}{
+		{name: "Decide", decide: func(e *Engine, ctx context.Context) error {
+			_, err := e.Decide(ctx, call("c", "bash", `{"command":"git status"}`))
+			return err
+		}, command: []string{"git status"}},
+		{name: "Would", decide: func(e *Engine, ctx context.Context) error {
+			_, err := e.Would(ctx, call("c", "bash", `{"command":"git status"}`))
+			return err
+		}, command: []string{"git status"}},
+		{name: "a sibling the batch hold reads", decide: func(e *Engine, ctx context.Context) error {
+			_, err := e.Decide(ctx, batch("run_1", "git status", "git log")[0])
+			return err
+		}, command: []string{"git status", "git log"}},
+		{name: "a hook's rewrite", hooks: []func(context.Context, agentturn.ToolCallInfo) (*agentturn.ToolDecision, error){
+			func(context.Context, agentturn.ToolCallInfo) (*agentturn.ToolDecision, error) {
+				return &agentturn.ToolDecision{Action: agentturn.Allow, Args: json.RawMessage(`{"command":"git diff"}`)}, nil
+			},
+		}, decide: func(e *Engine, ctx context.Context) error {
+			_, err := e.Decide(ctx, call("c", "bash", `{"command":"git status"}`))
+			return err
+		}, command: []string{"git status", "git diff"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var got []seen
+			matchers := map[string]ToolMatcher{"bash": {
+				Match: PrefixMatcher("command"),
+				Subjects: func(ctx context.Context, args json.RawMessage) ([]Subject, error) {
+					cmd, _ := stringField(args, "command")
+					got = append(got, seen{cmd, ctx.Value(decisionKey{})})
+					return shellSplit(ctx, args)
+				},
+			}}
+			e, err := Build(Policy{Allow: rules(t, "bash(git:*)"), Default: Ask()}, matchers, WithHooks(tt.hooks...))
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx := context.WithValue(context.Background(), decisionKey{}, tt.name)
+			if err := tt.decide(e, ctx); err != nil {
+				t.Fatal(err)
+			}
+			commands := map[string]bool{}
+			for _, s := range got {
+				commands[s.command] = true
+				if s.mark != tt.name {
+					t.Errorf("the splitter read %q under context %v, want %q", s.command, s.mark, tt.name)
+				}
+			}
+			for _, c := range tt.command {
+				if !commands[c] {
+					t.Errorf("the splitter never read %q; it read %v", c, got)
+				}
+			}
+		})
+	}
+}
+
+// TestSubjectsCancelledContextBlocks checks that a splitter that fails
+// because its decision's context is done takes the error path every
+// other splitter error takes: the call is blocked, whatever the
+// default and the rules, and never allowed.
+func TestSubjectsCancelledContextBlocks(t *testing.T) {
+	matchers := map[string]ToolMatcher{"bash": {
+		Match: PrefixMatcher("command"),
+		Subjects: func(ctx context.Context, args json.RawMessage) ([]Subject, error) {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			return shellSplit(ctx, args)
+		},
+	}}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	const reason = "bash call could not be evaluated: context canceled"
+	for _, def := range []Default{Allow(), Ask(), Deny()} {
+		j := &journal{}
+		e, err := Build(Policy{Allow: rules(t, "bash"), Default: def}, matchers, WithObserver(j.observe))
+		if err != nil {
+			t.Fatal(err)
+		}
+		d, err := e.Decide(ctx, call("c", "bash", `{"command":"git status"}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if d.Action != agentturn.Block || d.Reason != reason {
+			t.Errorf("default %s: decision = %+v", def, d)
+		}
+		v, err := e.Would(ctx, call("c", "bash", `{"command":"git status"}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if v.Action != agentturn.Block || v.Reason != reason || v.Rule != nil {
+			t.Errorf("default %s: Would = %+v", def, v)
+		}
+		for _, v := range j.all() {
+			if v.Action != agentturn.Block || v.Rule != nil {
+				t.Errorf("default %s: verdict = %+v", def, v)
 			}
 		}
 	}

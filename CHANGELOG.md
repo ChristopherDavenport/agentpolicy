@@ -5,6 +5,19 @@ All user-visible changes to this library. The format follows
 uses [Semantic Versioning](https://semver.org/); before v1.0.0 minor
 versions may break the API.
 
+## Unreleased
+
+- **Breaking**: changed `Subjects` from
+  `func(args json.RawMessage) ([]Subject, error)` to
+  `func(ctx context.Context, args json.RawMessage) ([]Subject, error)`.
+  The engine passes the context of the decision that asked: `Decide`'s,
+  `Would`'s, and, when the batch hold reads a sibling, that of the
+  decision being held. A splitter that asks a remote executor what a
+  call would touch is cancelled with the decision and keeps its
+  deadline. An error, a cancelled context's included, blocks the call
+  with the error as the reason, as before. To migrate, change
+  `func(args)` to `func(_ context.Context, args)` (#71).
+
 ## v0.0.11 - 2026-10-02
 
 - Requires `agentturn` v0.0.16, up from v0.0.15, `agenttool` v0.0.15,
