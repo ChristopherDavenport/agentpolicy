@@ -232,7 +232,8 @@ func WithToolsFor(lookup func(ctx context.Context, name string) (agenttool.Tool,
 // loop hands the hook that sibling's own call, with the sibling's
 // batch position and the tool [WithTools] names. A hook must therefore
 // decide a call the same way however often it is asked, and one that
-// fails for a sibling reads as asking, so the call is held. Each
+// fails for a sibling reads as asking, so the call is held, and is
+// asked again for that sibling by the next call of the batch. Each
 // WithHooks adds its hooks after those already given; a nil hook adds
 // nothing.
 func WithHooks(fns ...func(context.Context, agentturn.ToolCallInfo) (*agentturn.ToolDecision, error)) Option {
@@ -724,14 +725,26 @@ func (e *Engine) Would(ctx context.Context, info agentturn.ToolCallInfo) (Verdic
 // the hooks folded in. v carries the call's identity in and the
 // verdict out.
 func (e *Engine) judge(ctx context.Context, a active, info agentturn.ToolCallInfo, v *Verdict) (agentturn.ToolDecision, error) {
+	out, _, err := e.evaluate(ctx, a, info, v)
+	return out, err
+}
+
+// evaluate is judge, and reports too whether the verdict is a block
+// because the call's subjects, or those of a hook's rewrite, could not
+// be evaluated: its splitter failed, perhaps only for the moment, as
+// when the decision's context is done or a remote executor did not
+// answer.
+func (e *Engine) evaluate(ctx context.Context, a active, info agentturn.ToolCallInfo, v *Verdict) (agentturn.ToolDecision, bool, error) {
 	name := ""
 	if info.Call != nil {
 		name = info.Call.Name
 	}
 	c := e.confinement(ctx, info.Tool, info.Args)
-	v.Action, v.Rule, v.Reason, v.Subject = e.decide(ctx, a, name, c, info.Args)
+	var failed bool
+	v.Action, v.Rule, v.Reason, v.Subject, failed = e.decide(ctx, a, name, c, info.Args)
 	v.Confined = c.by
-	return e.foldHooks(ctx, a, name, info, v)
+	out, rewriteFailed, err := e.foldHooks(ctx, a, name, info, v)
+	return out, failed || rewriteFailed, err
 }
 
 // foldHooks folds the hooks' decisions into v, the policy's, as
@@ -740,9 +753,10 @@ func (e *Engine) judge(ctx context.Context, a active, info agentturn.ToolCallInf
 // arguments. Arguments a hook rewrites are decided again, their
 // confinement read afresh: the stricter action stands, and a verdict
 // still the policy's takes the rewrite's rule and reason, so it
-// describes the arguments the call runs with.
-func (e *Engine) foldHooks(ctx context.Context, a active, name string, info agentturn.ToolCallInfo, v *Verdict) (agentturn.ToolDecision, error) {
-	var out agentturn.ToolDecision
+// describes the arguments the call runs with. failed reports that the
+// verdict is the block of a rewrite whose subjects could not be
+// evaluated.
+func (e *Engine) foldHooks(ctx context.Context, a active, name string, info agentturn.ToolCallInfo, v *Verdict) (out agentturn.ToolDecision, failed bool, err error) {
 	policy := true
 	for _, fn := range e.hooks {
 		if v.Action == agentturn.Block {
@@ -750,7 +764,7 @@ func (e *Engine) foldHooks(ctx context.Context, a active, name string, info agen
 		}
 		d, err := fn(ctx, info)
 		if err != nil {
-			return agentturn.ToolDecision{}, err
+			return agentturn.ToolDecision{}, false, err
 		}
 		if d == nil {
 			continue
@@ -769,15 +783,15 @@ func (e *Engine) foldHooks(ctx context.Context, a active, name string, info agen
 		if d.Args != nil {
 			out.Args, info.Args = d.Args, d.Args
 			c := e.confinement(ctx, info.Tool, d.Args)
-			act, rule, reason, subject := e.decide(ctx, a, name, c, d.Args)
+			act, rule, reason, subject, bad := e.decide(ctx, a, name, c, d.Args)
 			if r, cur := restrictiveness(act), restrictiveness(v.Action); r > cur || policy && r == cur {
 				v.Action, v.Rule, v.Reason, v.Subject, v.By = act, rule, reason, subject, ByPolicy
-				policy = true
+				policy, failed = true, bad
 			}
 			v.Confined = c.by
 		}
 	}
-	return out, nil
+	return out, failed, nil
 }
 
 // confinement is what a call's tool says of where it runs.
@@ -799,13 +813,15 @@ func (e *Engine) confinement(ctx context.Context, tool agenttool.Tool, args json
 }
 
 // decide evaluates one call as Decide does, without recording it. ctx
-// is the decision's, handed to the tool's splitter.
-func (e *Engine) decide(ctx context.Context, a active, name string, c confinement, args json.RawMessage) (agentturn.ToolAction, *Rule, string, string) {
+// is the decision's, handed to the tool's splitter. failed reports a
+// block because the splitter failed, rather than one a rule made.
+func (e *Engine) decide(ctx context.Context, a active, name string, c confinement, args json.RawMessage) (act agentturn.ToolAction, rule *Rule, reason, subject string, failed bool) {
 	subjects, err := e.split(ctx, name, args)
 	if err != nil {
-		return agentturn.Block, nil, name + " call could not be evaluated: " + err.Error(), ""
+		return agentturn.Block, nil, name + " call could not be evaluated: " + err.Error(), "", true
 	}
-	return e.fold(a, name, c, subjects)
+	act, rule, reason, subject = e.fold(a, name, c, subjects)
+	return act, rule, reason, subject, false
 }
 
 // batchCache is whether each call of one batch asks, by its position
@@ -834,7 +850,11 @@ type batchCache struct {
 // reading only ever moves toward asking: a call whose own decision
 // asks is kept as asking whatever it was first read as, and one first
 // read as asking stays so, so a call decided twice is held at least as
-// often as the first time and never runs beside an ask.
+// often as the first time and never runs beside an ask. A sibling that
+// could not be read, its hook or its splitter having failed, holds the
+// call and is not kept: the failure may pass, as a cancelled context or
+// a remote executor that did not answer does, so the next call of the
+// batch reads it again.
 func (e *Engine) batchAsks(ctx context.Context, a active, info agentturn.ToolCallInfo, own agentturn.ToolAction) bool {
 	if len(info.Batch) < 2 || info.Call == nil {
 		return false
@@ -862,8 +882,11 @@ func (e *Engine) batchAsks(ctx context.Context, a active, info agentturn.ToolCal
 		}
 		ask, ok := known[i]
 		if !ok {
-			ask = e.siblingAsks(ctx, a, info, i)
-			decided[i] = ask
+			var keep bool
+			ask, keep = e.siblingAsks(ctx, a, info, i)
+			if keep {
+				decided[i] = ask
+			}
 		}
 		asks = asks || ask
 	}
@@ -881,16 +904,20 @@ func (e *Engine) batchAsks(ctx context.Context, a active, info agentturn.ToolCal
 
 // siblingAsks reports whether the call at position i of info's batch
 // asks, decided as Decide would decide it, the hooks included, with the
-// tool [WithTools] names. A hook that fails reads as asking.
-func (e *Engine) siblingAsks(ctx context.Context, a active, info agentturn.ToolCallInfo, i int) bool {
+// tool [WithTools] names. A sibling that could not be read, a hook
+// having failed or its subjects not evaluated, reads as asking, and
+// keep is false so the reading is not kept for the batch. A sibling a
+// rule blocks does not ask, and is kept.
+func (e *Engine) siblingAsks(ctx context.Context, a active, info agentturn.ToolCallInfo, i int) (ask, keep bool) {
 	c := info.Batch[i]
 	args := callArgs(c)
 	sib := agentturn.ToolCallInfo{RunID: info.RunID, Turn: info.Turn, Call: c, Tool: e.sibling(ctx, c.Name), Args: args, Batch: info.Batch, Index: i}
 	v := Verdict{}
-	if _, err := e.judge(ctx, a, sib, &v); err != nil {
-		return true
+	_, failed, err := e.evaluate(ctx, a, sib, &v)
+	if err != nil || failed {
+		return true, false
 	}
-	return v.Action == agentturn.Defer
+	return v.Action == agentturn.Defer, true
 }
 
 // position returns the index of info's own call in its batch: Index

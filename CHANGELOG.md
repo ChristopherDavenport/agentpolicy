@@ -17,6 +17,15 @@ versions may break the API.
   deadline. An error, a cancelled context's included, blocks the call
   with the error as the reason, as before. To migrate, change
   `func(args)` to `func(_ context.Context, args)` (#71).
+- Fixed: a sibling the batch hold could not read now holds the call
+  beside it, and the failed reading is not kept for the batch.
+  Previously a sibling whose subjects could not be evaluated, its
+  splitter or a hook's rewrite failing, read as blocked and so did not
+  hold the call, and a sibling whose hook failed read as asking but was
+  kept, so later calls of the batch never read it again. Either failure
+  may pass, as a cancelled context or a remote executor that did not
+  answer does. A later call of the batch now reads the sibling again. A
+  sibling a rule blocks still does not hold (#71).
 
 ## v0.0.11 - 2026-10-02
 

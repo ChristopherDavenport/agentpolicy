@@ -512,13 +512,17 @@ when there is none. So without a lookup, a call before a confined command that a
 bare ask rule names is held for it. A reading only ever moves toward
 asking within a batch: a sibling once read as asking stays so, and a
 call decided twice is held at least as often as the first time, so it
-never runs beside an ask.
+never runs beside an ask. A sibling that could not be read, because a
+hook failed or its subjects could not be evaluated, reads as asking,
+so the call beside it is held; a sibling a rule blocks does not ask.
 
 A batch is identified by its run, its turn, every call's ID, name and
 arguments, and the rules in force, the grant scope of the decision's
 context included. A binding MAY cache the siblings' readings for a
 batch, and MUST NOT read a cache across two batches, across a change
-of rules or across two grant scopes.
+of rules or across two grant scopes. It MUST NOT cache a reading that
+failed: the failure may pass, as a cancelled context or a remote
+executor that did not answer does.
 
 The loop decides every call of a batch before any executes, under
 agentturn RFC 0001, which is what lets the engine see an ask wherever
