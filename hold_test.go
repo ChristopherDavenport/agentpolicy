@@ -97,7 +97,7 @@ func TestDecideHoldsTheBatchForAnAsk(t *testing.T) {
 				t.Fatalf("%s[%d]: %v", tc.name, i, err)
 			}
 			w := tc.want[i]
-			if d.Action != w.action || d.Reason != w.reason || d.By != "policy" {
+			if d.Action != w.action || d.Held != w.held || d.Reason != w.reason || d.By != "policy" {
 				t.Errorf("%s[%d]: decision = %+v, want %+v", tc.name, i, d, w)
 			}
 			// The same call in the same batch decides the same.

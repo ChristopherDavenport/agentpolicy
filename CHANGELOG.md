@@ -5,6 +5,16 @@ All user-visible changes to this library. The format follows
 uses [Semantic Versioning](https://semver.org/); before v1.0.0 minor
 versions may break the API.
 
+## Unreleased
+
+- Added: `Decide` sets the decision's `Held` (agentturn v0.0.20's
+  `ToolDecision.Held`) on a call it holds beside another call of the
+  batch that asks, as it sets `Verdict.Held`. A front that has only the
+  run's end (`PendingCall.Decision`) can then tell the call a rule asked
+  about from the ones held beside it, without `Engine.Deferred`.
+- Changed: requires agentturn v0.0.20, up from v0.0.16, and agenttool
+  v0.0.22, up from v0.0.15.
+
 ## v0.0.13 - 2026-10-09
 
 - Added `Subject.Constrain`, a constraint subject: it is checked
