@@ -618,6 +618,8 @@ func (e *Engine) BeforeToolCall() func(context.Context, agentturn.ToolCallInfo) 
 // then allow, then the default. The verdicts fold to the most
 // restrictive: the call is blocked if any subject is denied, deferred
 // if any subject asks, and allowed only when every subject is. A
+// constraint subject, Subject.Constrain, is held to its tool's deny
+// and ask rules alone and can only make the call stricter. A
 // splitter that fails blocks the call with its error as the reason.
 //
 // A call the policy allows is held, deferred with Verdict.Held set,
@@ -977,7 +979,9 @@ func callArgs(c *openresponses.FunctionCall) json.RawMessage {
 // split returns the subjects of a call: the splitter's, or the call
 // itself, the splitter called with ctx. A splitter that returns nothing
 // is an error, since a call with no subjects would be allowed by every
-// rule.
+// rule. A splitter that returns only constraints has the call itself
+// put before them, since constraints never allow and the call needs a
+// subject that can.
 func (e *Engine) split(ctx context.Context, name string, args json.RawMessage) ([]Subject, error) {
 	m := e.matchers[name]
 	if m.Subjects == nil {
@@ -990,11 +994,16 @@ func (e *Engine) split(ctx context.Context, name string, args json.RawMessage) (
 	if len(subjects) == 0 {
 		return nil, errors.New("splitter returned no subjects")
 	}
+	if !slices.ContainsFunc(subjects, func(s Subject) bool { return !s.Constrain }) {
+		subjects = append([]Subject{{Args: args}}, subjects...)
+	}
 	return subjects, nil
 }
 
 // fold decides every subject and keeps the most restrictive verdict,
-// the first of equals. A block of a call split into several subjects
+// the first of equals. A constraint no deny or ask rule fires for has
+// no verdict and is passed over; split guarantees an ordinary subject,
+// which always has one. A block of a call split into several subjects
 // names the subject it was for, says nothing in the command ran and
 // names the other subjects, so the model does not report the other
 // half as having succeeded.
@@ -1004,7 +1013,7 @@ func (e *Engine) fold(a active, name string, c confinement, subjects []Subject) 
 		rule    *Rule
 		reason  string
 		subject string
-		at      int
+		at      = -1
 	)
 	for i, s := range subjects {
 		tool := s.Tool
@@ -1017,8 +1026,11 @@ func (e *Engine) fold(a active, name string, c confinement, subjects []Subject) 
 		if tool != name {
 			sc = confinement{}
 		}
-		act, r, why := e.decideSubject(a, tool, sc, s.Args)
-		if i == 0 || restrictiveness(act) > restrictiveness(action) {
+		act, r, why, ok := e.decideSubject(a, tool, sc, s.Args, s.Constrain)
+		if !ok {
+			continue
+		}
+		if at < 0 || restrictiveness(act) > restrictiveness(action) {
 			action, rule, reason, subject, at = act, r, why, s.Text, i
 		}
 	}
@@ -1057,30 +1069,34 @@ func restrictiveness(a agentturn.ToolAction) int {
 
 // decideSubject applies the precedence to one subject. A bare ask rule
 // the confinement skips allows the subject, since the rule was what
-// would have asked.
-func (e *Engine) decideSubject(a active, tool string, c confinement, args json.RawMessage) (agentturn.ToolAction, *Rule, string) {
+// would have asked. A constraint stops after the ask rules: one no
+// deny or ask rule fires for has no verdict, and ok is false.
+func (e *Engine) decideSubject(a active, tool string, c confinement, args json.RawMessage, constrain bool) (act agentturn.ToolAction, rule *Rule, reason string, ok bool) {
 	p := a.policy
 	if r, ok := e.match(p.Deny, tool, args); ok {
-		return agentturn.Block, &r, "denied by " + r.cite()
+		return agentturn.Block, &r, "denied by " + r.cite(), true
 	}
-	r, skipped, ok := e.matchAsk(a, tool, args, c.ok)
-	if ok {
-		return agentturn.Defer, &r, "approval required by " + r.cite()
+	r, skipped, asked := e.matchAsk(a, tool, args, c.ok)
+	if asked {
+		return agentturn.Defer, &r, "approval required by " + r.cite(), true
+	}
+	if constrain {
+		return agentturn.Allow, nil, "", false
 	}
 	if skipped {
-		return agentturn.Allow, &r, confinedReason(c.by, r)
+		return agentturn.Allow, &r, confinedReason(c.by, r), true
 	}
 	if r, ok := e.match(p.Allow, tool, args); ok {
-		return agentturn.Allow, &r, "allowed by " + r.cite()
+		return agentturn.Allow, &r, "allowed by " + r.cite(), true
 	}
 	action, _ := p.Default.Action()
 	switch action {
 	case agentturn.Block:
-		return action, nil, "no rule allows " + tool + ": denied by default"
+		return action, nil, "no rule allows " + tool + ": denied by default", true
 	case agentturn.Defer:
-		return action, nil, "no rule allows " + tool + ": approval required by default"
+		return action, nil, "no rule allows " + tool + ": approval required by default", true
 	}
-	return agentturn.Allow, nil, "allowed by default"
+	return agentturn.Allow, nil, "allowed by default", true
 }
 
 // match returns the first rule of list that matches the subject: the

@@ -85,6 +85,9 @@ func stringField(args json.RawMessage, field string) (string, bool) {
 
 // Subject is one thing the policy is evaluated against. A call is one
 // subject, its own arguments, unless the tool's [Subjects] splits it.
+// A subject is ordinary, decided by the whole precedence, or a
+// constraint, see Constrain, which can only make the call's decision
+// stricter.
 type Subject struct {
 	// Args is the subject as the matchers see it.
 	Args json.RawMessage
@@ -94,6 +97,29 @@ type Subject struct {
 	Tool string
 	// Text is what a prompt shows for this subject.
 	Text string
+	// Constrain makes the subject a constraint: it is checked against
+	// its tool's deny and ask rules only, so it can block or defer the
+	// call and never allows it. Carve-outs, the grants that pass over
+	// an ask rule and the call's confinement apply to those rules as
+	// they do for any subject. An allow rule and the default never
+	// apply to a constraint, so one no deny or ask rule fires for adds
+	// nothing to the fold. A constraint's Text is the verdict's subject
+	// when its verdict is the strictest.
+	//
+	// It is how one tool's calls are held to another tool's asks and
+	// denies without borrowing that tool's allows: a skill tool's file
+	// reads, as Tool "read" subjects with Constrain set, are refused by
+	// a deny read(.env) and asked about by an ask rule over secrets,
+	// while an allow read(...) leaves the skill call to the skill
+	// tool's own rules.
+	//
+	// The ordinary subjects decide the call, and the constraints can
+	// only make that stricter. When every subject a splitter returns
+	// is a constraint, the call itself, its own arguments under the
+	// called tool, is decided first as an ordinary subject, so a
+	// splitter that leaves the call out does not let it run without an
+	// allow.
+	Constrain bool
 }
 
 // Subjects splits one call into its subjects, after normalisation. A

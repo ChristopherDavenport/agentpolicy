@@ -116,10 +116,14 @@ func PrefixMatcher(field string) Matcher
 // subject unless the tool's Subjects splits it. Tool, when set,
 // evaluates the subject against another tool's rules, as a shell
 // redirect target is checked against the file rules. (Finding 1.)
+// Constrain holds the subject to its tool's deny and ask rules alone,
+// so it can only make the call stricter; a call of constraints alone
+// is decided with the call itself. (#73.)
 type Subject struct {
-    Args json.RawMessage
-    Tool string
-    Text string
+    Args      json.RawMessage
+    Tool      string
+    Text      string
+    Constrain bool
 }
 
 // Subjects splits one call into its subjects. A shell tool splits on

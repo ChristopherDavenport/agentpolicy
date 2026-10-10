@@ -5,6 +5,22 @@ All user-visible changes to this library. The format follows
 uses [Semantic Versioning](https://semver.org/); before v1.0.0 minor
 versions may break the API.
 
+## Unreleased
+
+- Added `Subject.Constrain`, a constraint subject: it is checked
+  against its tool's deny and ask rules alone, with carve-outs, grant
+  sets and confinement applying to them as for any subject, so it can
+  block or defer a call and never allows one. Its tool's allow rules
+  and the default do not apply to it, and one no deny or ask rule
+  fires for adds nothing to the fold. When it is the strictest, its
+  text is the verdict's subject and a block's reason cites it as for
+  any subject. A splitter that returns only constraints has the call
+  itself, its own arguments under the called tool, decided before
+  them. It lets a product hold one tool's calls to another tool's asks
+  and denies without borrowing that tool's allows, as dax holds its
+  skill tool's file reads to `read`'s rules (dax#39). RFC 0001 is
+  draft 0.2, and the corpus's subjects take `constrain` (#73).
+
 ## v0.0.12 - 2026-10-09
 
 - **Breaking**: changed `Subjects` from

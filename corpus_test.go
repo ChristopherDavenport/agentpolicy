@@ -172,9 +172,10 @@ func (s corpusSource) set(t *testing.T) RuleSet {
 }
 
 type corpusSubject struct {
-	Args json.RawMessage `json:"args"`
-	Text string          `json:"text"`
-	Tool string          `json:"tool"`
+	Args      json.RawMessage `json:"args"`
+	Text      string          `json:"text"`
+	Tool      string          `json:"tool"`
+	Constrain bool            `json:"constrain"`
 }
 
 type corpusCall struct {
@@ -317,7 +318,7 @@ func runDecisionCase(t *testing.T, defaults map[string]corpusMatcher, tc decisio
 				}
 				out := []Subject{}
 				for _, s := range *a.subjects {
-					out = append(out, Subject{Args: s.Args, Text: s.Text, Tool: s.Tool})
+					out = append(out, Subject{Args: s.Args, Text: s.Text, Tool: s.Tool, Constrain: s.Constrain})
 				}
 				return out, nil
 			}
