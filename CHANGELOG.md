@@ -5,6 +5,14 @@ All user-visible changes to this library. The format follows
 uses [Semantic Versioning](https://semver.org/); before v1.0.0 minor
 versions may break the API.
 
+## Unreleased
+
+- Added: `Decide` sets the decision's `Subject` (agentturn v0.0.22's
+  `ToolDecision.Subject`) from the verdict: the part of a split call
+  the decision is about, so a front with only the run's end says which
+  part of a compound command a question asks about (#76).
+- Changed: requires agentturn v0.0.22, up from v0.0.20.
+
 ## v0.0.14 - 2026-10-10
 
 - Added: `Decide` sets the decision's `Held` (agentturn v0.0.20's

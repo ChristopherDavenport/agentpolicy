@@ -127,8 +127,8 @@ func TestConstraintSubject(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if d.Action != tc.action || d.Reason != tc.reason {
-				t.Errorf("decision = %v %q, want %v %q", d.Action, d.Reason, tc.action, tc.reason)
+			if d.Action != tc.action || d.Reason != tc.reason || d.Subject != tc.subj {
+				t.Errorf("decision = %v %q subject %q, want %v %q subject %q", d.Action, d.Reason, d.Subject, tc.action, tc.reason, tc.subj)
 			}
 			v := j.all()[0]
 			rule := ""

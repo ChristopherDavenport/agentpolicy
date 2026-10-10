@@ -187,17 +187,18 @@ func TestDecideFoldsSubjects(t *testing.T) {
 		if d.Action != tc.action || d.Reason != tc.reason {
 			t.Errorf("%q: decision = %+v, want %v %q", tc.command, d, tc.action, tc.reason)
 		}
-		if v := j.all()[i]; v.Subject != tc.subject {
-			t.Errorf("%q: verdict subject = %q, want %q", tc.command, v.Subject, tc.subject)
+		if v := j.all()[i]; v.Subject != tc.subject || d.Subject != tc.subject {
+			t.Errorf("%q: verdict subject = %q, decision subject = %q, want %q", tc.command, v.Subject, d.Subject, tc.subject)
 		}
 	}
 	// A tool with no splitter is one subject, and the splitter is what
 	// writes the text, so there is none.
-	if _, err := e.Decide(context.Background(), call("c", "edit", `{"path":"/tmp/x"}`)); err != nil {
+	d, err := e.Decide(context.Background(), call("c", "edit", `{"path":"/tmp/x"}`))
+	if err != nil {
 		t.Fatal(err)
 	}
-	if v := j.all()[len(tests)]; v.Subject != "" {
-		t.Errorf("an unsplit call has subject %q", v.Subject)
+	if v := j.all()[len(tests)]; v.Subject != "" || d.Subject != "" {
+		t.Errorf("an unsplit call has subject %q, decision subject %q", v.Subject, d.Subject)
 	}
 }
 
