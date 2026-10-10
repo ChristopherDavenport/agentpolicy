@@ -686,9 +686,10 @@ func (e *Engine) Decide(ctx context.Context, info agentturn.ToolCallInfo) (*agen
 		e.remember(info.RunID, callID, d)
 	}
 	e.observe(ctx, v)
-	// Held travels on the decision, so a front that has only the run's
-	// end tells a held call from the one asked about without the engine.
-	out.Action, out.Reason, out.By, out.Held = v.Action, v.Reason, v.By, v.Held
+	// Held and Subject travel on the decision, so a front that has only
+	// the run's end tells a held call from the one asked about, and says
+	// which part of the call a question is about, without the engine.
+	out.Action, out.Reason, out.By, out.Held, out.Subject = v.Action, v.Reason, v.By, v.Held, v.Subject
 	return &out, nil
 }
 
