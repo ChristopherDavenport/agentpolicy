@@ -274,6 +274,41 @@
       ]
     },
     {
+      "name": "a constraint is held to its tool's denies and asks and nothing else",
+      "matchers": {"skill": {"match": "prefix", "field": "name", "split": true}, "read": {"match": "prefix", "field": "path"}},
+      "policy": {"allow": "skill", "deny": "read(secrets:*)", "ask": "read(.env:*) read(!.env.example)", "default": "ask"},
+      "calls": [
+        {"tool": "skill", "args": {"name": "a"},
+         "subjects": [{"args": {"name": "a"}}, {"args": {"path": ".env"}, "text": ".env", "tool": "read", "constrain": true}],
+         "want": {"action": "defer", "rule": "read(.env:*)", "reason": "approval required by read(.env:*)", "subject": ".env"}},
+        {"tool": "skill", "args": {"name": "b"},
+         "subjects": [{"args": {"name": "b"}}, {"args": {"path": "README.md"}, "text": "README.md", "tool": "read", "constrain": true}],
+         "want": {"action": "allow", "rule": "skill", "reason": "allowed by skill"}},
+        {"tool": "skill", "args": {"name": "c"},
+         "subjects": [{"args": {"name": "c"}}, {"args": {"path": ".env.example"}, "text": ".env.example", "tool": "read", "constrain": true}],
+         "want": {"action": "allow", "rule": "skill", "reason": "allowed by skill"}},
+        {"tool": "skill", "args": {"name": "d"},
+         "subjects": [{"args": {"name": "d"}}, {"args": {"path": "secrets/key"}, "text": "secrets/key", "tool": "read", "constrain": true}],
+         "want": {"action": "block", "rule": "read(secrets:*)", "reason": "denied by read(secrets:*) on \"secrets/key\"; nothing in this command ran", "subject": "secrets/key"}},
+        {"tool": "skill", "args": {"name": "e"},
+         "subjects": [{"args": {"path": "README.md"}, "text": "README.md", "tool": "read", "constrain": true}],
+         "want": {"action": "allow", "rule": "skill", "reason": "allowed by skill"}}
+      ]
+    },
+    {
+      "name": "a constraint's tool's allow rules do not allow the call",
+      "matchers": {"skill": {"match": "prefix", "field": "name", "split": true}, "read": {"match": "prefix", "field": "path"}},
+      "policy": {"allow": "read", "default": "ask"},
+      "calls": [
+        {"tool": "skill", "args": {"name": "a"},
+         "subjects": [{"args": {"name": "a"}}, {"args": {"path": "README.md"}, "text": "README.md", "tool": "read", "constrain": true}],
+         "want": {"action": "defer", "reason": "no rule allows skill: approval required by default"}},
+        {"tool": "skill", "args": {"name": "b"},
+         "subjects": [{"args": {"path": "README.md"}, "text": "README.md", "tool": "read", "constrain": true}],
+         "want": {"action": "defer", "reason": "no rule allows skill: approval required by default"}}
+      ]
+    },
+    {
       "name": "a splitter that fails blocks the call",
       "matchers": {"bash": {"match": "prefix", "field": "command", "split": true}},
       "policy": {"allow": "bash", "default": "allow"},

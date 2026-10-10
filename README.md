@@ -176,6 +176,16 @@ verdict was made on, so a prompt about
 `npm run build && ./scripts/deploy.sh --prod` says that the deploy
 script is what it is asking about.
 
+A subject with `Constrain` set is a constraint: it is checked against
+its tool's deny and ask rules and nothing else, so it can refuse or
+ask about a call but never allow one. A skill tool whose file reads
+are constraints under `read` is refused by `deny read(.env)` and asked
+about by an ask rule over secrets, while `allow read(.env)` does not
+allow the skill call; that still takes the skill tool's own allow.
+When no deny or ask rule fires for a constraint it adds nothing to the
+fold, and the default does not apply to it. A splitter that returns
+only constraints has the call itself decided before them.
+
 A call its tool says runs confined is not asked about by a bare ask
 rule naming that tool, as both references skip a bare `Bash` ask for
 a sandboxed command. The engine reads `agenttool.ConfinedBy` over the

@@ -1,6 +1,6 @@
 # RFC 0001: Agent Policy
 
-Status: draft 0.1
+Status: draft 0.2
 Author: Christopher Davenport
 Discussion: to be opened against this repository. The Go module at its
 root is the reference binding. agentturn RFC 0001 is the loop whose
@@ -125,7 +125,10 @@ RFC 2119.
 - **Matcher**: a function from a specifier and one subject's arguments
   to whether the specifier matches.
 - **Subject**: one thing a policy is evaluated against: arguments, a
-  tool whose rules apply to them, and text a prompt shows.
+  tool whose rules apply to them, text a prompt shows, and whether it
+  is a constraint.
+- **Constraint**: a subject held to its tool's deny and ask rules
+  alone, which can make a call's decision stricter and never allow it.
 - **Splitter**: a function from a call's arguments to its subjects.
 - **Confinement**: what a call's tool says of where the call runs:
   confined or not, and what confines it.
@@ -254,7 +257,24 @@ resolves a path. Each subject has:
   redirect target is checked against the file tool's rules; unset is
   the called tool;
 - **text**, what a prompt shows for the subject, and what a reason
-  cites.
+  cites;
+- **constrain**, when set, that the subject is a **constraint**.
+
+A subject is ordinary unless it is a constraint. A constraint is
+checked against its tool's deny and ask rules only, as
+[Deciding a subject](#deciding-a-subject) says. It can block or defer
+the call, and it never allows it: its tool's allow rules and the
+default do not apply to it. It is how a host holds one tool's calls to
+another tool's asks and denies without borrowing that tool's allows,
+as a skill tool's file reads are held to `read(.env)` while
+`allow read(.env)` leaves the skill call to the skill tool's own rules.
+
+The ordinary subjects decide a call and the constraints can only make
+that decision stricter. When every subject a splitter returns is a
+constraint, the call itself, its own arguments under the called tool,
+is put before them as an ordinary subject, so a call is never decided
+by constraints alone and never runs without a rule or the default
+allowing it.
 
 A splitter that fails blocks the call, with its error in the reason. A
 splitter that returns no subjects is a failure too, since a call with
@@ -385,6 +405,11 @@ The precedence, in order:
 4. **Allow.** The first allow rule that fires allows the subject.
 5. **Default.** The default applies, with no rule.
 
+A constraint stops after step 2: when no deny rule fires and no ask
+rule defers it, it has no verdict. Carve-outs, the grant sets that
+pass over an ask rule, and confinement apply to it in those two steps
+as to any subject.
+
 The first rule that fires within a list is the one a verdict names, so
 a merge that puts the most authoritative source first makes it the one
 cited.
@@ -439,9 +464,12 @@ A call is decided in four steps.
    itself. A splitter that fails, or returns no subjects, blocks the
    call with no rule and the reason `N call could not be evaluated:
    E`, where `N` is the tool name and `E` the error, `splitter returned
-   no subjects` for none.
+   no subjects` for none. When every subject the splitter returns is a
+   constraint, the call itself is put before them as an ordinary
+   subject.
 2. **Fold the subjects.** Each subject is decided as the previous
-   section says. The most restrictive verdict stands, block over defer
+   section says, and a constraint with no verdict is passed over. The
+   most restrictive verdict stands, block over defer
    over allow, and the first of equals. The verdict's subject is the
    text of the subject whose verdict stood. When a call split into
    more than one subject is blocked and the blocking subject has text,
@@ -990,7 +1018,7 @@ The root module of this repository is the reference binding.
 | policy | `Policy{Allow, Deny, Ask, Default, Sources, Withheld}`; `Allow()`, `Deny()`, `Ask()`; the zero `Default` is unset; `Policy.WithDefault(d)` |
 | merge | `RuleSet{Source, Allow, Deny, Ask}`, `Merge(sets…)` |
 | matcher | `Matcher func(spec, args) bool`; `PrefixMatcher(field)`, `GlobMatcher(field)` |
-| splitter, subject | `Subjects func(ctx, args) ([]Subject, error)`, `Subject{Args, Tool, Text}`; `ToolMatcher{Match, Subjects}` per tool |
+| splitter, subject | `Subjects func(ctx, args) ([]Subject, error)`, `Subject{Args, Tool, Text, Constrain}`; `ToolMatcher{Match, Subjects}` per tool |
 | aliases | `WithAliases(map[string][]string)` |
 | build | `Build(policy, matchers, opts…)`; `ErrNoDefault`, `ErrNoMatcher`, `ErrToolGlob` for the kinds, and a plain error for `invalid_rule` |
 | engine | `Engine`; `Policy`, `PolicyOf(source)`, `Sources`, `Withheld`, `SetPolicy` |
@@ -1054,7 +1082,9 @@ parser is one.
 **A conforming engine** refuses a policy with no default, a rule that
 could never fire and a tool-name glob it will not honour; decides
 every subject by the precedence as an algorithm, whatever the order of
-the lists; folds a call's subjects to the most restrictive; blocks a
+the lists; holds a constraint to its tool's deny and ask rules alone
+and decides a call of constraints alone with the call itself; folds a
+call's subjects to the most restrictive; blocks a
 call whose splitter fails; reads confinement from the called tool and
 reads an unanswered tool as unconfined; holds every call it allows
 when another of its batch asks, and never runs one beside an ask;
@@ -1117,8 +1147,8 @@ a splitter. A case has:
 
 A call has `tool` and `args`. The splitter and the confinement are the
 host's, so the corpus writes out what they answer for the call:
-`subjects`, an array of `{"args", "text"?, "tool"?}` the splitter
-returns, one subject of the call's own arguments when absent;
+`subjects`, an array of `{"args", "text"?, "tool"?, "constrain"?}`
+the splitter returns, one subject of the call's own arguments when absent;
 `subjects_error`, the splitter's error text; and `confined`, present
 when the tool says the call runs confined, with what confines it, `""`
 for nothing named. The calls of one case have distinct arguments per
@@ -1213,9 +1243,9 @@ listed in the changelog as one.
   as `\x01` and a non-printable one as `\u00a0`. That is neither JSON
   nor anything a second language has built in. Quoting as a JSON
   string without HTML escaping, which agrees for every printable text,
-  is the likely rule for draft 0.2.
+  is the likely rule for a later draft.
 - **Grants in the corpus.** The corpus covers grant sets; a grant over
   a verdict, a release and the answers without a human are stateful
   across calls and are held only by the reference's tests. A scenario
   form, a sequence of steps each with its expected verdicts, is the
-  likely shape for draft 0.2.
+  likely shape for a later draft.
