@@ -5,7 +5,7 @@ All user-visible changes to this library. The format follows
 uses [Semantic Versioning](https://semver.org/); before v1.0.0 minor
 versions may break the API.
 
-## Unreleased
+## v0.0.13 - 2026-10-09
 
 - Added `Subject.Constrain`, a constraint subject: it is checked
   against its tool's deny and ask rules alone, with carve-outs, grant
