@@ -73,8 +73,13 @@ func (e *Engine) askedInRun(ctx context.Context, a active, info agentturn.ToolCa
 	}
 	self := position(info)
 	key := batchKey(info, a.gen, a.scope)
-	ab := e.askBatchFor(ctx, a, info, key, self, *v, out)
 	defer e.decidedInBatch(key, self, len(info.Batch))
+	if v.Action != agentturn.Defer && (v.Action != agentturn.Allow || !held) {
+		// Nothing to ask: the call is blocked, or allowed with no ask
+		// beside it. The batch is read for the hold already.
+		return nil, false
+	}
+	ab := e.askBatchFor(ctx, a, info, key, self, *v, out)
 
 	switch {
 	case v.Action == agentturn.Defer:
