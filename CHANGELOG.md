@@ -5,6 +5,18 @@ All user-visible changes to this library. The format follows
 uses [Semantic Versioning](https://semver.org/); before v1.0.0 minor
 versions may break the API.
 
+## Unreleased
+
+- Fixed: whether a batch with a call that cannot be evaluated holds no
+  longer depends on the order of its calls (#83). Read as a sibling,
+  such a call held the calls before it; decided itself, its block was
+  kept for the batch as not asking, so the calls after it ran. A call
+  whose own decision is blocked because its subjects, or a hook's
+  rewrite's, could not be evaluated is now kept as asking, so it holds
+  the calls after it too. A run that ends waiting on those held calls
+  alone is released by agentkit v0.0.12's `Control.Resume()` with no
+  answers.
+
 ## v0.0.16 - 2026-10-11
 
 - Changed: requires agentturn v0.0.24, up from v0.0.22. A reviewer's

@@ -543,6 +543,10 @@ call decided twice is held at least as often as the first time, so it
 never runs beside an ask. A sibling that could not be read, because a
 hook failed or its subjects could not be evaluated, reads as asking,
 so the call beside it is held; a sibling a rule blocks does not ask.
+A call whose own decision is blocked because its subjects could not
+be evaluated reads as asking for the rest of its batch too, so the
+calls after it are held as the calls before it were: whether a batch
+holds does not depend on the order of its calls.
 
 A batch is identified by its run, its turn, every call's ID, name and
 arguments, and the rules in force, the grant scope of the decision's
