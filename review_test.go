@@ -434,6 +434,32 @@ func TestAnswersCutOffCalls(t *testing.T) {
 	if got := strings.Join(reasons, "|"); got != "aborted not reviewed: aborted|deferred approved by reviewer|unknown not reviewed: unknown" {
 		t.Errorf("verdicts = %q", got)
 	}
+	// A call a person was being asked under when the run was cut says
+	// so after its reason, as agentturn/session's ReplayAnswers does.
+	j.verdicts = nil
+	asking := &agentturn.RunEnd{RunID: "r", Reason: agentturn.ReasonAborted, Pending: []agentturn.PendingCall{
+		{Call: fc("own"), Reason: agentturn.PendingAborted, Question: &agentturn.OpenQuestion{Message: "Overwrite go.mod?"}},
+		{Call: fc("nested"), Reason: agentturn.PendingAborted, Question: &agentturn.OpenQuestion{Message: "Allow rm?", Call: &agentturn.AskedCall{Parent: "nested", CallID: "call_rm", Name: "bash"}}},
+	}}
+	answers, err = e.Answers(ctx, approve, asking)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantReasons := []string{
+		`not reviewed: aborted; a question was open: "Overwrite go.mod?"`,
+		`not reviewed: aborted; a question was open: "Allow rm?" about call call_rm (bash)`,
+	}
+	for i, a := range answers {
+		if a.Reason != wantReasons[i] {
+			t.Errorf("answer %d reason = %q, want %q", i, a.Reason, wantReasons[i])
+		}
+	}
+	for i, v := range j.all() {
+		if v.Reason != wantReasons[i] {
+			t.Errorf("verdict %d reason = %q, want %q", i, v.Reason, wantReasons[i])
+		}
+	}
+
 	// A cut-off call does not count toward the denial bound.
 	e, err = Build(Policy{Default: Ask()}, nil, WithDenialBound(DenialBound{Consecutive: 1}))
 	if err != nil {

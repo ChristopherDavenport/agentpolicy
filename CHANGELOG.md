@@ -37,6 +37,12 @@ versions may break the API.
   calls alone. Without an elicitor, or when a question is cancelled,
   the call is deferred as before. RFC 0001 says so under "Asking in
   the run" (#79).
+- Changed: `Answers` names the question a person was being asked under
+  a cut-off call, `agentturn.PendingCall.Question` (agentturn v0.0.23):
+  the refusal's reason, and its verdict's, end with
+  `; a question was open: "<message>"`, and ` about call <id> (<name>)`
+  for a question about another call, as agentturn/session's
+  `ReplayAnswers` says it (agentturn#241).
 - Changed: an approval `Release` builds carries its verdict's reason,
   `released: <why the policy allowed it>`, as `agentturn.Answer.Reason`,
   so the session recorder writes it on the call's decision.

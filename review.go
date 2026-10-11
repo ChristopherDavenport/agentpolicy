@@ -421,8 +421,22 @@ func (e *Engine) ranElsewhere(runID string, p agentturn.PendingCall) (agentturn.
 // when the policy denies it, and when the policy asks it is returned
 // as a review, for the reviewer to answer with the verdict. A hook
 // that fails reads as asking. Each answer carries the verdict's reason,
-// which the session recorder writes on its decision.
+// which the session recorder writes on its decision. A refusal of a
+// call a person was being asked under when the run was cut,
+// agentturn.PendingCall.Question, says so after its reason, as
+// agentturn/session's ReplayAnswers does, so the record shows the call
+// was waiting on a person.
 func (e *Engine) cutOff(ctx context.Context, runID string, p agentturn.PendingCall) (agentturn.Answer, Verdict, *review) {
+	ans, v, ask := e.cutOffCall(ctx, runID, p)
+	if q := p.Question; q != nil && ask == nil && ans.Output != nil {
+		v.Reason += "; " + q.Reason()
+		ans = ans.WithReason(v.Reason)
+	}
+	return ans, v, ask
+}
+
+// cutOffCall is cutOff before the open question is named.
+func (e *Engine) cutOffCall(ctx context.Context, runID string, p agentturn.PendingCall) (agentturn.Answer, Verdict, *review) {
 	call := p.Call
 	v := Verdict{RunID: runID, CallID: call.CallID, Tool: call.Name, Action: agentturn.Block, By: ByPolicy}
 	refuse := func(text string) (agentturn.Answer, Verdict, *review) {
