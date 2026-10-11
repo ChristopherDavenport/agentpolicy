@@ -124,8 +124,27 @@ and `Release` answers the rest from the user's answer:
 
 ```go
 answers, err := eng.Release(ctx, end, agentturn.Approve(callID).WithNote("last time"))
-end, err = agent.Resume(ctx, answers...)
+next, err := agent.Resume(ctx, answers...)
+eng.Resumed(ctx, end, answers, next) // settle the calls next no longer lists as pending
 ```
+
+A release is two phases. `Release` builds the answers and changes
+nothing, so a `Resume` that does not start leaves the engine as it
+was and the front answers again. `Resumed`, given the end `Resume`
+returned, settles each answered call that end no longer lists as
+pending: it forgets the call and reports its release, or the verdict
+`Answers` reached for it, through the observer. A run that failed as
+it started returns an end with the calls still pending, so nothing is
+settled and nothing reported twice when the front answers again. Every
+`Resume` is a run of its own; what the engine keeps for a call the
+resumed run still lists moves to that run, so a front answers the end
+each `Resume` returns until its calls are taken. `Answers` keeps its
+answers the same way and gives them again without asking; a front
+that escalates to another reviewer calls `Engine.ForgetAnswers(runID)`
+first. A held call is known from what the engine remembers, or
+from the `Held` mark on `agentturn.PendingCall.Decision`, which the
+loop carries on the run's end and agentturn/session reads back from
+the record, so an engine built after a restart releases the same end.
 
 The held calls run with the approved one, in the model's order. An
 answer built with `agentturn.Refuse` ends the turn instead, and the
@@ -134,6 +153,17 @@ them run, since the policy allowed them and the model sees the one
 refusal. A pending call neither the front nor the engine answers is
 `ErrUnanswered`, which names it, rather than a `Resume` that fails
 with nothing to say.
+
+A product that approves every call in place, as Cline does, builds
+the engine `WithAskInRun()`: the engine asks the person about a
+batch's asked calls through the elicitor on the hook's context
+(`agentturn.Ask`) while the run waits, and decides the calls from the
+answers by the release's rule: a plain decline refuses its own call
+alone, the held calls are released once every ask is answered, and an
+answer that stops the turn refuses them. The engine remembers nothing
+for a call settled this way. A question nobody answers, or a sibling
+that could not be read, defers the call and those held beside it as
+before.
 
 A product's own before-tool-call hooks go to `WithHooks`, which folds
 their decisions into the engine's before the hold, strictest first: a
@@ -152,8 +182,8 @@ eng, err := agentpolicy.Build(policy, matchers,
 
 One engine serves every agent: what it defers is remembered under the
 call's own run, so a sub-agent deciding a call while the user reads a
-question costs the main agent nothing. `Release` and `Answers` forget
-a call as they answer it, and `Engine.Forget(runID)` drops what an
+question costs the main agent nothing. `Resumed` forgets the calls a
+resumed run took, and `Engine.Forget(runID)` drops what an
 abandoned run left behind. A nested call, one a tool made with
 `agentturn.Invoke`, has a `ToolCallInfo.Parent`; its deferral is
 reported as a verdict and not remembered, since the loop settles it

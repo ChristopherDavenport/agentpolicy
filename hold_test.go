@@ -13,14 +13,20 @@ import (
 	"github.com/ChristopherDavenport/openresponses"
 )
 
+// ranAll is the end of a resumed run that took every call it was
+// answered with: none is pending.
+var ranAll = &agentturn.RunEnd{Reason: agentturn.ReasonDone}
+
 // released is [Engine.Release] as a front that answered every asked
-// call sees it: the answers, and no error.
+// call sees it, the answers and no error, followed by [Engine.Resumed]
+// as the resumed run starts.
 func released(ctx context.Context, t *testing.T, e *Engine, end *agentturn.RunEnd, answers ...agentturn.Answer) []agentturn.Answer {
 	t.Helper()
 	out, err := e.Release(ctx, end, answers...)
 	if err != nil {
 		t.Fatalf("release: %v", err)
 	}
+	e.Resumed(ctx, end, out, ranAll)
 	return out
 }
 
@@ -163,8 +169,8 @@ func TestRelease(t *testing.T) {
 	e, j, end := setup(t)
 	got := released(ctx, t, e, end, agentturn.Approve("call_c").WithNote("ok, once"))
 	want := []agentturn.Answer{
-		agentturn.Approve("call_a").WithBy(ByPolicy),
-		agentturn.Approve("call_b").WithBy(ByPolicy),
+		agentturn.Approve("call_a").WithBy(ByPolicy).WithReason("released: allowed by bash(git add:*)"),
+		agentturn.Approve("call_b").WithBy(ByPolicy).WithReason("released: allowed by bash(git commit:*)"),
 		agentturn.Approve("call_c").WithNote("ok, once"),
 	}
 	if !reflect.DeepEqual(got, want) {
@@ -179,11 +185,14 @@ func TestRelease(t *testing.T) {
 		}
 	}
 
+	releaseA := agentturn.Approve("call_a").WithBy(ByPolicy).WithReason("released: allowed by bash(git add:*)")
+	releaseB := agentturn.Approve("call_b").WithBy(ByPolicy).WithReason("released: allowed by bash(git commit:*)")
+
 	// A refusal that lets the turn go on releases them too: the policy
 	// allowed them, and the model sees the one refusal.
 	e, j, end = setup(t)
 	refusal := agentturn.Output(openresponses.NewFunctionCallOutput("call_c", "no"))
-	if got := released(ctx, t, e, end, refusal); !reflect.DeepEqual(got, []agentturn.Answer{agentturn.Approve("call_a").WithBy(ByPolicy), agentturn.Approve("call_b").WithBy(ByPolicy), refusal}) {
+	if got := released(ctx, t, e, end, refusal); !reflect.DeepEqual(got, []agentturn.Answer{releaseA, releaseB, refusal}) {
 		t.Errorf("released after a refusal = %s", dump(got))
 	}
 	if r := reasons(j); r != "call_a released: allowed by bash(git add:*)|call_b released: allowed by bash(git commit:*)" {
@@ -196,14 +205,14 @@ func TestRelease(t *testing.T) {
 	stop := agentturn.Refuse(openresponses.NewFunctionCallOutput("call_c", "no, stop"))
 	got = released(ctx, t, e, end, stop)
 	want = []agentturn.Answer{
-		agentturn.Output(openresponses.NewFunctionCallOutput("call_a", "The call was held for an approval and the turn was stopped; the call did not run.")).WithBy(ByPolicy).WithReason("not released: the turn was stopped"),
-		agentturn.Output(openresponses.NewFunctionCallOutput("call_b", "The call was held for an approval and the turn was stopped; the call did not run.")).WithBy(ByPolicy).WithReason("not released: the turn was stopped"),
+		agentturn.Output(openresponses.NewFunctionCallOutput("call_a", "The call was held for an approval and the turn was stopped; the call did not run.")).WithBy(ByPolicy).WithReason("not released: the turn was stopped by the answer to call_c (bash)"),
+		agentturn.Output(openresponses.NewFunctionCallOutput("call_b", "The call was held for an approval and the turn was stopped; the call did not run.")).WithBy(ByPolicy).WithReason("not released: the turn was stopped by the answer to call_c (bash)"),
 		stop,
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("released after a stop = %s\nwant %s", dump(got), dump(want))
 	}
-	if r := reasons(j); r != "call_a not released: the turn was stopped|call_b not released: the turn was stopped" {
+	if r := reasons(j); r != "call_a not released: the turn was stopped by the answer to call_c (bash)|call_b not released: the turn was stopped by the answer to call_c (bash)" {
 		t.Errorf("verdicts = %q", r)
 	}
 	for _, v := range j.all() {
@@ -218,15 +227,16 @@ func TestRelease(t *testing.T) {
 	e, j, end = setup(t)
 	own := agentturn.Output(openresponses.NewFunctionCallOutput("call_a", "I ran it myself"))
 	stray := agentturn.Approve("call_z")
-	if got := released(ctx, t, e, end, stray, agentturn.Approve("call_c"), own); !reflect.DeepEqual(got, []agentturn.Answer{own, agentturn.Approve("call_b").WithBy(ByPolicy), agentturn.Approve("call_c"), stray}) {
+	if got := released(ctx, t, e, end, stray, agentturn.Approve("call_c"), own); !reflect.DeepEqual(got, []agentturn.Answer{own, releaseB, agentturn.Approve("call_c"), stray}) {
 		t.Errorf("own answer kept = %s", dump(got))
 	}
 	if len(j.all()) != 1 {
 		t.Errorf("verdicts = %+v", j.all())
 	}
 
-	// The calls it answered are forgotten, so a second release of the
-	// same end has nothing to answer them with and says which calls.
+	// Once the resumed run started, the calls it answered are
+	// forgotten, so a second release of the same end has nothing to
+	// answer them with and says which calls.
 	got, err := e.Release(ctx, end, agentturn.Approve("call_c"))
 	if !errors.Is(err, ErrUnanswered) || err.Error() != "agentpolicy: pending call has no answer: call_a (bash), call_b (bash)" {
 		t.Errorf("second release: err = %v", err)
@@ -243,7 +253,7 @@ func TestRelease(t *testing.T) {
 	if !errors.Is(err, ErrUnanswered) || err.Error() != "agentpolicy: pending call has no answer: call_c (bash)" {
 		t.Errorf("release with no answers: err = %v", err)
 	}
-	if !reflect.DeepEqual(preview, []agentturn.Answer{agentturn.Approve("call_a").WithBy(ByPolicy), agentturn.Approve("call_b").WithBy(ByPolicy)}) {
+	if !reflect.DeepEqual(preview, []agentturn.Answer{releaseA, releaseB}) {
 		t.Errorf("preview = %s", dump(preview))
 	}
 	if len(j.all()) != 0 {
@@ -330,6 +340,7 @@ func TestEngineServesSeveralRuns(t *testing.T) {
 	if err != nil || len(answers) != 3 {
 		t.Fatalf("Release built %d answers for 3 pending calls: %v", len(answers), err)
 	}
+	e.Resumed(ctx, end, answers, ranAll)
 
 	// A reviewer sees the asked call alone, not the held ones.
 	e2, err := Build(Policy{Allow: rules(t, "bash(git add:*)"), Ask: rules(t, "bash(git push:*)"), Default: Ask()}, testMatchers)
@@ -586,7 +597,9 @@ func TestHooksAreInsideTheHold(t *testing.T) {
 	end := pendingEnd("r", infos[0].Call, infos[1].Call)
 	no := agentturn.Output(openresponses.NewFunctionCallOutput("call_b", "no"))
 	wantAnswers := []agentturn.Answer{
-		agentturn.ApproveWith("call_a", json.RawMessage(`{"command":"git status --short"}`)).WithNote("short form").WithBy(ByPolicy),
+		// The hook's note is the held decision's, which the loop says on
+		// release; the answer does not repeat it.
+		agentturn.ApproveWith("call_a", json.RawMessage(`{"command":"git status --short"}`)).WithBy(ByPolicy).WithReason("released: allowed by bash(git:*)"),
 		no,
 	}
 	if got := released(ctx, t, e, end, no); !reflect.DeepEqual(got, wantAnswers) {
@@ -672,9 +685,7 @@ func TestDecideRemembersNoDeferralForANestedCall(t *testing.T) {
 	// The run ends with the model's call pending alone, and the
 	// release forgets the run: nothing the nested call left behind.
 	end := &agentturn.RunEnd{RunID: "run_main", Reason: agentturn.ReasonInputRequired, Pending: []agentturn.PendingCall{{Call: model.Call, Reason: agentturn.PendingDeferred}}}
-	if _, err := e.Release(ctx, end, agentturn.Approve("call_model")); err != nil {
-		t.Fatal(err)
-	}
+	released(ctx, t, e, end, agentturn.Approve("call_model"))
 	if runs := e.Runs(); len(runs) != 0 {
 		t.Errorf("runs after the release = %v", runs)
 	}
@@ -807,5 +818,74 @@ func TestADeniedSiblingDoesNotHold(t *testing.T) {
 	}
 	if splits != 1 {
 		t.Errorf("the denied sibling was split %d times, want 1", splits)
+	}
+}
+
+// An engine that never saw the run, one built after a restart,
+// releases from the decisions the run's end carries: Held and the
+// reason on agentturn.PendingCall.Decision, which agentturn/session
+// reads back from the record. It releases the held calls, asks its
+// reviewer about the asked one alone, and reports the releases when
+// the resumed run starts (agentkit#91, agentkit#92).
+func TestReleaseFromTheDecision(t *testing.T) {
+	ctx := context.Background()
+	policy := Policy{Allow: rules(t, "bash(git add:*) bash(git commit:*)"), Ask: rules(t, "bash(git push:*)"), Default: Deny()}
+	before, err := Build(policy, testMatchers)
+	if err != nil {
+		t.Fatal(err)
+	}
+	end := &agentturn.RunEnd{RunID: "run_1", Reason: agentturn.ReasonInputRequired}
+	for _, info := range batch("run_1", "git add -A", "git commit -m wip", "git push") {
+		d, err := before.Decide(ctx, info)
+		if err != nil || d.Action != agentturn.Defer {
+			t.Fatalf("%s: %+v, %v", info.Call.CallID, d, err)
+		}
+		end.Pending = append(end.Pending, agentturn.PendingCall{Call: info.Call, Reason: agentturn.PendingDeferred, Decision: d})
+	}
+
+	j := &journal{}
+	after, err := Build(policy, testMatchers, WithObserver(j.observe))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Every held call is answered; nothing is missed.
+	got, err := after.Release(ctx, end, agentturn.Approve("call_c"))
+	want := []agentturn.Answer{
+		agentturn.Approve("call_a").WithBy(ByPolicy).WithReason("released: allowed by bash(git add:*)"),
+		agentturn.Approve("call_b").WithBy(ByPolicy).WithReason("released: allowed by bash(git commit:*)"),
+		agentturn.Approve("call_c"),
+	}
+	if err != nil || !reflect.DeepEqual(got, want) {
+		t.Fatalf("release = %s, %v\nwant %s", dump(got), err, dump(want))
+	}
+	// Nothing is answered for the asked call by the engine.
+	if _, err := after.Release(ctx, end); !errors.Is(err, ErrUnanswered) || err.Error() != "agentpolicy: pending call has no answer: call_c (bash)" {
+		t.Errorf("release with no answer: %v", err)
+	}
+	if len(j.all()) != 0 {
+		t.Errorf("Release reported %+v", j.all())
+	}
+	after.Resumed(ctx, end, got, ranAll)
+	var reasons []string
+	for _, v := range j.all() {
+		if !v.Held || v.Action != agentturn.Allow || v.RunID != "run_1" || v.By != ByPolicy {
+			t.Errorf("release verdict = %+v", v)
+		}
+		reasons = append(reasons, v.CallID+" "+v.Reason)
+	}
+	if r := strings.Join(reasons, "|"); r != "call_a released: allowed by bash(git add:*)|call_b released: allowed by bash(git commit:*)" {
+		t.Errorf("verdicts = %q", r)
+	}
+
+	// A reviewer is asked about the call the policy asked about, not
+	// the ones it held beside it.
+	var reviewed []string
+	answers, err := after.Answers(ctx, ReviewerFunc(func(_ context.Context, info agentturn.ToolCallInfo, v Verdict) (Review, error) {
+		reviewed = append(reviewed, info.Call.CallID+": "+v.Reason)
+		return Review{Outcome: Approved}, nil
+	}), end)
+	if err != nil || len(answers) != 3 || strings.Join(reviewed, "|") != "call_c: approval required by bash(git push:*)" {
+		t.Errorf("answers = %s, %v, reviewed %v", dump(answers), err, reviewed)
 	}
 }

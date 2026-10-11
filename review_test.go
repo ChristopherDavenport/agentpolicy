@@ -14,6 +14,17 @@ import (
 	"github.com/ChristopherDavenport/openresponses"
 )
 
+// answersResumed is [Engine.Answers] as a front that resumes with the
+// answers sees it: the answers and the error, and the verdicts reported
+// as [Engine.Resumed] reports them once the resumed run took every call.
+func answersResumed(ctx context.Context, e *Engine, r Reviewer, end *agentturn.RunEnd) ([]agentturn.Answer, error) {
+	answers, err := e.Answers(ctx, r, end)
+	if answers != nil && !errors.Is(err, ErrUnanswered) {
+		e.Resumed(ctx, end, answers, ranAll)
+	}
+	return answers, err
+}
+
 // pendingEnd builds the RunEnd of a run that deferred the given calls.
 func pendingEnd(runID string, calls ...*openresponses.FunctionCall) *agentturn.RunEnd {
 	end := &agentturn.RunEnd{RunID: runID, Reason: agentturn.ReasonInputRequired}
@@ -64,7 +75,7 @@ func TestAnswers(t *testing.T) {
 			t.Fatalf("%s: %+v", id, d)
 		}
 	}
-	answers, err := e.Answers(ctx, reviewer, pendingEnd("run_1", calls...))
+	answers, err := answersResumed(ctx, e, reviewer, pendingEnd("run_1", calls...))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -128,7 +139,7 @@ func TestAnswers(t *testing.T) {
 		t.Fatal(err)
 	}
 	before := len(j.all())
-	if _, err := e.Answers(ctx, human, pendingEnd("run_2", c)); err != nil {
+	if _, err := answersResumed(ctx, e, human, pendingEnd("run_2", c)); err != nil {
 		t.Fatal(err)
 	}
 	if v := j.all()[before]; v.By != ByHuman || v.Action != agentturn.Allow {
@@ -169,7 +180,7 @@ func TestAnswersRecallsTheCallsOfItsOwnRun(t *testing.T) {
 	if _, err := e.Decide(ctx, other); err != nil {
 		t.Fatal(err)
 	}
-	answers, err := e.Answers(ctx, reviewer, pendingEnd("run_1", c))
+	answers, err := answersResumed(ctx, e, reviewer, pendingEnd("run_1", c))
 	if err != nil || len(answers) != 1 || answers[0].CallID != "c1" {
 		t.Fatalf("answers = %+v, %v", answers, err)
 	}
@@ -182,7 +193,7 @@ func TestAnswersRecallsTheCallsOfItsOwnRun(t *testing.T) {
 	seen = nil
 	deferOne()
 	e.Forget("run_1")
-	if _, err := e.Answers(ctx, reviewer, pendingEnd("run_1", c)); err != nil {
+	if _, err := answersResumed(ctx, e, reviewer, pendingEnd("run_1", c)); err != nil {
 		t.Fatal(err)
 	}
 	if want := (Verdict{RunID: "run_1", CallID: "c1", Tool: "bash", Action: agentturn.Defer, By: ByPolicy}); len(seen) != 1 || !reflect.DeepEqual(seen[0], want) {
@@ -197,7 +208,7 @@ func TestAnswersRecallsTheCallsOfItsOwnRun(t *testing.T) {
 		args = info.Args
 		return Review{Outcome: Approved}, nil
 	})
-	if _, err := e.Answers(ctx, reviewer, pendingEnd("run_9", c2)); err != nil || string(args) != "{}" {
+	if _, err := answersResumed(ctx, e, reviewer, pendingEnd("run_9", c2)); err != nil || string(args) != "{}" {
 		t.Errorf("args = %s, %v", args, err)
 	}
 }
@@ -246,7 +257,7 @@ func TestAnswersReviewsAHooksRewrite(t *testing.T) {
 			end := &agentturn.RunEnd{RunID: "r", Reason: agentturn.ReasonInputRequired, Pending: []agentturn.PendingCall{
 				{Call: c, Reason: agentturn.PendingDeferred, Args: tc.pending},
 			}}
-			answers, err := e.Answers(ctx, reviewer, end)
+			answers, err := answersResumed(ctx, e, reviewer, end)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -270,15 +281,15 @@ func TestAnswersEdgeCases(t *testing.T) {
 		return Review{Outcome: Approved}, nil
 	})
 	// Nothing pending, nothing to answer.
-	if answers, err := e.Answers(ctx, approve, nil); answers != nil || err != nil {
+	if answers, err := answersResumed(ctx, e, approve, nil); answers != nil || err != nil {
 		t.Errorf("nil end: %v, %v", answers, err)
 	}
-	if answers, err := e.Answers(ctx, approve, &agentturn.RunEnd{Reason: agentturn.ReasonDone}); answers != nil || err != nil {
+	if answers, err := answersResumed(ctx, e, approve, &agentturn.RunEnd{Reason: agentturn.ReasonDone}); answers != nil || err != nil {
 		t.Errorf("nothing pending: %v, %v", answers, err)
 	}
 	c := &openresponses.FunctionCall{CallID: "c", Name: "bash", Arguments: `{}`}
 	// No reviewer is a misuse.
-	if _, err := e.Answers(ctx, nil, pendingEnd("r", c)); err == nil || err.Error() != "agentpolicy: no reviewer" {
+	if _, err := answersResumed(ctx, e, nil, pendingEnd("r", c)); err == nil || err.Error() != "agentpolicy: no reviewer" {
 		t.Errorf("nil reviewer: %v", err)
 	}
 	// A cancelled context returns its error, not answers: the front is
@@ -308,11 +319,11 @@ func TestAnswersDenialBound(t *testing.T) {
 		t.Fatal(err)
 	}
 	for i := 1; i <= 2; i++ {
-		if _, err := e.Answers(ctx, refuse, pendingEnd("r", c)); err != nil {
+		if _, err := answersResumed(ctx, e, refuse, pendingEnd("r", c)); err != nil {
 			t.Fatalf("refusal %d: %v", i, err)
 		}
 	}
-	answers, err := e.Answers(ctx, timeout, pendingEnd("r", c))
+	answers, err := answersResumed(ctx, e, timeout, pendingEnd("r", c))
 	if !errors.Is(err, ErrDenialBound) || len(answers) != 1 {
 		t.Errorf("third refusal: %v, %v", answers, err)
 	}
@@ -323,7 +334,7 @@ func TestAnswersDenialBound(t *testing.T) {
 		t.Errorf("bounded answer = %+v", answers[0])
 	}
 	if plain, _ := Build(Policy{Default: Ask()}, nil); plain != nil {
-		answers, _ := plain.Answers(ctx, refuse, pendingEnd("r", c))
+		answers, _ := answersResumed(ctx, plain, refuse, pendingEnd("r", c))
 		if answers[0].Terminate {
 			t.Errorf("unbounded answer = %+v", answers[0])
 		}
@@ -331,7 +342,7 @@ func TestAnswersDenialBound(t *testing.T) {
 	// An approval resets the run of refusals.
 	e.ResetReviews()
 	for _, r := range []Reviewer{refuse, refuse, approve, refuse, refuse} {
-		if _, err := e.Answers(ctx, r, pendingEnd("r", c)); err != nil {
+		if _, err := answersResumed(ctx, e, r, pendingEnd("r", c)); err != nil {
 			t.Fatalf("interleaved: %v", err)
 		}
 	}
@@ -342,7 +353,7 @@ func TestAnswersDenialBound(t *testing.T) {
 		t.Fatal(err)
 	}
 	for i, r := range []Reviewer{refuse, refuse, approve, refuse} {
-		_, err := e.Answers(ctx, r, pendingEnd("r", c))
+		_, err := answersResumed(ctx, e, r, pendingEnd("r", c))
 		if i < 3 && err != nil {
 			t.Fatalf("review %d: %v", i, err)
 		}
@@ -353,7 +364,7 @@ func TestAnswersDenialBound(t *testing.T) {
 	// The window slides: an old refusal falls out.
 	e.ResetReviews()
 	for i, r := range []Reviewer{refuse, refuse, approve, approve, approve, refuse} {
-		if _, err := e.Answers(ctx, r, pendingEnd("r", c)); err != nil {
+		if _, err := answersResumed(ctx, e, r, pendingEnd("r", c)); err != nil {
 			t.Errorf("sliding review %d: %v", i, err)
 		}
 	}
@@ -363,12 +374,12 @@ func TestAnswersDenialBound(t *testing.T) {
 		t.Fatal(err)
 	}
 	for i := 0; i < 2; i++ {
-		if _, err := e.Answers(ctx, refuse, pendingEnd("r", c)); err != nil {
+		if _, err := answersResumed(ctx, e, refuse, pendingEnd("r", c)); err != nil {
 			t.Fatal(err)
 		}
 	}
 	e.ResetReviews()
-	if _, err := e.Answers(ctx, refuse, pendingEnd("r", c)); err != nil {
+	if _, err := answersResumed(ctx, e, refuse, pendingEnd("r", c)); err != nil {
 		t.Errorf("after reset: %v", err)
 	}
 	// A zero bound never trips.
@@ -377,7 +388,7 @@ func TestAnswersDenialBound(t *testing.T) {
 		t.Fatal(err)
 	}
 	for i := 0; i < 100; i++ {
-		if _, err := e.Answers(ctx, refuse, pendingEnd("r", c)); err != nil {
+		if _, err := answersResumed(ctx, e, refuse, pendingEnd("r", c)); err != nil {
 			t.Fatalf("unbounded: %v", err)
 		}
 	}
@@ -415,7 +426,7 @@ func TestAnswersCutOffCalls(t *testing.T) {
 		{Call: fc("unknown"), Reason: agentturn.PendingUnknown},
 		{Call: nil},
 	}}
-	answers, err := e.Answers(ctx, approve, end)
+	answers, err := answersResumed(ctx, e, approve, end)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -434,13 +445,39 @@ func TestAnswersCutOffCalls(t *testing.T) {
 	if got := strings.Join(reasons, "|"); got != "aborted not reviewed: aborted|deferred approved by reviewer|unknown not reviewed: unknown" {
 		t.Errorf("verdicts = %q", got)
 	}
+	// A call a person was being asked under when the run was cut says
+	// so after its reason, as agentturn/session's ReplayAnswers does.
+	j.verdicts = nil
+	asking := &agentturn.RunEnd{RunID: "r", Reason: agentturn.ReasonAborted, Pending: []agentturn.PendingCall{
+		{Call: fc("own"), Reason: agentturn.PendingAborted, Question: &agentturn.OpenQuestion{Message: "Overwrite go.mod?"}},
+		{Call: fc("nested"), Reason: agentturn.PendingAborted, Question: &agentturn.OpenQuestion{Message: "Allow rm?", Call: &agentturn.AskedCall{Parent: "nested", CallID: "call_rm", Name: "bash"}}},
+	}}
+	answers, err = answersResumed(ctx, e, approve, asking)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantReasons := []string{
+		`not reviewed: aborted; a question was open: "Overwrite go.mod?"`,
+		`not reviewed: aborted; a question was open: "Allow rm?" about call call_rm (bash)`,
+	}
+	for i, a := range answers {
+		if a.Reason != wantReasons[i] {
+			t.Errorf("answer %d reason = %q, want %q", i, a.Reason, wantReasons[i])
+		}
+	}
+	for i, v := range j.all() {
+		if v.Reason != wantReasons[i] {
+			t.Errorf("verdict %d reason = %q, want %q", i, v.Reason, wantReasons[i])
+		}
+	}
+
 	// A cut-off call does not count toward the denial bound.
 	e, err = Build(Policy{Default: Ask()}, nil, WithDenialBound(DenialBound{Consecutive: 1}))
 	if err != nil {
 		t.Fatal(err)
 	}
 	cut := &agentturn.RunEnd{RunID: "r", Reason: agentturn.ReasonAborted, Pending: []agentturn.PendingCall{{Call: fc("aborted"), Reason: agentturn.PendingAborted}}}
-	if answers, err := e.Answers(ctx, approve, cut); err != nil || answers[0].Terminate {
+	if answers, err := answersResumed(ctx, e, approve, cut); err != nil || answers[0].Terminate {
 		t.Errorf("cut off counted: %s, %v", dump(answers), err)
 	}
 }
@@ -469,16 +506,16 @@ func TestAnswersReleasesHeldCalls(t *testing.T) {
 	}
 	// The reviewer sees only the asked call; the held one is released
 	// with its approval.
-	answers, err := e.Answers(ctx, reviewer(Approved), hold())
-	if err != nil || !reflect.DeepEqual(answers, []agentturn.Answer{agentturn.Approve("call_a").WithBy(ByPolicy), agentturn.Approve("call_b").WithBy(ByAgent)}) || strings.Join(reviewedIDs, ",") != "call_b" {
+	answers, err := answersResumed(ctx, e, reviewer(Approved), hold())
+	if err != nil || !reflect.DeepEqual(answers, []agentturn.Answer{agentturn.Approve("call_a").WithBy(ByPolicy).WithReason("released: allowed by bash(git add:*)"), agentturn.Approve("call_b").WithBy(ByAgent)}) || strings.Join(reviewedIDs, ",") != "call_b" {
 		t.Errorf("approved: %s, %v, reviewed %v", dump(answers), err, reviewedIDs)
 	}
 	// A refusal at the bound ends the run, so the held call is refused
 	// with it.
 	reviewedIDs = nil
-	answers, err = e.Answers(ctx, reviewer(Refused), hold())
+	answers, err = answersResumed(ctx, e, reviewer(Refused), hold())
 	want := []agentturn.Answer{
-		agentturn.Output(openresponses.NewFunctionCallOutput("call_a", "The call was held for an approval and the turn was stopped; the call did not run.")).WithBy(ByPolicy).WithReason("not released: the turn was stopped"),
+		agentturn.Output(openresponses.NewFunctionCallOutput("call_a", "The call was held for an approval and the turn was stopped; the call did not run.")).WithBy(ByPolicy).WithReason("not released: the turn was stopped at the reviewer denial bound"),
 		agentturn.Refuse(openresponses.NewFunctionCallOutput("call_b", "Denied by reviewer. Do not pursue the same outcome through a workaround, indirect execution or policy circumvention.")).WithBy(ByAgent).WithReason("denied by reviewer"),
 	}
 	if !errors.Is(err, ErrDenialBound) || !reflect.DeepEqual(answers, want) || strings.Join(reviewedIDs, ",") != "call_b" {
@@ -573,7 +610,7 @@ func TestAnswersCutOffCallsReadTheirTools(t *testing.T) {
 		t.Error("a cut-off call reached the reviewer")
 		return Review{}, nil
 	})
-	answers, err := e.Answers(ctx, reviewer, end)
+	answers, err := answersResumed(ctx, e, reviewer, end)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -652,7 +689,7 @@ func TestAnswersCutOffCallsReadTheirTools(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	answers, err = e.Answers(ctx, reviewer, end)
+	answers, err = answersResumed(ctx, e, reviewer, end)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -711,7 +748,7 @@ func TestAnswersDecidesAReplayUnderThePolicy(t *testing.T) {
 		reviewed = append(reviewed, fmt.Sprintf("%s %v %s", info.Call.CallID, v.Action, v.Reason))
 		return Review{Outcome: Approved, By: ByHuman}, nil
 	})
-	answers, err := e.Answers(ctx, reviewer, end)
+	answers, err := answersResumed(ctx, e, reviewer, end)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -783,7 +820,7 @@ func TestAnswersCutOffDecidesTheArgumentsThatRun(t *testing.T) {
 		reviewed = append(reviewed, fmt.Sprintf("%s %s %s", info.Call.CallID, info.Args, v.Reason))
 		return Review{Outcome: Approved}, nil
 	})
-	answers, err := e.Answers(ctx, reviewer, end)
+	answers, err := answersResumed(ctx, e, reviewer, end)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -822,7 +859,7 @@ func TestAnswersReviewsDispatchedHoldThatMayRunAgain(t *testing.T) {
 		reviewed = append(reviewed, info.Call.CallID)
 		return Review{Outcome: Approved}, nil
 	})
-	answers, err := e.Answers(ctx, reviewer, end)
+	answers, err := answersResumed(ctx, e, reviewer, end)
 	if err != nil || !reflect.DeepEqual(answers, []agentturn.Answer{agentturn.Approve("held").WithBy(ByAgent)}) || strings.Join(reviewed, ",") != "held" {
 		t.Errorf("answers = %s, %v, reviewed %v", dump(answers), err, reviewed)
 	}
@@ -850,7 +887,7 @@ func TestAnswersRefusalNamesWhoAnswered(t *testing.T) {
 			return Review{Outcome: Refused, Reason: "no pushes on Fridays", By: tt.by}, nil
 		})
 		c := &openresponses.FunctionCall{CallID: "call_1", Name: "bash", Arguments: `{}`}
-		answers, err := e.Answers(ctx, reviewer, pendingEnd("r", c))
+		answers, err := answersResumed(ctx, e, reviewer, pendingEnd("r", c))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -976,7 +1013,7 @@ func TestAnswersRefusesAReviewersRewriteOfACallThatMayHaveRun(t *testing.T) {
 				return Review{Outcome: Approved, Args: tc.args}, nil
 			})
 			end := &agentturn.RunEnd{RunID: "r", Reason: agentturn.ReasonAborted, Pending: []agentturn.PendingCall{tc.pending}}
-			answers, err := e.Answers(ctx, reviewer, end)
+			answers, err := answersResumed(ctx, e, reviewer, end)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -1000,7 +1037,7 @@ func TestAnswersRefusesAReviewersRewriteOfACallThatMayHaveRun(t *testing.T) {
 			}
 			// A refusal the engine makes on its own does not count: a
 			// second review still reaches the reviewer unbounded.
-			if _, err := e.Answers(ctx, reviewer, end); errors.Is(err, ErrDenialBound) {
+			if _, err := answersResumed(ctx, e, reviewer, end); errors.Is(err, ErrDenialBound) {
 				t.Errorf("the refusal counted toward the bound")
 			}
 		})
@@ -1070,7 +1107,7 @@ func TestAnswersCutOffNonApprovalsSayTheCallMayHaveRun(t *testing.T) {
 					return tc.rev, tc.err
 				})
 				end := &agentturn.RunEnd{RunID: "r", Reason: agentturn.ReasonAborted, Pending: []agentturn.PendingCall{shape.pending}}
-				answers, err := e.Answers(ctx, reviewer, end)
+				answers, err := answersResumed(ctx, e, reviewer, end)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -1115,7 +1152,7 @@ func TestAnswersARejectedCallInTheRecordsWords(t *testing.T) {
 		t.Error("a rejected call reached the reviewer")
 		return Review{}, nil
 	})
-	answers, err := e.Answers(ctx, reviewer, end)
+	answers, err := answersResumed(ctx, e, reviewer, end)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1152,5 +1189,231 @@ func TestAnswersARejectedCallInTheRecordsWords(t *testing.T) {
 		if a.Terminate {
 			t.Errorf("%s counted toward the bound", a.CallID)
 		}
+	}
+}
+
+// Answers for an end whose Resume did not start gives the same answers
+// again without asking the reviewer again, and reports and counts
+// nothing until Resumed settles the calls: a retry is reviewed,
+// reported and counted toward the bound once.
+func TestAnswersAgainAfterAResumeThatDidNotStart(t *testing.T) {
+	ctx := context.Background()
+	j := &journal{}
+	e, err := Build(Policy{Default: Ask()}, testMatchers, WithObserver(j.observe), WithDenialBound(DenialBound{Consecutive: 2}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	asked := 0
+	refuse := ReviewerFunc(func(context.Context, agentturn.ToolCallInfo, Verdict) (Review, error) {
+		asked++
+		return Review{Outcome: Refused, Reason: "not now"}, nil
+	})
+	end := pendingEnd("run_1", &openresponses.FunctionCall{CallID: "c1", Name: "bash", Arguments: `{"command":"make deploy"}`})
+	first, err := e.Answers(ctx, refuse, end)
+	if err != nil {
+		t.Fatal(err)
+	}
+	again, err := e.Answers(ctx, refuse, end)
+	if err != nil || !reflect.DeepEqual(again, first) {
+		t.Fatalf("answers again = %s, %v; first %s", dump(again), err, dump(first))
+	}
+	if asked != 1 || len(j.all()) != 0 {
+		t.Fatalf("reviewed %d times, reported %+v", asked, j.all())
+	}
+	if again[0].Terminate {
+		t.Errorf("one refusal, counted twice, reached a bound of two")
+	}
+	// A run that failed as it started leaves the call pending: nothing
+	// is settled.
+	e.Resumed(ctx, end, again, end)
+	if len(j.all()) != 0 {
+		t.Fatalf("a call still pending reported %+v", j.all())
+	}
+	e.Resumed(ctx, end, again, ranAll)
+	if len(j.all()) != 1 || j.all()[0].Reason != "denied by reviewer: not now" {
+		t.Errorf("verdicts once settled = %+v", j.all())
+	}
+	// The one refusal counts once: the next refusal reaches the bound.
+	next, err := e.Answers(ctx, refuse, pendingEnd("run_2", &openresponses.FunctionCall{CallID: "c2", Name: "bash", Arguments: `{}`}))
+	if !errors.Is(err, ErrDenialBound) || !next[0].Terminate {
+		t.Errorf("the second refusal: %s, %v", dump(next), err)
+	}
+}
+
+// Resumed reports a release with the reason the answer carries and,
+// after a restart, the subject and decider the recorded decision has.
+func TestResumedReportsWhatTheAnswerAndDecisionSay(t *testing.T) {
+	ctx := context.Background()
+	j := &journal{}
+	e, err := Build(Policy{Default: Ask()}, testMatchers, WithObserver(j.observe))
+	if err != nil {
+		t.Fatal(err)
+	}
+	end := pendingEnd("run_1", &openresponses.FunctionCall{CallID: "held", Name: "bash", Arguments: `{}`})
+	end.Pending[0].Decision = &agentturn.ToolDecision{Action: agentturn.Defer, Held: true, By: ByPolicy, Reason: "held for approval: allowed by bash(git:*)", Subject: "git add -A"}
+	answers := []agentturn.Answer{agentturn.Approve("held").WithBy(ByPolicy).WithReason("released: the front's own words")}
+	e.Resumed(ctx, end, answers, ranAll)
+	got := j.all()
+	if len(got) != 1 || got[0].Reason != "released: the front's own words" || got[0].Subject != "git add -A" || !got[0].Held || got[0].Action != agentturn.Allow {
+		t.Errorf("release verdict = %+v", got)
+	}
+}
+
+// A cut-off call a person was being asked under says so wherever it is
+// decided: on the verdict the reviewer is shown, on the reviewer's
+// answer, and on the engine's approval to run it again.
+func TestACutOffCallNamesItsOpenQuestion(t *testing.T) {
+	ctx := context.Background()
+	run := func(context.Context, agenttool.NoArgs) (string, error) { return "", nil }
+	safe := agenttool.New("read", "A tool", run, agenttool.WithReplay(func(context.Context, json.RawMessage) agenttool.Replay { return agenttool.ReplaySafe }))
+	q := &agentturn.OpenQuestion{Message: "Read the secrets?"}
+	const open = `; a question was open: "Read the secrets?"`
+
+	// The policy asks: the reviewer is shown the question.
+	e, err := Build(Policy{Default: Ask()}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var shown string
+	refuse := ReviewerFunc(func(_ context.Context, _ agentturn.ToolCallInfo, v Verdict) (Review, error) {
+		shown = v.Reason
+		return Review{Outcome: Refused, Reason: "no"}, nil
+	})
+	end := &agentturn.RunEnd{RunID: "r", Reason: agentturn.ReasonAborted, Pending: []agentturn.PendingCall{{Call: &openresponses.FunctionCall{CallID: "c", Name: "read", Arguments: `{}`}, Reason: agentturn.PendingAborted, Tool: safe, Question: q}}}
+	answers, err := answersResumed(ctx, e, refuse, end)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasSuffix(shown, open) {
+		t.Errorf("the reviewer was shown %q", shown)
+	}
+	if !strings.HasSuffix(answers[0].Reason, open) {
+		t.Errorf("the reviewer's refusal = %q", answers[0].Reason)
+	}
+
+	// The policy allows: the approval to run it again says so too.
+	e, err = Build(Policy{Default: Allow()}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	answers, err = answersResumed(ctx, e, refuse, end)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if answers[0].Output != nil || !strings.HasSuffix(answers[0].Reason, open) {
+		t.Errorf("the run-again approval = %+v", answers[0])
+	}
+}
+
+// A kept verdict is reported only for the answer Answers gave: a front
+// that resumes the call with an answer of its own reports nothing for
+// it and counts nothing toward the bound. ForgetAnswers drops what was
+// kept, so another reviewer is asked; and a kept answer made under
+// rules that changed since is decided again.
+func TestKeptAnswersBelongToTheirAnswer(t *testing.T) {
+	ctx := context.Background()
+	j := &journal{}
+	e, err := Build(Policy{Default: Ask()}, testMatchers, WithObserver(j.observe), WithDenialBound(DenialBound{Consecutive: 1}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	asked := 0
+	refuse := ReviewerFunc(func(context.Context, agentturn.ToolCallInfo, Verdict) (Review, error) {
+		asked++
+		return Review{Outcome: Refused, Reason: "no"}, nil
+	})
+	approve := ReviewerFunc(func(context.Context, agentturn.ToolCallInfo, Verdict) (Review, error) {
+		asked++
+		return Review{Outcome: Approved, By: ByHuman}, nil
+	})
+	end := pendingEnd("run_1", &openresponses.FunctionCall{CallID: "c1", Name: "bash", Arguments: `{"command":"make deploy"}`})
+
+	// The front resumes with its own answer: nothing is reported or
+	// counted.
+	if _, err := e.Answers(ctx, refuse, end); !errors.Is(err, ErrDenialBound) {
+		t.Fatalf("the refusal: %v", err)
+	}
+	e.Resumed(ctx, end, []agentturn.Answer{agentturn.Approve("c1").WithBy(ByHuman)}, ranAll)
+	if len(j.all()) != 0 {
+		t.Errorf("a front's own answer reported %+v", j.all())
+	}
+	if again, err := e.Answers(ctx, refuse, pendingEnd("run_2", &openresponses.FunctionCall{CallID: "c2", Name: "bash", Arguments: `{}`})); !errors.Is(err, ErrDenialBound) || again == nil {
+		t.Fatalf("the next refusal: %v", err)
+	}
+	e.Forget("run_2")
+
+	// Escalating: ForgetAnswers drops the kept answer, and the next
+	// reviewer is asked.
+	asked = 0
+	end = pendingEnd("run_3", &openresponses.FunctionCall{CallID: "c3", Name: "bash", Arguments: `{}`})
+	e.Answers(ctx, refuse, end)
+	e.ForgetAnswers("run_3")
+	answers, err := e.Answers(ctx, approve, end)
+	if err != nil || asked != 2 || answers[0].Output != nil {
+		t.Errorf("escalated: %s, %v, asked %d", dump(answers), err, asked)
+	}
+
+	// A grant since the answer was kept: the call is decided again.
+	asked = 0
+	end = pendingEnd("run_4", &openresponses.FunctionCall{CallID: "c4", Name: "bash", Arguments: `{}`})
+	e.Answers(ctx, refuse, end)
+	if err := e.Grant(ctx, rules(t, "bash(git status:*)")[0]); err != nil {
+		t.Fatal(err)
+	}
+	e.Answers(ctx, refuse, end)
+	if asked != 2 {
+		t.Errorf("after a grant the reviewer was asked %d times in all", asked)
+	}
+}
+
+// When the denial bound stops the turn, the held calls say so, not
+// that some call's answer stopped it.
+func TestTheBoundStopsTheHeldCalls(t *testing.T) {
+	ctx := context.Background()
+	e, err := Build(Policy{Allow: rules(t, "bash(git add:*)"), Ask: rules(t, "bash(git push:*)"), Default: Deny()}, testMatchers, WithDenialBound(DenialBound{Consecutive: 1}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	end := &agentturn.RunEnd{RunID: "run_1", Reason: agentturn.ReasonInputRequired}
+	for _, info := range batch("run_1", "git add -A", "git push") {
+		e.Decide(ctx, info)
+		end.Pending = append(end.Pending, agentturn.PendingCall{Call: info.Call, Reason: agentturn.PendingDeferred})
+	}
+	answers, err := e.Answers(ctx, ReviewerFunc(func(context.Context, agentturn.ToolCallInfo, Verdict) (Review, error) {
+		return Review{Outcome: Refused}, nil
+	}), end)
+	if !errors.Is(err, ErrDenialBound) || answers[0].Reason != "not released: the turn was stopped at the reviewer denial bound" {
+		t.Errorf("the held add = %+v, %v", answers[0], err)
+	}
+}
+
+// A front that answers the end each Resume returns does not have the
+// reviewer asked again under the new run.
+func TestAnswersFollowTheCallsToTheNextRun(t *testing.T) {
+	ctx := context.Background()
+	e, err := Build(Policy{Default: Ask()}, testMatchers)
+	if err != nil {
+		t.Fatal(err)
+	}
+	asked := 0
+	approve := ReviewerFunc(func(context.Context, agentturn.ToolCallInfo, Verdict) (Review, error) {
+		asked++
+		return Review{Outcome: Approved}, nil
+	})
+	call := &openresponses.FunctionCall{CallID: "c1", Name: "bash", Arguments: `{}`}
+	end := pendingEnd("run_1", call)
+	first, _ := e.Answers(ctx, approve, end)
+	// The resume failed as it started: run_2 still lists the call.
+	next := pendingEnd("run_2", call)
+	e.Resumed(ctx, end, first, next)
+	again, _ := e.Answers(ctx, approve, next)
+	if asked != 1 || !reflect.DeepEqual(again, first) {
+		t.Errorf("asked %d; answers %s, first %s", asked, dump(again), dump(first))
+	}
+	e.mu.Lock()
+	_, left := e.answering["run_1"]
+	e.mu.Unlock()
+	if left {
+		t.Error("run_1's answers were left behind")
 	}
 }

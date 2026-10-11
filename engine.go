@@ -266,6 +266,8 @@ type Engine struct {
 	// at Build and never written after.
 	hooks        []func(context.Context, agentturn.ToolCallInfo) (*agentturn.ToolDecision, error)
 	neverStarted func(context.Context, string, string) bool
+	// askInRun is [WithAskInRun], set at Build and never written after.
+	askInRun bool
 
 	mu     sync.Mutex
 	policy Policy
@@ -289,17 +291,25 @@ type Engine struct {
 	// run that ended another way left behind.
 	deferred map[string]map[string]deferredCall
 	reviews  reviewLog
+	// answering is what [Engine.Answers] decided about each pending call
+	// of a run, by run and then by call, until [Engine.Resumed] reports
+	// it or [Engine.Forget] drops the run.
+	answering map[string]map[string]answeredCall
+	// asked is what [WithAskInRun] asked about each batch in flight,
+	// by batch key, until the batch's last call is decided.
+	asked map[string]*askBatch
 }
 
 type deferredCall struct {
 	info    agentturn.ToolCallInfo
 	verdict Verdict
 	// allowed is the reason the policy allowed a held call, for the
-	// verdict that releases it; args and note are what the hooks
-	// rewrote its arguments to and told the model, for its release.
+	// verdict that releases it; args are what the hooks rewrote its
+	// arguments to, for its release. What the hooks told the model is
+	// the decision's Note, which the loop says when the call is
+	// released.
 	allowed string
 	args    json.RawMessage
-	note    string
 }
 
 // Who a decision names as its decider, in the session format's words.
@@ -648,9 +658,8 @@ func (e *Engine) BeforeToolCall() func(context.Context, agentturn.ToolCallInfo) 
 // on its info. Its deferral is reported as a verdict, but nothing is
 // remembered for it: the loop settles it inline, with the elicitor on
 // the invoking tool's context or with a refusal, and it never ends the
-// run pending, so no [Engine.Answers] or [Engine.Release] would
-// forget it and [Engine.Deferred] would list it for as long as the
-// run lives.
+// run pending, so no [Engine.Resumed] would forget it and
+// [Engine.Deferred] would list it for as long as the run lives.
 //
 // One engine serves every agent of a product. What it defers is
 // remembered under the call's own run, so a decision in a sub-agent's
@@ -672,14 +681,21 @@ func (e *Engine) Decide(ctx context.Context, info agentturn.ToolCallInfo) (*agen
 	if err != nil {
 		return nil, err
 	}
-	d := deferredCall{info: info, args: out.Args, note: out.Note}
+	d := deferredCall{info: info, args: out.Args}
 	if out.Args != nil {
 		// The verdict is about the rewrite, so a reviewer is shown it.
 		d.info.Args = out.Args
 	}
-	if e.batchAsks(ctx, a, info, v.Action) {
+	held := e.batchAsks(ctx, a, info, v.Action)
+	if e.askInRun && info.Parent == "" {
+		if decided, ok := e.askedInRun(ctx, a, info, &v, out, held); ok {
+			e.observe(ctx, v)
+			return decided, nil
+		}
+	}
+	if held {
 		d.allowed = v.Reason
-		v.Action, v.Held, v.Reason = agentturn.Defer, true, "held for approval: "+v.Reason
+		v.Action, v.Held, v.Reason = agentturn.Defer, true, heldPrefix+v.Reason
 	}
 	if v.Action == agentturn.Defer && info.Parent == "" {
 		d.verdict = v

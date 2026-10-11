@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -176,7 +177,7 @@ func TestLoopAnswersResumeWithoutAHuman(t *testing.T) {
 	if err != nil || end.Reason != agentturn.ReasonInputRequired {
 		t.Fatalf("prompt: err=%v end=%+v", err, end)
 	}
-	answers, err := e.Answers(ctx, reviewer, end)
+	answers, err := answersResumed(ctx, e, reviewer, end)
 	if err != nil || len(answers) != 1 {
 		t.Fatalf("answers = %v, %v", answers, err)
 	}
@@ -190,7 +191,7 @@ func TestLoopAnswersResumeWithoutAHuman(t *testing.T) {
 	if err != nil || end.Reason != agentturn.ReasonInputRequired {
 		t.Fatalf("prompt: err=%v end=%+v", err, end)
 	}
-	answers, err = e.Answers(ctx, reviewer, end)
+	answers, err = answersResumed(ctx, e, reviewer, end)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -362,12 +363,16 @@ func TestLoopHoldsTheBatchForAnAsk(t *testing.T) {
 	if err != nil || len(answers) != 3 || strings.Join(reviewed, "|") != askedID+": approval required by bash(git push:*)" {
 		t.Fatalf("answers = %v, %v, reviewed %v", answers, err, reviewed)
 	}
+	prior := end
 	end, err = agent.Resume(ctx, answers...)
+	e.Resumed(ctx, prior, answers, end)
 	if err != nil || end.Reason != agentturn.ReasonDone || len(bash.ran) != 3 {
 		t.Fatalf("resume reviewed: err=%v end=%+v ran=%v", err, end, bash.ran)
 	}
 	tail = agent.State().Transcript
-	if note := tail[len(tail)-2].(*openresponses.Message); note.Role != openresponses.RoleUser || note.Text() != "pushed under review" {
+	// A reviewing model's note is said in its voice, as the developer's
+	// (agentturn v0.0.24).
+	if note := tail[len(tail)-2].(*openresponses.Message); note.Role != openresponses.RoleDeveloper || note.Text() != "pushed under review" {
 		t.Errorf("note = %+v", note)
 	}
 
@@ -390,7 +395,7 @@ func TestLoopHoldsTheBatchForAnAsk(t *testing.T) {
 	}
 	want := "held held asked released released " + // the approval: two releases
 		"held held asked stopped stopped " + // the stop
-		"held held asked reviewed released released" // the review
+		"held held asked released released reviewed" // the review, reported in the model's order once the run resumed
 	if got := strings.Join(kinds, " "); got != want {
 		t.Errorf("verdicts = %q\nwant %q", got, want)
 	}
@@ -504,7 +509,7 @@ func TestLoopAnswersApprovesAnUndispatchedCallForThePolicy(t *testing.T) {
 	if p := agent.State().Pending; len(p) != 1 || p[0].Reason != agentturn.PendingUndispatched {
 		t.Fatalf("seeded pending = %+v", p)
 	}
-	answers, err := e.Answers(ctx, never, seededEnd(agent))
+	answers, err := answersResumed(ctx, e, never, seededEnd(agent))
 	if err != nil || !reflect.DeepEqual(answers, wantAnswers) {
 		t.Fatalf("answers = %s, %v", dump(answers), err)
 	}
@@ -531,7 +536,7 @@ func TestLoopAnswersApprovesAnUndispatchedCallForThePolicy(t *testing.T) {
 		t.Fatal(err)
 	}
 	agent, bash = seed(e)
-	answers, err = e.Answers(ctx, never, seededEnd(agent))
+	answers, err = answersResumed(ctx, e, never, seededEnd(agent))
 	if err != nil || !reflect.DeepEqual(answers, wantAnswers) {
 		t.Fatalf("answers = %s, %v", dump(answers), err)
 	}
@@ -546,7 +551,7 @@ func TestLoopAnswersApprovesAnUndispatchedCallForThePolicy(t *testing.T) {
 	approve := ReviewerFunc(func(context.Context, agentturn.ToolCallInfo, Verdict) (Review, error) {
 		return Review{Outcome: Approved}, nil
 	})
-	answers, err = e.Answers(ctx, approve, end)
+	answers, err = answersResumed(ctx, e, approve, end)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -612,7 +617,7 @@ func TestLoopAnswersRefusesARewriteResumeWouldReject(t *testing.T) {
 		reviewed = append(reviewed, info.Call.CallID+": "+v.Reason)
 		return Review{Outcome: Approved, Args: other}, nil
 	})
-	answers, err := e.Answers(ctx, reviewer, seededEnd(agent))
+	answers, err := answersResumed(ctx, e, reviewer, seededEnd(agent))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -636,4 +641,360 @@ func TestLoopAnswersRefusesARewriteResumeWouldReject(t *testing.T) {
 	if len(vs) != 1 || vs[0].Action != agentturn.Block || vs[0].Reason != reason || vs[0].By != ByPolicy || vs[0].Rule != nil {
 		t.Errorf("verdicts = %+v", vs)
 	}
+}
+
+// A release is two phases: Release builds the answers and changes
+// nothing, and Resumed, once the resumed run started, forgets the
+// calls and reports the releases. A Resume that does not start leaves
+// the engine as it was, so the front answers again (#67).
+func TestLoopAReleaseThatDoesNotStartChangesNothing(t *testing.T) {
+	ctx := context.Background()
+	j := &journal{}
+	e, err := Build(Policy{
+		Allow:   rules(t, "bash(git add:*) bash(git commit:*)"),
+		Ask:     rules(t, "bash(git push:*)"),
+		Default: Deny(),
+	}, testMatchers, WithObserver(j.observe))
+	if err != nil {
+		t.Fatal(err)
+	}
+	bash := &bashTool{}
+	agent := agentturn.New(agentturn.Config{
+		Model:          &batchModel{},
+		Tools:          []agenttool.Tool{bash.tool()},
+		BeforeToolCall: e.BeforeToolCall(),
+		ToolExecution:  agentturn.ExecSequential,
+	})
+	refuseStart := true
+	agent.Subscribe(func(_ context.Context, ev agentturn.Event) error {
+		if s, ok := ev.(*agentturn.RunStart); ok && s.Source == agentturn.SourceResume && refuseStart {
+			refuseStart = false
+			return errors.New("the store is down")
+		}
+		return nil
+	})
+	end, err := agent.Prompt(ctx, openresponses.UserText("git add -A\ngit commit -m wip\ngit push --force"))
+	if err != nil || end.Reason != agentturn.ReasonInputRequired || len(end.Pending) != 3 {
+		t.Fatalf("prompt: err=%v end=%+v", err, end)
+	}
+	j.verdicts = nil
+	push := agentturn.Approve(end.Pending[2].Call.CallID).WithNote("once")
+
+	answers, err := e.Release(ctx, end, push)
+	if err != nil || len(answers) != 3 {
+		t.Fatalf("release: %s, %v", dump(answers), err)
+	}
+	ran, err := agent.Resume(ctx, answers...)
+	if err == nil || len(bash.ran) != 0 {
+		t.Fatalf("the resume started: end=%+v err=%v ran=%v", ran, err, bash.ran)
+	}
+	// The run failed as it started, and Resume returns its end with every
+	// call still pending: a front that settles whatever end Resume
+	// returned settles nothing.
+	if ran == nil || len(ran.Pending) != 3 {
+		t.Fatalf("the failed resume's end = %+v", ran)
+	}
+	e.Resumed(ctx, end, answers, ran)
+	if len(j.all()) != 0 {
+		t.Errorf("a release that did not start reported %+v", j.all())
+	}
+	// Every Resume is a run of its own: the calls wait under the failed
+	// run's ID now, with what the engine knew of them.
+	for _, p := range end.Pending {
+		if _, ok := e.Deferred(ran.RunID, p.Call.CallID); !ok {
+			t.Errorf("a release that did not start forgot %s", p.Call.CallID)
+		}
+	}
+
+	// The front answers the end it got back, and the engine releases as
+	// before.
+	again, err := e.Release(ctx, ran, push)
+	if err != nil || !reflect.DeepEqual(again, answers) {
+		t.Fatalf("release again: %s, %v", dump(again), err)
+	}
+	resumed, err := agent.Resume(ctx, again...)
+	if err != nil || resumed.Reason != agentturn.ReasonDone || len(bash.ran) != 3 {
+		t.Fatalf("resume again: err=%v end=%+v ran=%v", err, resumed, bash.ran)
+	}
+	e.Resumed(ctx, ran, again, resumed)
+	var got []string
+	for _, v := range j.all() {
+		got = append(got, fmt.Sprintf("%s %v held=%v %s", v.CallID, v.Action, v.Held, v.Reason))
+	}
+	want := end.Pending[0].Call.CallID + " 0 held=true released: allowed by bash(git add:*)|" +
+		end.Pending[1].Call.CallID + " 0 held=true released: allowed by bash(git commit:*)"
+	if strings.Join(got, "|") != want {
+		t.Errorf("verdicts = %q\nwant %q", strings.Join(got, "|"), want)
+	}
+	if runs := e.Runs(); len(runs) != 0 {
+		t.Errorf("runs after the resumed run = %v", runs)
+	}
+}
+
+// With WithAskInRun the engine asks the person about a batch's asked
+// calls while the run waits, and decides the calls it held beside
+// them from the answers, so a product that approves in place never
+// ends a run on held calls alone (#79).
+func TestLoopAsksInTheRun(t *testing.T) {
+	ctx := context.Background()
+	prompt := "git add -A\ngit push --force"
+	type outcome struct {
+		reason   agentturn.Reason
+		pending  int
+		ran      string
+		verdicts string
+		asked    int
+		said     string
+	}
+	tests := []struct {
+		name   string
+		answer *agenttool.Answer
+		want   outcome
+	}{
+		{name: "accepted", answer: &agenttool.Answer{Action: agenttool.ActionAccept, Note: "only this once"}, want: outcome{
+			reason: agentturn.ReasonDone, ran: "git add -A|git push --force", asked: 1,
+			verdicts: "allow held=true policy released: allowed by bash(git add:*)|allow held=false human approval required by bash(git push:*)",
+			said:     "only this once",
+		}},
+		// A plain decline refuses its own call alone, as at the run's
+		// end: the call held beside it runs.
+		{name: "declined", answer: &agenttool.Answer{Action: agenttool.ActionDecline, Note: "not to main"}, want: outcome{
+			reason: agentturn.ReasonDone, ran: "git add -A", asked: 1,
+			verdicts: "allow held=true policy released: allowed by bash(git add:*)|block held=false human declined when asked: approval required by bash(git push:*); the user said: not to main",
+		}},
+		{name: "cancelled", answer: &agenttool.Answer{Action: agenttool.ActionCancel}, want: outcome{
+			reason: agentturn.ReasonInputRequired, pending: 2, ran: "", asked: 1,
+			verdicts: "defer held=true policy held for approval: allowed by bash(git add:*)|defer held=false policy approval required by bash(git push:*)",
+		}},
+		{name: "no elicitor", want: outcome{
+			reason: agentturn.ReasonInputRequired, pending: 2, ran: "", asked: 0,
+			verdicts: "defer held=true policy held for approval: allowed by bash(git add:*)|defer held=false policy approval required by bash(git push:*)",
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			j := &journal{}
+			e, err := Build(Policy{
+				Allow:   rules(t, "bash(git add:*)"),
+				Ask:     rules(t, "bash(git push:*)"),
+				Default: Deny(),
+			}, testMatchers, WithObserver(j.observe), WithAskInRun())
+			if err != nil {
+				t.Fatal(err)
+			}
+			bash := &bashTool{}
+			asked := 0
+			cfg := agentturn.Config{
+				Model:          &batchModel{},
+				Tools:          []agenttool.Tool{bash.tool()},
+				BeforeToolCall: e.BeforeToolCall(),
+				ToolExecution:  agentturn.ExecSequential,
+			}
+			if tt.answer != nil {
+				cfg.ToolElicitor = func(context.Context, agenttool.Elicitation) (agenttool.Answer, error) {
+					asked++
+					return *tt.answer, nil
+				}
+			}
+			agent := agentturn.New(cfg)
+			end, err := agent.Prompt(ctx, openresponses.UserText(prompt))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var verdicts []string
+			for _, v := range j.all() {
+				verdicts = append(verdicts, fmt.Sprintf("%s held=%v %s %s", actionName(v.Action), v.Held, v.By, v.Reason))
+			}
+			got := outcome{reason: end.Reason, pending: len(end.Pending), ran: strings.Join(bash.ran, "|"), verdicts: strings.Join(verdicts, "|"), asked: asked}
+			if tt.want.said != "" {
+				for _, it := range agent.State().Transcript {
+					// A person's words are a user message of their own
+					// (agentturn v0.0.24).
+					if m, ok := it.(*openresponses.Message); ok && m.Role == openresponses.RoleUser && m.Text() == tt.want.said {
+						got.said = tt.want.said
+					}
+				}
+			}
+			if got != tt.want {
+				t.Errorf("got  %+v\nwant %+v", got, tt.want)
+			}
+			if end.Reason == agentturn.ReasonDone {
+				if runs := e.Runs(); len(runs) != 0 {
+					t.Errorf("runs after a run settled in place = %v", runs)
+				}
+			}
+			e.mu.Lock()
+			left := len(e.asked)
+			e.mu.Unlock()
+			if left != 0 {
+				t.Errorf("%d batches still kept", left)
+			}
+		})
+	}
+}
+
+func actionName(a agentturn.ToolAction) string {
+	switch a {
+	case agentturn.Allow:
+		return "allow"
+	case agentturn.Block:
+		return "block"
+	case agentturn.Defer:
+		return "defer"
+	}
+	return fmt.Sprint(int(a))
+}
+
+// A hook's note on a call the engine holds is the policy's: the loop
+// says it once, as a developer message, when an approval releases the
+// call. The release does not put it on the answer too, or it is said
+// twice (agentturn v0.0.24).
+func TestLoopAHeldCallsHookNoteIsSaidOnce(t *testing.T) {
+	ctx := context.Background()
+	note := func(_ context.Context, info agentturn.ToolCallInfo) (*agentturn.ToolDecision, error) {
+		var a bashArgs
+		_ = json.Unmarshal(info.Args, &a)
+		if strings.HasPrefix(a.Command, "git add") {
+			return &agentturn.ToolDecision{Action: agentturn.Allow, Note: "staged everything"}, nil
+		}
+		return nil, nil
+	}
+	e, err := Build(Policy{Allow: rules(t, "bash(git add:*)"), Ask: rules(t, "bash(git push:*)"), Default: Deny()}, testMatchers, WithHooks(note))
+	if err != nil {
+		t.Fatal(err)
+	}
+	bash := &bashTool{}
+	agent := agentturn.New(agentturn.Config{Model: &batchModel{}, Tools: []agenttool.Tool{bash.tool()}, BeforeToolCall: e.BeforeToolCall(), ToolExecution: agentturn.ExecSequential})
+	end, err := agent.Prompt(ctx, openresponses.UserText("git add -A\ngit push"))
+	if err != nil || end.Reason != agentturn.ReasonInputRequired {
+		t.Fatalf("prompt: %v %+v", err, end)
+	}
+	answers, err := e.Release(ctx, end, agentturn.Approve(end.Pending[1].Call.CallID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if answers[0].Note != "" {
+		t.Errorf("the release put the hook's note on the answer: %q", answers[0].Note)
+	}
+	if _, err := agent.Resume(ctx, answers...); err != nil {
+		t.Fatal(err)
+	}
+	said := 0
+	for _, it := range agent.State().Transcript {
+		if m, ok := it.(*openresponses.Message); ok && m.Text() == "staged everything" {
+			said++
+			if m.Role != openresponses.RoleDeveloper {
+				t.Errorf("the hook's note is a %s message", m.Role)
+			}
+		}
+	}
+	if said != 1 {
+		t.Errorf("the hook's note was said %d times", said)
+	}
+}
+
+// Every Resume is a run of its own. A front that answers the end each
+// Resume returns, after one that failed as it started or part way
+// through its calls, finds every call it still has to answer under the
+// new run, with what the engine knew of it, and nothing of the first
+// run is left behind.
+func TestLoopAFrontAnswersTheEndEachResumeReturns(t *testing.T) {
+	ctx := context.Background()
+	setup := func(t *testing.T, fail func(agentturn.Event) bool) (*Engine, *journal, *agentturn.Agent, *bashTool) {
+		j := &journal{}
+		e, err := Build(Policy{Allow: rules(t, "bash(git add:*) bash(git commit:*)"), Ask: rules(t, "bash(git push:*)"), Default: Deny()}, testMatchers, WithObserver(j.observe))
+		if err != nil {
+			t.Fatal(err)
+		}
+		bash := &bashTool{}
+		agent := agentturn.New(agentturn.Config{Model: &batchModel{}, Tools: []agenttool.Tool{bash.tool()}, BeforeToolCall: e.BeforeToolCall(), ToolExecution: agentturn.ExecSequential})
+		failed := false
+		agent.Subscribe(func(_ context.Context, ev agentturn.Event) error {
+			if !failed && fail(ev) {
+				failed = true
+				return errors.New("the store is down")
+			}
+			return nil
+		})
+		return e, j, agent, bash
+	}
+	prompt := "git add -A\ngit commit -m wip\ngit push"
+	settle := func(t *testing.T, e *Engine, agent *agentturn.Agent, end *agentturn.RunEnd) *agentturn.RunEnd {
+		t.Helper()
+		for range 3 {
+			var push []agentturn.Answer
+			for _, p := range end.Pending {
+				if v, ok := e.Deferred(end.RunID, p.Call.CallID); ok && !v.Held {
+					push = append(push, agentturn.Approve(p.Call.CallID))
+				}
+			}
+			answers, err := e.Release(ctx, end, push...)
+			if err != nil {
+				t.Fatalf("release of %s: %v", end.RunID, err)
+			}
+			next, _ := agent.Resume(ctx, answers...)
+			e.Resumed(ctx, end, answers, next)
+			if next == nil || len(next.Pending) == 0 {
+				return next
+			}
+			end = next
+		}
+		t.Fatal("the calls were never taken")
+		return nil
+	}
+	check := func(t *testing.T, e *Engine, j *journal, bash *bashTool) {
+		t.Helper()
+		if runs := e.Runs(); len(runs) != 0 {
+			t.Errorf("runs left = %v", runs)
+		}
+		released := 0
+		for _, v := range j.all() {
+			if v.Held && v.Action == agentturn.Allow {
+				released++
+				if v.Rule == nil {
+					t.Errorf("a release lost its rule: %+v", v)
+				}
+			}
+		}
+		if released != 2 {
+			t.Errorf("%d releases reported", released)
+		}
+		// Each call ran once; a run that failed part way runs what it
+		// still owes in the order the loop takes it.
+		ran := append([]string(nil), bash.ran...)
+		slices.Sort(ran)
+		if got := strings.Join(ran, "|"); got != "git add -A|git commit -m wip|git push" {
+			t.Errorf("ran = %q", strings.Join(bash.ran, "|"))
+		}
+	}
+
+	t.Run("failed as it started", func(t *testing.T) {
+		e, j, agent, bash := setup(t, func(ev agentturn.Event) bool {
+			s, ok := ev.(*agentturn.RunStart)
+			return ok && s.Source == agentturn.SourceResume
+		})
+		end, err := agent.Prompt(ctx, openresponses.UserText(prompt))
+		if err != nil || len(end.Pending) != 3 {
+			t.Fatalf("prompt: %v %+v", err, end)
+		}
+		settle(t, e, agent, end)
+		check(t, e, j, bash)
+	})
+	t.Run("failed part way", func(t *testing.T) {
+		starts := 0
+		e, j, agent, bash := setup(t, func(ev agentturn.Event) bool {
+			if _, ok := ev.(*agentturn.ToolStart); ok {
+				starts++
+				// The prompt's three, then the resume's second.
+				return starts == 5
+			}
+			return false
+		})
+		end, err := agent.Prompt(ctx, openresponses.UserText(prompt))
+		if err != nil || len(end.Pending) != 3 {
+			t.Fatalf("prompt: %v %+v", err, end)
+		}
+		settle(t, e, agent, end)
+		check(t, e, j, bash)
+	})
 }

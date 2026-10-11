@@ -704,15 +704,15 @@ A deferred call ends the run with the call pending, and the host
 answers it through the loop's resume, under agentturn RFC 0001. The
 engine remembers every call it deferred, asked and held, under the
 call's own run, so one engine serves every agent of a host and a
-decision in one run never touches another's. It forgets a call as it
-answers it, and forgets a run on the host's word when the run ends
-another way.
+decision in one run never touches another's. It forgets a call once a
+resumed run has taken it, and forgets a run on the host's word when
+the run ends another way.
 
 A call a tool made, a nested call, has a parent: the call whose tool
 made it. The loop settles a nested call it defers inline, by asking the
 user through the invoking tool's elicitor or by refusing it, so the
-nested call never ends the run pending and no answer or release would
-forget it. The engine reports a nested call's deferral as a verdict, as
+nested call never ends the run pending and no resumed run would take
+it. The engine reports a nested call's deferral as a verdict, as
 for any call, and remembers nothing for it.
 
 ### Release
@@ -723,21 +723,82 @@ returns one answer per pending call in the order the run's end lists
 them, the model's order:
 
 - a pending call the host answered keeps its answer;
-- a held call is approved, with the arguments and the note the hooks
-  gave it, unless any of the host's answers ends the run, in which case
+- a held call is approved, with the arguments the hooks gave it,
+  unless any of the host's answers ends the run, in which case
   it is answered with the output `The call was held for an approval
   and the turn was stopped; the call did not run.`;
 - an answer for a call that is not pending follows the rest;
 - a pending call neither the host nor the engine answers is an error
-  naming every such call, returned with the answers as a preview:
-  nothing is forgotten and nothing is recorded, so the host answers
-  the missing call and releases again.
+  naming every such call, returned with the answers, so the host
+  answers the missing call and releases again.
 
-Every answer the engine builds names `policy` as its decider, and the
-refusal of a held call carries its verdict's reason. Every release is
-a verdict with held set: allow with the rule that allowed the call and
-`released: ` followed by the reason it was allowed, or block with `not
-released: the turn was stopped`.
+A note the hooks gave a held call belongs to the decision that held
+it, and the loop says it once, as the policy's, when an approval
+releases the call; the release does not repeat it on the answer.
+
+A call is held when its deferral says so: what the engine remembers of
+it, or the held mark on the decision that deferred it, which the loop
+carries on the run's end and a session reads back from its record, so
+an engine that never saw the run, one started after a restart,
+releases the same end the same way.
+
+A release is two phases. Building the answers changes nothing: the
+engine forgets no call and records no verdict, so a resume that does
+not start leaves it as it was. When the resume returns, the host gives
+the engine the answers it resumed with and the end the resumed run
+returned; the engine forgets each answered call that end no longer
+lists as pending, and records each release and each verdict the
+answers carried for it. A call the resumed run still lists, because
+the run failed as it started or the call was deferred again, is
+neither forgotten nor recorded, so the host answers it again and
+nothing is recorded twice. Each resume is a run of its own, so what
+the engine keeps for a call the resumed run still lists moves to that
+run, where the host finds it when it answers the end it got back.
+Answers built without a human follow the same two phases: a
+reviewer's verdict is recorded, and counted toward the denial bound,
+when the resumed run has taken its call with the answer built for it,
+and answering the same end again gives the same answers without
+asking the reviewer again, unless the rules have changed since or the
+host drops the kept answers to ask another reviewer. When the denial
+bound stops the turn, the held calls' reason names the bound.
+
+Every answer the engine builds names `policy` as its decider and
+carries its verdict's reason. Every release is a verdict with held
+set: allow with the rule that allowed the call and `released: `
+followed by the reason it was allowed, or block with `not released:
+the turn was stopped`. An answer the host gave a held call itself is
+the host's decision, and records no release.
+
+### Asking in the run
+
+A host may ask the person about a call while the run waits, rather
+than ending the run on it. The engine then asks, at the first call of
+a batch it is handed that a rule asks about or the batch holds, about
+every call of the batch a rule asks about, in the model's order, and
+keeps the answers for the batch, by its run, turn and calls, not by
+the rules of the moment, so a grant made meanwhile does not ask again.
+It decides the calls by the rule a release follows, one rule in both
+modes:
+
+- a call that was asked about is decided as the person answered, with
+  `human` as the decider, whatever its own decision then reads, unless
+  the policy denies it, which no answer overrides;
+- a plain decline refuses its own call alone;
+- a call the policy allowed and the batch held is released once every
+  asked call of its batch is answered, and refused with `not released:
+  the turn was stopped by the answer to <call> (<subject or tool>)`
+  when an answer stops the turn.
+
+In the run, only a hook's terminate hint on the asked call stops the
+batch. A person's answer in the run is accept, decline or cancel, with
+no stop, so a person's decline in the run is always plain. A decision
+made in the run carries the subject and the held mark its deferral
+would have, and the verdict of a person's answer names no rule.
+
+Nothing is remembered for a call decided this way. A question nobody
+answers, or a call of the batch that could not be read, leaves the
+held calls deferred with it, unless an answer has stopped the turn;
+they wait for the run's end, for a release.
 
 ### Answers without a human
 
@@ -1030,7 +1091,8 @@ The root module of this repository is the reference binding.
 | offering tools | `Engine.Removes(tool)`, `Engine.Filter(tools)`, `Engine.ToolProvider(base)` for `agentturn.Config.ToolProvider` |
 | grants | `Engine.Grant`, `Engine.GrantOver`; `Engine.GrantSet` → granted and `[]Refusal{Rule, Reason}`, `Engine.Revoke`, `Engine.Grants`; the scope: `ContextWithGrantScope(ctx, scope)`, `GrantScopeFromContext(ctx)`, `Engine.GrantsFor(ctx)`, `Engine.RevokeScope(ctx)` |
 | deferred calls | `Engine.Deferred`, `Engine.Runs`, `Engine.Forget` |
-| release | `Engine.Release(ctx, end, answers…)`; `ErrUnanswered` |
+| release | `Engine.Release(ctx, end, answers…)`; `ErrUnanswered`; `Engine.Resumed(ctx, end, answers, next)` with the end the resume returned; `Engine.ForgetAnswers(runID)` |
+| asking in the run | `WithAskInRun()`, through the elicitor on the hook's context (`agentturn.Ask`) |
 | reviewer | `Reviewer`, `ReviewerFunc`, `Review{Outcome, Reason, Args, Note, By}`, `Outcome` (`Refused`, `Approved`, `TimedOut`); `Engine.Answers(ctx, r, end)`, whose refusals carry the verdict's reason as `agentturn.Answer.Reason`; a call that may have run is `agentturn.PendingCall.MayHaveRun` |
 | cut-off calls | `WithNeverStarted(fn)`; the tool from the pending call or `WithTools`; the output a call has where it ran from `agentturn.PendingCall.Ran` and `RanWhere`; `agentturn.PendingUndispatched` is approved for the resume, `agentturn.PendingRejected` answered as refused, in `PendingCall.Refused`'s words when it has them |
 | nested calls | `agentturn.ToolCallInfo.Parent` non-empty: decided and reported, no deferral remembered |

@@ -49,9 +49,11 @@ type Review struct {
 	// nil keeps the call's own.
 	Args json.RawMessage
 	// Note is what the reviewer tells the model with the result, on an
-	// approval or a refusal: the loop appends it after the outputs as a
-	// user message, so the model reads the result and the note
-	// together, as a user's note on an approval reaches it.
+	// approval or a refusal: the loop appends it after the outputs in
+	// the reviewer's voice, a developer message for an answer by
+	// [ByAgent] or [ByPolicy] and a user message for one by [ByHuman],
+	// as agentturn says every answer's note, so the model reads the
+	// result and the note together.
 	Note string
 	// By names who answered, for the record: [ByAgent] for a model,
 	// which is what the classify package's reviewer sets, [ByHuman]
@@ -262,12 +264,27 @@ func cleanReason(reason string) string {
 // is built with agentturn.Refuse, so Resume appends the outputs and
 // ends the run with StopRefused instead of calling the model, the
 // held calls are refused with it, and the answers are returned with
-// [ErrDenialBound] so the front can say why. The bound counts across
-// calls to Answers until [Engine.ResetReviews].
+// [ErrDenialBound] so the front can say why. The bound counts the
+// reviews of the calls [Engine.Resumed] settled, across runs until
+// [Engine.ResetReviews], and those of this end on top.
 //
 // Answers completes with [Engine.Release], so a pending call it could
 // not answer is [ErrUnanswered], returned with the answers and joined
 // with [ErrDenialBound] when both hold.
+//
+// Like Release, Answers changes nothing the run's resume decides: it
+// keeps each verdict it reached for a call, the reviewer's included,
+// until [Engine.Resumed] reports it, once the resumed run has taken the
+// call, or [Engine.Forget] drops the run. A second Answers for the same
+// end, after a Resume that did not start, gives the answers the first
+// gave without asking the reviewer again, whatever reviewer it is
+// given, so nothing is reviewed, reported or counted twice; a kept
+// answer decided under rules that have changed since is decided again.
+// To ask another reviewer about the same end, escalating from a model
+// to a person say, call [Engine.ForgetAnswers] first. A verdict is
+// reported only when the call is resumed with the answer Answers gave
+// it; a front that resumes it with an answer of its own reports its own
+// decision, and the kept verdict is dropped uncounted.
 func (e *Engine) Answers(ctx context.Context, r Reviewer, end *agentturn.RunEnd) ([]agentturn.Answer, error) {
 	if end == nil || len(end.Pending) == 0 {
 		return nil, nil
@@ -280,7 +297,8 @@ func (e *Engine) Answers(ctx context.Context, r Reviewer, end *agentturn.RunEnd)
 		ctx = agentturn.ContextWithRunID(ctx, end.RunID)
 	}
 	answers := make([]agentturn.Answer, 0, len(end.Pending))
-	bounded := false
+	var outcomes []bool
+	gen := e.active(ctx).gen
 	for _, p := range end.Pending {
 		call := p.Call
 		if call == nil {
@@ -294,9 +312,18 @@ func (e *Engine) Answers(ctx context.Context, r Reviewer, end *agentturn.RunEnd)
 			answers = append(answers, agentturn.Approve(call.CallID).WithBy(ByPolicy).WithReason(decidedOnResumeReason))
 			continue
 		}
+		if kept, ok := e.keptAnswer(end.RunID, call.CallID, gen); ok {
+			// Answered for a resume that did not take it: the same answer,
+			// without asking again.
+			answers = append(answers, kept.answer)
+			if kept.reviewed {
+				outcomes = append(outcomes, kept.verdict.Action == agentturn.Allow)
+			}
+			continue
+		}
 		if ans, v, ok := e.ranElsewhere(end.RunID, p); ok {
 			answers = append(answers, ans)
-			e.observe(ctx, v)
+			e.keepAnswer(end.RunID, answeredCall{answer: ans, verdict: v, gen: gen})
 			continue
 		}
 		var (
@@ -304,11 +331,12 @@ func (e *Engine) Answers(ctx context.Context, r Reviewer, end *agentturn.RunEnd)
 			v    Verdict
 			args json.RawMessage
 		)
-		if e.unreviewed(ctx, p) {
+		cut := e.unreviewed(ctx, p)
+		if cut {
 			ans, cv, ask := e.cutOff(ctx, end.RunID, p)
 			if ask == nil {
 				answers = append(answers, ans)
-				e.observe(ctx, cv)
+				e.keepAnswer(end.RunID, answeredCall{answer: ans, verdict: cv, gen: gen})
 				continue
 			}
 			info, v, args = ask.info, cv, ask.args
@@ -333,18 +361,21 @@ func (e *Engine) Answers(ctx context.Context, r Reviewer, end *agentturn.RunEnd)
 			// refusal is the engine's and does not count toward the
 			// bound.
 			if ans, verdict, ok := e.rewriteRefused(ctx, p, info, rev.Args); ok {
+				ans, verdict = withOpenQuestion(p, ans, verdict)
 				answers = append(answers, ans)
-				e.observe(ctx, verdict)
+				e.keepAnswer(end.RunID, answeredCall{answer: ans, verdict: verdict, gen: gen})
 				continue
 			}
 		}
 		ans, verdict := answer(call, info, rev, err, p.MayHaveRun())
-		answers = append(answers, ans)
-		if e.note(verdict.Action == agentturn.Allow) {
-			bounded = true
+		if cut {
+			ans, verdict = withOpenQuestion(p, ans, verdict)
 		}
-		e.observe(ctx, verdict)
+		answers = append(answers, ans)
+		e.keepAnswer(end.RunID, answeredCall{answer: ans, verdict: verdict, reviewed: true, gen: gen})
+		outcomes = append(outcomes, verdict.Action == agentturn.Allow)
 	}
+	bounded := e.wouldBound(outcomes)
 	if bounded {
 		for i := range answers {
 			if answers[i].Output != nil {
@@ -352,7 +383,12 @@ func (e *Engine) Answers(ctx context.Context, r Reviewer, end *agentturn.RunEnd)
 			}
 		}
 	}
-	answers, err := e.Release(ctx, end, answers...)
+	stop := ""
+	if bounded {
+		// The bound stopped the turn, not any one call's answer.
+		stop = boundStoppedReason
+	}
+	answers, err := e.release(ctx, end, stop, answers...)
 	switch {
 	case bounded && err != nil:
 		return answers, errors.Join(ErrDenialBound, err)
@@ -417,8 +453,37 @@ func (e *Engine) ranElsewhere(runID string, p agentturn.PendingCall) (agentturn.
 // when the policy denies it, and when the policy asks it is returned
 // as a review, for the reviewer to answer with the verdict. A hook
 // that fails reads as asking. Each answer carries the verdict's reason,
-// which the session recorder writes on its decision.
+// which the session recorder writes on its decision. A call a person
+// was being asked under when the run was cut,
+// agentturn.PendingCall.Question, says so after its reason, as
+// agentturn/session's ReplayAnswers does, so the record shows the call
+// was waiting on a person: on the engine's refusal, on its approval to
+// run the call again, and on the verdict a reviewer is shown.
 func (e *Engine) cutOff(ctx context.Context, runID string, p agentturn.PendingCall) (agentturn.Answer, Verdict, *review) {
+	ans, v, ask := e.cutOffCall(ctx, runID, p)
+	if ask != nil {
+		if q := p.Question; q != nil {
+			v.Reason += "; " + q.Reason()
+		}
+		return ans, v, ask
+	}
+	ans, v = withOpenQuestion(p, ans, v)
+	return ans, v, nil
+}
+
+// withOpenQuestion names the question open under a cut-off call after
+// the reason of its answer and its verdict, when one was open.
+func withOpenQuestion(p agentturn.PendingCall, ans agentturn.Answer, v Verdict) (agentturn.Answer, Verdict) {
+	q := p.Question
+	if q == nil {
+		return ans, v
+	}
+	v.Reason += "; " + q.Reason()
+	return ans.WithReason(v.Reason), v
+}
+
+// cutOffCall is cutOff before the open question is named.
+func (e *Engine) cutOffCall(ctx context.Context, runID string, p agentturn.PendingCall) (agentturn.Answer, Verdict, *review) {
 	call := p.Call
 	v := Verdict{RunID: runID, CallID: call.CallID, Tool: call.Name, Action: agentturn.Block, By: ByPolicy}
 	refuse := func(text string) (agentturn.Answer, Verdict, *review) {
@@ -590,7 +655,10 @@ func decodeNumbers(raw json.RawMessage) (any, error) {
 // run, or the call alone, and the arguments a hook rewrote it to, nil
 // when none did. A call the engine does not remember, one deferred
 // before a restart, carries the loop's own record of a rewrite on
-// PendingCall.Args.
+// PendingCall.Args, and its verdict is the one its decision carries,
+// PendingCall.Decision, which agentturn/session reads back from the
+// record: the rule's reason, the subject, and whether the call was
+// only held beside an asked one.
 func (e *Engine) recall(runID string, p agentturn.PendingCall) (agentturn.ToolCallInfo, Verdict, json.RawMessage) {
 	call := p.Call
 	e.mu.Lock()
@@ -602,9 +670,14 @@ func (e *Engine) recall(runID string, p agentturn.PendingCall) (agentturn.ToolCa
 	if p.Args != nil {
 		args = p.Args
 	}
-	return agentturn.ToolCallInfo{RunID: runID, Call: call, Args: args},
-		Verdict{RunID: runID, CallID: call.CallID, Tool: call.Name, Action: agentturn.Defer, By: ByPolicy},
-		p.Args
+	v := Verdict{RunID: runID, CallID: call.CallID, Tool: call.Name, Action: agentturn.Defer, By: ByPolicy}
+	if d := p.Decision; d != nil && d.Action == agentturn.Defer {
+		v.Reason, v.Subject, v.Held = d.Reason, d.Subject, d.Held
+		if d.By != "" {
+			v.By = d.By
+		}
+	}
+	return agentturn.ToolCallInfo{RunID: runID, Call: call, Args: args}, v, p.Args
 }
 
 // answer turns one review into the answer the loop takes and the
@@ -664,24 +737,44 @@ func withReason(text, reason string) string {
 func (e *Engine) note(approved bool) bool {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	return e.reviews.add(e.bound, approved)
+}
+
+// wouldBound reports whether reviews with the given outcomes, true for
+// an approval, would reach the bound on top of those counted so far,
+// counting nothing.
+func (e *Engine) wouldBound(outcomes []bool) bool {
+	e.mu.Lock()
+	log := reviewLog{refused: append([]bool(nil), e.reviews.refused...), consecutive: e.reviews.consecutive}
 	b := e.bound
+	e.mu.Unlock()
+	reached := false
+	for _, approved := range outcomes {
+		reached = log.add(b, approved) || reached
+	}
+	return reached
+}
+
+// add counts one review in the log and reports whether the bound is
+// reached.
+func (l *reviewLog) add(b DenialBound, approved bool) bool {
 	if approved {
-		e.reviews.consecutive = 0
+		l.consecutive = 0
 	} else {
-		e.reviews.consecutive++
+		l.consecutive++
 	}
 	if b.Window > 0 {
-		e.reviews.refused = append(e.reviews.refused, !approved)
-		if len(e.reviews.refused) > b.Window {
-			e.reviews.refused = e.reviews.refused[1:]
+		l.refused = append(l.refused, !approved)
+		if len(l.refused) > b.Window {
+			l.refused = l.refused[1:]
 		}
 	}
-	if b.Consecutive > 0 && e.reviews.consecutive >= b.Consecutive {
+	if b.Consecutive > 0 && l.consecutive >= b.Consecutive {
 		return true
 	}
 	if b.Total > 0 && b.Window > 0 {
 		refused := 0
-		for _, r := range e.reviews.refused {
+		for _, r := range l.refused {
 			if r {
 				refused++
 			}
@@ -691,6 +784,83 @@ func (e *Engine) note(approved bool) bool {
 		}
 	}
 	return false
+}
+
+// answeredCall is what [Engine.Answers] decided about one pending call:
+// the answer, the verdict to report once a resumed run takes it, and
+// whether a reviewer decided it, so it counts toward the bound then.
+type answeredCall struct {
+	callID   string
+	answer   agentturn.Answer
+	verdict  Verdict
+	reviewed bool
+	// gen is the engine's count of rule changes when the call was
+	// decided: a kept answer made under other rules is decided again.
+	gen uint64
+}
+
+// keepAnswer keeps what Answers decided about a call of a run until
+// [Engine.Resumed] reports it or [Engine.Forget] drops the run.
+func (e *Engine) keepAnswer(runID string, a answeredCall) {
+	a.callID = a.answer.CallID
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.answering == nil {
+		e.answering = make(map[string]map[string]answeredCall)
+	}
+	calls := e.answering[runID]
+	if calls == nil {
+		calls = make(map[string]answeredCall)
+		e.answering[runID] = calls
+	}
+	calls[a.callID] = a
+}
+
+// keptAnswer returns what Answers decided about a call of a run, under
+// the rules of generation gen, that no resumed run has taken yet. One
+// decided under other rules, a grant, a revocation or a new policy
+// having come since, is dropped, for the call to be decided again.
+func (e *Engine) keptAnswer(runID, callID string, gen uint64) (answeredCall, bool) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	a, ok := e.answering[runID][callID]
+	if ok && a.gen != gen {
+		delete(e.answering[runID], callID)
+		if len(e.answering[runID]) == 0 {
+			delete(e.answering, runID)
+		}
+		return answeredCall{}, false
+	}
+	return a, ok
+}
+
+// ForgetAnswers drops what [Engine.Answers] decided about the pending
+// calls of the run runID and no resumed run has taken: their answers,
+// and the verdicts that would have been reported. A front calls it
+// before it asks another reviewer about the same end, escalating from
+// a model to a person say, since Answers otherwise gives the answers it
+// gave before without asking. Nothing dropped is reported or counted
+// toward the [DenialBound].
+func (e *Engine) ForgetAnswers(runID string) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	delete(e.answering, runID)
+}
+
+// takeAnswered returns and forgets what Answers decided about a call.
+func (e *Engine) takeAnswered(runID, callID string) (answeredCall, bool) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	calls := e.answering[runID]
+	a, ok := calls[callID]
+	if !ok {
+		return answeredCall{}, false
+	}
+	delete(calls, callID)
+	if len(calls) == 0 {
+		delete(e.answering, runID)
+	}
+	return a, true
 }
 
 // ResetReviews forgets the refusals the denial bound counts, as Codex
