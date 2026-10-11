@@ -5,7 +5,7 @@ All user-visible changes to this library. The format follows
 uses [Semantic Versioning](https://semver.org/); before v1.0.0 minor
 versions may break the API.
 
-## Unreleased
+## v0.0.16 - 2026-10-11
 
 - Changed: requires agentturn v0.0.24, up from v0.0.22. A reviewer's
   note is said in the reviewer's voice, a developer message for `agent`
