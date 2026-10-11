@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 
 	"github.com/ChristopherDavenport/agentturn"
@@ -138,6 +139,13 @@ const heldPrefix = "held for approval: "
 // the engine never saw, or when it releases before every asked call is
 // answered; the front answers the missing call and releases again.
 func (e *Engine) Release(ctx context.Context, end *agentturn.RunEnd, answers ...agentturn.Answer) ([]agentturn.Answer, error) {
+	return e.release(ctx, end, "", answers...)
+}
+
+// release is Release, with the reason the held calls are refused for
+// when an answer stops the turn given as stop, or else naming the call
+// whose answer stopped it.
+func (e *Engine) release(_ context.Context, end *agentturn.RunEnd, stop string, answers ...agentturn.Answer) ([]agentturn.Answer, error) {
 	if end == nil {
 		return answers, nil
 	}
@@ -149,8 +157,8 @@ func (e *Engine) Release(ctx context.Context, end *agentturn.RunEnd, answers ...
 			stopped, stopper = true, a.CallID
 		}
 	}
-	stopReason := ""
-	if stopped {
+	stopReason := stop
+	if stopped && stopReason == "" {
 		stopReason = stoppedReason(stopper, about(end, stopper))
 	}
 	out := make([]agentturn.Answer, 0, len(end.Pending))
@@ -207,6 +215,9 @@ func (e *Engine) Release(ctx context.Context, end *agentturn.RunEnd, answers ...
 const (
 	releasedPrefix    = "released: "
 	notReleasedReason = "not released: the turn was stopped"
+	// boundStoppedReason is a held call's when the reviewer denial bound
+	// stopped the turn.
+	boundStoppedReason = notReleasedReason + " at the reviewer denial bound"
 )
 
 // stoppedReason is the reason a held call is not released: the turn was
@@ -257,7 +268,12 @@ func about(end *agentturn.RunEnd, callID string) string {
 // still pending, and one whose hook deferred the call again leaves it
 // waiting. Such a call is neither forgotten nor reported, so the front
 // answers it again and releases again, and nothing is reported twice.
-// A nil next, a Resume that returned no end, settles nothing.
+// A nil next, a Resume that returned no end, settles nothing. Every
+// Resume is a run of its own, so what the engine keeps for a call next
+// still lists, the deferral and what Answers decided, moves to next's
+// run, where the front finds it when it answers next: a front that
+// answers the end each Resume returns until the calls are taken loses
+// nothing and asks no reviewer twice.
 func (e *Engine) Resumed(ctx context.Context, end *agentturn.RunEnd, answers []agentturn.Answer, next *agentturn.RunEnd) {
 	if end == nil || next == nil {
 		return
@@ -288,9 +304,13 @@ func (e *Engine) Resumed(ctx context.Context, end *agentturn.RunEnd, answers []a
 		seen[a.CallID] = true
 		settled = append(settled, a.CallID)
 		if r, ok := e.takeAnswered(end.RunID, a.CallID); ok {
-			report = append(report, r.verdict)
-			if r.reviewed {
-				reviewed = append(reviewed, r.verdict.Action == agentturn.Allow)
+			// The verdict is the answer Answers gave; resumed with
+			// another, the front decided, and its decision is its record.
+			if sameAnswer(r.answer, a) {
+				report = append(report, r.verdict)
+				if r.reviewed {
+					reviewed = append(reviewed, r.verdict.Action == agentturn.Allow)
+				}
 			}
 			continue
 		}
@@ -319,6 +339,13 @@ func (e *Engine) Resumed(ctx context.Context, end *agentturn.RunEnd, answers []a
 		e.answered(end.RunID, id)
 	}
 	e.mu.Lock()
+	if next.RunID != end.RunID {
+		// Every Resume is a run of its own. The calls the resumed run
+		// still lists as pending wait under its ID now, for the front
+		// that answers next: what the engine deferred and what Answers
+		// decided about them moves with them.
+		e.moveCalls(end.RunID, next.RunID, still)
+	}
 	e.dropAsked(end.RunID)
 	e.mu.Unlock()
 	for _, approved := range reviewed {
@@ -326,6 +353,52 @@ func (e *Engine) Resumed(ctx context.Context, end *agentturn.RunEnd, answers []a
 	}
 	for _, v := range report {
 		e.observe(ctx, v)
+	}
+}
+
+// sameAnswer reports whether a is the answer kept, Terminate aside,
+// which the denial bound sets afresh on each Answers.
+func sameAnswer(kept, a agentturn.Answer) bool {
+	kept.Terminate, a.Terminate = false, false
+	return reflect.DeepEqual(kept, a)
+}
+
+// moveCalls moves what the engine keeps for the calls of run from that
+// run to next, and drops run's entries once they are empty. The caller
+// holds e.mu.
+func (e *Engine) moveCalls(run, next string, calls map[string]bool) {
+	for _, m := range []func(id string){
+		func(id string) {
+			if d, ok := e.deferred[run][id]; ok {
+				if e.deferred[next] == nil {
+					e.deferred[next] = make(map[string]deferredCall)
+				}
+				e.deferred[next][id] = d
+				delete(e.deferred[run], id)
+			}
+		},
+		func(id string) {
+			if a, ok := e.answering[run][id]; ok {
+				if e.answering == nil {
+					e.answering = make(map[string]map[string]answeredCall)
+				}
+				if e.answering[next] == nil {
+					e.answering[next] = make(map[string]answeredCall)
+				}
+				e.answering[next][id] = a
+				delete(e.answering[run], id)
+			}
+		},
+	} {
+		for id := range calls {
+			m(id)
+		}
+	}
+	if len(e.deferred[run]) == 0 {
+		delete(e.deferred, run)
+	}
+	if len(e.answering[run]) == 0 {
+		delete(e.answering, run)
 	}
 }
 
@@ -344,15 +417,11 @@ func (e *Engine) heldCall(runID string, p agentturn.PendingCall) (deferredCall, 
 	if dec == nil || !dec.Held || dec.Action != agentturn.Defer {
 		return deferredCall{}, false
 	}
-	// What the recorded decision says, its reason, subject and decider,
-	// is what is known of the verdict after a restart; the rule and the
+	// What the recorded decision says, its reason and subject, is what
+	// is known of the verdict after a restart; the rule and the
 	// confinement were the engine's and are not on the record.
-	by := dec.By
-	if by == "" {
-		by = ByPolicy
-	}
 	return deferredCall{
-		verdict: Verdict{Held: true, Action: agentturn.Defer, Reason: dec.Reason, Subject: dec.Subject, By: by},
+		verdict: Verdict{Held: true, Action: agentturn.Defer, Reason: dec.Reason, Subject: dec.Subject, By: ByPolicy},
 		allowed: strings.TrimPrefix(dec.Reason, heldPrefix),
 	}, true
 }

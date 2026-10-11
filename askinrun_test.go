@@ -147,8 +147,8 @@ func TestAskInRunDeclineAndStop(t *testing.T) {
 }
 
 // What was asked in a run is dropped when the run moves to its next
-// batch, when the front forgets the run, and, past the bound, oldest
-// first.
+// batch and when the front forgets the run, even while the person is
+// being asked, and never to make room.
 func TestAskInRunDropsWhatARunAsked(t *testing.T) {
 	e, err := Build(Policy{Allow: rules(t, "bash(git add:*)"), Ask: rules(t, "bash(git push:*)"), Default: Deny()}, testMatchers, WithAskInRun())
 	if err != nil {
@@ -179,17 +179,70 @@ func TestAskInRunDropsWhatARunAsked(t *testing.T) {
 		t.Errorf("kept %d after Forget", kept())
 	}
 
-	// Past the bound the oldest batch goes first.
-	for i := range maxAskBatches + 1 {
+	// A live batch is never dropped to make room: every run in flight
+	// keeps its answers, however many there are.
+	for i := range 65 {
 		e.Decide(ctx, batch(fmt.Sprintf("run_%d", i), "git add -A", "git push")[0])
 	}
-	e.mu.Lock()
-	runs := map[string]bool{}
-	for _, ab := range e.asked {
-		runs[ab.run] = true
+	if kept() != 65 {
+		t.Errorf("kept %d of 65 live batches", kept())
 	}
-	e.mu.Unlock()
-	if len(runs) != maxAskBatches || runs["run_0"] || !runs[fmt.Sprintf("run_%d", maxAskBatches)] {
-		t.Errorf("kept %d runs; run_0 %v, the newest %v", len(runs), runs["run_0"], runs[fmt.Sprintf("run_%d", maxAskBatches)])
+
+	// A run forgotten while the person is being asked keeps nothing.
+	var forgetting *Engine
+	fctx := agenttool.ContextWithElicitor(context.Background(), func(context.Context, agenttool.Elicitation) (agenttool.Answer, error) {
+		forgetting.Forget("run_f")
+		return agenttool.Answer{Action: agenttool.ActionAccept}, nil
+	})
+	forgetting, err = Build(Policy{Allow: rules(t, "bash(git add:*)"), Ask: rules(t, "bash(git push:*)"), Default: Deny()}, testMatchers, WithAskInRun())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d, err := forgetting.Decide(fctx, batch("run_f", "git add -A", "git push")[0]); err != nil || d.Action != agentturn.Allow {
+		t.Fatalf("the add = %+v, %v", d, err)
+	}
+	forgetting.mu.Lock()
+	left := len(forgetting.asked)
+	forgetting.mu.Unlock()
+	if left != 0 {
+		t.Errorf("a forgotten run kept %d batches", left)
+	}
+}
+
+// A call decided in the run carries its subject and held mark, as a
+// deferral does, and a person's answer names no rule.
+func TestAskInRunDecisionsSayWhatTheyAreAbout(t *testing.T) {
+	j := &journal{}
+	e, err := Build(Policy{Allow: rules(t, "bash(git add:*) bash(git status:*) bash(git push:*)"), Ask: rules(t, "bash(git push:*)"), Default: Deny()}, testMatchers, WithAskInRun(), WithObserver(j.observe))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// What the same batch's deferral says without asking in the run.
+	plain, err := Build(Policy{Allow: rules(t, "bash(git add:*) bash(git status:*) bash(git push:*)"), Ask: rules(t, "bash(git push:*)"), Default: Deny()}, testMatchers)
+	if err != nil {
+		t.Fatal(err)
+	}
+	held, err := plain.Decide(context.Background(), batch("run_1", "git add -A && git status", "git push")[0])
+	if err != nil || !held.Held {
+		t.Fatalf("the plain hold = %+v, %v", held, err)
+	}
+	ctx, _ := askingCtx(agenttool.Answer{Action: agenttool.ActionDecline})
+	ds := decideAll(t, ctx, e, batch("run_1", "git add -A && git status", "git push"))
+	if !ds[0].Held || ds[0].Action != agentturn.Allow || ds[0].Subject != held.Subject {
+		t.Errorf("the released add = %+v, the hold's subject %q", ds[0], held.Subject)
+	}
+	asked := 0
+	for _, v := range j.all() {
+		if v.By == ByHuman {
+			asked++
+		}
+	}
+	if asked != 1 {
+		t.Errorf("%d verdicts by the person", asked)
+	}
+	for _, v := range j.all() {
+		if v.By == ByHuman && v.Rule != nil {
+			t.Errorf("a person's answer names rule %v", v.Rule)
+		}
 	}
 }

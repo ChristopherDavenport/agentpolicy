@@ -751,11 +751,16 @@ lists as pending, and records each release and each verdict the
 answers carried for it. A call the resumed run still lists, because
 the run failed as it started or the call was deferred again, is
 neither forgotten nor recorded, so the host answers it again and
-nothing is recorded twice. Answers built without a human follow the
-same two phases: a reviewer's verdict is recorded, and counted toward
-the denial bound, when the resumed run has taken its call, and
-answering the same end again gives the same answers without asking
-the reviewer again.
+nothing is recorded twice. Each resume is a run of its own, so what
+the engine keeps for a call the resumed run still lists moves to that
+run, where the host finds it when it answers the end it got back.
+Answers built without a human follow the same two phases: a
+reviewer's verdict is recorded, and counted toward the denial bound,
+when the resumed run has taken its call with the answer built for it,
+and answering the same end again gives the same answers without
+asking the reviewer again, unless the rules have changed since or the
+host drops the kept answers to ask another reviewer. When the denial
+bound stops the turn, the held calls' reason names the bound.
 
 Every answer the engine builds names `policy` as its decider and
 carries its verdict's reason. Every release is a verdict with held
@@ -783,6 +788,12 @@ modes:
   asked call of its batch is answered, and refused with `not released:
   the turn was stopped by the answer to <call> (<subject or tool>)`
   when an answer stops the turn.
+
+In the run, only a hook's terminate hint on the asked call stops the
+batch. A person's answer in the run is accept, decline or cancel, with
+no stop, so a person's decline in the run is always plain. A decision
+made in the run carries the subject and the held mark its deferral
+would have, and the verdict of a person's answer names no rule.
 
 Nothing is remembered for a call decided this way. A question nobody
 answers, or a call of the batch that could not be read, leaves the
@@ -1080,7 +1091,7 @@ The root module of this repository is the reference binding.
 | offering tools | `Engine.Removes(tool)`, `Engine.Filter(tools)`, `Engine.ToolProvider(base)` for `agentturn.Config.ToolProvider` |
 | grants | `Engine.Grant`, `Engine.GrantOver`; `Engine.GrantSet` → granted and `[]Refusal{Rule, Reason}`, `Engine.Revoke`, `Engine.Grants`; the scope: `ContextWithGrantScope(ctx, scope)`, `GrantScopeFromContext(ctx)`, `Engine.GrantsFor(ctx)`, `Engine.RevokeScope(ctx)` |
 | deferred calls | `Engine.Deferred`, `Engine.Runs`, `Engine.Forget` |
-| release | `Engine.Release(ctx, end, answers…)`; `ErrUnanswered`; `Engine.Resumed(ctx, end, answers, next)` with the end the resume returned |
+| release | `Engine.Release(ctx, end, answers…)`; `ErrUnanswered`; `Engine.Resumed(ctx, end, answers, next)` with the end the resume returned; `Engine.ForgetAnswers(runID)` |
 | asking in the run | `WithAskInRun()`, through the elicitor on the hook's context (`agentturn.Ask`) |
 | reviewer | `Reviewer`, `ReviewerFunc`, `Review{Outcome, Reason, Args, Note, By}`, `Outcome` (`Refused`, `Approved`, `TimedOut`); `Engine.Answers(ctx, r, end)`, whose refusals carry the verdict's reason as `agentturn.Answer.Reason`; a call that may have run is `agentturn.PendingCall.MayHaveRun` |
 | cut-off calls | `WithNeverStarted(fn)`; the tool from the pending call or `WithTools`; the output a call has where it ran from `agentturn.PendingCall.Ran` and `RanWhere`; `agentturn.PendingUndispatched` is approved for the resume, `agentturn.PendingRejected` answered as refused, in `PendingCall.Refused`'s words when it has them |

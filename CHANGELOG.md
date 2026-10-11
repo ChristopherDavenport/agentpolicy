@@ -28,20 +28,33 @@ versions may break the API.
   front that called `Release` or `Answers` alone now calls `Resumed`
   too, or the verdicts go unreported and the calls stay remembered
   until `Forget`, which now also drops what `Answers` kept and what was
-  asked in the run.
+  asked in the run. Every Resume is a run of its own, so `Resumed`
+  moves what the engine keeps for a call `next` still lists, its
+  deferral and what `Answers` decided, to `next`'s run: a front that
+  answers the end each Resume returns, after one that failed as it
+  started or part way through its calls, loses nothing and asks no
+  reviewer twice. A kept verdict is reported only when the call is
+  resumed with the answer `Answers` gave it; resumed with another, the
+  front decided, and the verdict is dropped uncounted. A kept answer
+  decided under rules that changed since (`Grant`, `Revoke`,
+  `SetPolicy`) is decided again. The new `Engine.ForgetAnswers(runID)`
+  drops a run's kept answers, for a front that asks another reviewer
+  about the same end.
 - Changed: a held call is known from the deferral that left it
   pending: what the engine remembers, or else the `Held` mark on
   `agentturn.PendingCall.Decision`, which agentturn/session reads back
   from the record since agentturn v0.0.23. An engine that never saw
   the run, one built after a restart, releases the held calls with the
-  reason, subject and decider the decision carries, and `Answers` asks
+  reason and subject the decision carries, and `Answers` asks
   its reviewer about the asked calls alone, with the decision's reason
   and subject, where it reviewed every call (agentkit#91, agentkit#92).
 - Changed: a held call that an answer stopping the turn refuses
   (`agentturn.Refuse`) names the call whose answer stopped it: its
   reason is `not released: the turn was stopped by the answer to <call
   ID> (<subject or tool>)`, where it was `not released: the turn was
-  stopped`. What the model reads is unchanged.
+  stopped`; when the reviewer denial bound stopped the turn, it is `not
+  released: the turn was stopped at the reviewer denial bound`. What
+  the model reads is unchanged.
 - Added: `WithAskInRun()`. `Decide` asks the person about a batch's
   asked calls while the run waits, through `agentturn.Ask` and the
   elicitor on the hook's context, once per batch in the model's order,
@@ -51,11 +64,16 @@ versions may break the API.
   decision then reads, unless the policy denies it; a held call
   released once every ask of its batch is answered, since a plain
   decline refuses its own call alone, and refused, naming the call,
-  when an answer stops the turn. The answers are kept by the run, its
+  when an answer stops the turn. In the run only a hook's `Terminate`
+  stops the batch: agenttool answers have no stop, so a person's
+  in-run decline is plain. A decision made in the run carries its
+  subject and, for a held call, its held mark, and the verdict of a
+  person's answer names no rule. The answers are kept by the run, its
   turn and its calls, not the rules of the moment, so a grant made
   meanwhile does not have the person asked again, and dropped when
-  the run moves to its next batch, when `Forget` or `Resumed` names the
-  run, and, past 64 runs in flight, oldest first. Nothing is
+  the run moves to its next batch and when `Forget` or `Resumed` names
+  the run, even while the person is being asked; a batch with a call
+  still undecided is never dropped to make room. Nothing is
   remembered for a call settled in the run, so `Engine.Runs` does not
   grow for it. Without an elicitor, when a question is cancelled, or
   when a call of the batch could not be read, the call and those held

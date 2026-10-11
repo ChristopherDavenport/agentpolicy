@@ -515,7 +515,7 @@ func TestAnswersReleasesHeldCalls(t *testing.T) {
 	reviewedIDs = nil
 	answers, err = answersResumed(ctx, e, reviewer(Refused), hold())
 	want := []agentturn.Answer{
-		agentturn.Output(openresponses.NewFunctionCallOutput("call_a", "The call was held for an approval and the turn was stopped; the call did not run.")).WithBy(ByPolicy).WithReason("not released: the turn was stopped by the answer to call_b (bash)"),
+		agentturn.Output(openresponses.NewFunctionCallOutput("call_a", "The call was held for an approval and the turn was stopped; the call did not run.")).WithBy(ByPolicy).WithReason("not released: the turn was stopped at the reviewer denial bound"),
 		agentturn.Refuse(openresponses.NewFunctionCallOutput("call_b", "Denied by reviewer. Do not pursue the same outcome through a workaround, indirect execution or policy circumvention.")).WithBy(ByAgent).WithReason("denied by reviewer"),
 	}
 	if !errors.Is(err, ErrDenialBound) || !reflect.DeepEqual(answers, want) || strings.Join(reviewedIDs, ",") != "call_b" {
@@ -1302,5 +1302,118 @@ func TestACutOffCallNamesItsOpenQuestion(t *testing.T) {
 	}
 	if answers[0].Output != nil || !strings.HasSuffix(answers[0].Reason, open) {
 		t.Errorf("the run-again approval = %+v", answers[0])
+	}
+}
+
+// A kept verdict is reported only for the answer Answers gave: a front
+// that resumes the call with an answer of its own reports nothing for
+// it and counts nothing toward the bound. ForgetAnswers drops what was
+// kept, so another reviewer is asked; and a kept answer made under
+// rules that changed since is decided again.
+func TestKeptAnswersBelongToTheirAnswer(t *testing.T) {
+	ctx := context.Background()
+	j := &journal{}
+	e, err := Build(Policy{Default: Ask()}, testMatchers, WithObserver(j.observe), WithDenialBound(DenialBound{Consecutive: 1}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	asked := 0
+	refuse := ReviewerFunc(func(context.Context, agentturn.ToolCallInfo, Verdict) (Review, error) {
+		asked++
+		return Review{Outcome: Refused, Reason: "no"}, nil
+	})
+	approve := ReviewerFunc(func(context.Context, agentturn.ToolCallInfo, Verdict) (Review, error) {
+		asked++
+		return Review{Outcome: Approved, By: ByHuman}, nil
+	})
+	end := pendingEnd("run_1", &openresponses.FunctionCall{CallID: "c1", Name: "bash", Arguments: `{"command":"make deploy"}`})
+
+	// The front resumes with its own answer: nothing is reported or
+	// counted.
+	if _, err := e.Answers(ctx, refuse, end); !errors.Is(err, ErrDenialBound) {
+		t.Fatalf("the refusal: %v", err)
+	}
+	e.Resumed(ctx, end, []agentturn.Answer{agentturn.Approve("c1").WithBy(ByHuman)}, ranAll)
+	if len(j.all()) != 0 {
+		t.Errorf("a front's own answer reported %+v", j.all())
+	}
+	if again, err := e.Answers(ctx, refuse, pendingEnd("run_2", &openresponses.FunctionCall{CallID: "c2", Name: "bash", Arguments: `{}`})); !errors.Is(err, ErrDenialBound) || again == nil {
+		t.Fatalf("the next refusal: %v", err)
+	}
+	e.Forget("run_2")
+
+	// Escalating: ForgetAnswers drops the kept answer, and the next
+	// reviewer is asked.
+	asked = 0
+	end = pendingEnd("run_3", &openresponses.FunctionCall{CallID: "c3", Name: "bash", Arguments: `{}`})
+	e.Answers(ctx, refuse, end)
+	e.ForgetAnswers("run_3")
+	answers, err := e.Answers(ctx, approve, end)
+	if err != nil || asked != 2 || answers[0].Output != nil {
+		t.Errorf("escalated: %s, %v, asked %d", dump(answers), err, asked)
+	}
+
+	// A grant since the answer was kept: the call is decided again.
+	asked = 0
+	end = pendingEnd("run_4", &openresponses.FunctionCall{CallID: "c4", Name: "bash", Arguments: `{}`})
+	e.Answers(ctx, refuse, end)
+	if err := e.Grant(ctx, rules(t, "bash(git status:*)")[0]); err != nil {
+		t.Fatal(err)
+	}
+	e.Answers(ctx, refuse, end)
+	if asked != 2 {
+		t.Errorf("after a grant the reviewer was asked %d times in all", asked)
+	}
+}
+
+// When the denial bound stops the turn, the held calls say so, not
+// that some call's answer stopped it.
+func TestTheBoundStopsTheHeldCalls(t *testing.T) {
+	ctx := context.Background()
+	e, err := Build(Policy{Allow: rules(t, "bash(git add:*)"), Ask: rules(t, "bash(git push:*)"), Default: Deny()}, testMatchers, WithDenialBound(DenialBound{Consecutive: 1}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	end := &agentturn.RunEnd{RunID: "run_1", Reason: agentturn.ReasonInputRequired}
+	for _, info := range batch("run_1", "git add -A", "git push") {
+		e.Decide(ctx, info)
+		end.Pending = append(end.Pending, agentturn.PendingCall{Call: info.Call, Reason: agentturn.PendingDeferred})
+	}
+	answers, err := e.Answers(ctx, ReviewerFunc(func(context.Context, agentturn.ToolCallInfo, Verdict) (Review, error) {
+		return Review{Outcome: Refused}, nil
+	}), end)
+	if !errors.Is(err, ErrDenialBound) || answers[0].Reason != "not released: the turn was stopped at the reviewer denial bound" {
+		t.Errorf("the held add = %+v, %v", answers[0], err)
+	}
+}
+
+// A front that answers the end each Resume returns does not have the
+// reviewer asked again under the new run.
+func TestAnswersFollowTheCallsToTheNextRun(t *testing.T) {
+	ctx := context.Background()
+	e, err := Build(Policy{Default: Ask()}, testMatchers)
+	if err != nil {
+		t.Fatal(err)
+	}
+	asked := 0
+	approve := ReviewerFunc(func(context.Context, agentturn.ToolCallInfo, Verdict) (Review, error) {
+		asked++
+		return Review{Outcome: Approved}, nil
+	})
+	call := &openresponses.FunctionCall{CallID: "c1", Name: "bash", Arguments: `{}`}
+	end := pendingEnd("run_1", call)
+	first, _ := e.Answers(ctx, approve, end)
+	// The resume failed as it started: run_2 still lists the call.
+	next := pendingEnd("run_2", call)
+	e.Resumed(ctx, end, first, next)
+	again, _ := e.Answers(ctx, approve, next)
+	if asked != 1 || !reflect.DeepEqual(again, first) {
+		t.Errorf("asked %d; answers %s, first %s", asked, dump(again), dump(first))
+	}
+	e.mu.Lock()
+	_, left := e.answering["run_1"]
+	e.mu.Unlock()
+	if left {
+		t.Error("run_1's answers were left behind")
 	}
 }

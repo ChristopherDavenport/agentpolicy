@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -697,14 +698,17 @@ func TestLoopAReleaseThatDoesNotStartChangesNothing(t *testing.T) {
 	if len(j.all()) != 0 {
 		t.Errorf("a release that did not start reported %+v", j.all())
 	}
+	// Every Resume is a run of its own: the calls wait under the failed
+	// run's ID now, with what the engine knew of them.
 	for _, p := range end.Pending {
-		if _, ok := e.Deferred(end.RunID, p.Call.CallID); !ok {
+		if _, ok := e.Deferred(ran.RunID, p.Call.CallID); !ok {
 			t.Errorf("a release that did not start forgot %s", p.Call.CallID)
 		}
 	}
 
-	// The front answers again, and the engine releases as before.
-	again, err := e.Release(ctx, end, push)
+	// The front answers the end it got back, and the engine releases as
+	// before.
+	again, err := e.Release(ctx, ran, push)
 	if err != nil || !reflect.DeepEqual(again, answers) {
 		t.Fatalf("release again: %s, %v", dump(again), err)
 	}
@@ -712,7 +716,7 @@ func TestLoopAReleaseThatDoesNotStartChangesNothing(t *testing.T) {
 	if err != nil || resumed.Reason != agentturn.ReasonDone || len(bash.ran) != 3 {
 		t.Fatalf("resume again: err=%v end=%+v ran=%v", err, resumed, bash.ran)
 	}
-	e.Resumed(ctx, end, again, resumed)
+	e.Resumed(ctx, ran, again, resumed)
 	var got []string
 	for _, v := range j.all() {
 		got = append(got, fmt.Sprintf("%s %v held=%v %s", v.CallID, v.Action, v.Held, v.Reason))
@@ -887,4 +891,110 @@ func TestLoopAHeldCallsHookNoteIsSaidOnce(t *testing.T) {
 	if said != 1 {
 		t.Errorf("the hook's note was said %d times", said)
 	}
+}
+
+// Every Resume is a run of its own. A front that answers the end each
+// Resume returns, after one that failed as it started or part way
+// through its calls, finds every call it still has to answer under the
+// new run, with what the engine knew of it, and nothing of the first
+// run is left behind.
+func TestLoopAFrontAnswersTheEndEachResumeReturns(t *testing.T) {
+	ctx := context.Background()
+	setup := func(t *testing.T, fail func(agentturn.Event) bool) (*Engine, *journal, *agentturn.Agent, *bashTool) {
+		j := &journal{}
+		e, err := Build(Policy{Allow: rules(t, "bash(git add:*) bash(git commit:*)"), Ask: rules(t, "bash(git push:*)"), Default: Deny()}, testMatchers, WithObserver(j.observe))
+		if err != nil {
+			t.Fatal(err)
+		}
+		bash := &bashTool{}
+		agent := agentturn.New(agentturn.Config{Model: &batchModel{}, Tools: []agenttool.Tool{bash.tool()}, BeforeToolCall: e.BeforeToolCall(), ToolExecution: agentturn.ExecSequential})
+		failed := false
+		agent.Subscribe(func(_ context.Context, ev agentturn.Event) error {
+			if !failed && fail(ev) {
+				failed = true
+				return errors.New("the store is down")
+			}
+			return nil
+		})
+		return e, j, agent, bash
+	}
+	prompt := "git add -A\ngit commit -m wip\ngit push"
+	settle := func(t *testing.T, e *Engine, agent *agentturn.Agent, end *agentturn.RunEnd) *agentturn.RunEnd {
+		t.Helper()
+		for range 3 {
+			var push []agentturn.Answer
+			for _, p := range end.Pending {
+				if v, ok := e.Deferred(end.RunID, p.Call.CallID); ok && !v.Held {
+					push = append(push, agentturn.Approve(p.Call.CallID))
+				}
+			}
+			answers, err := e.Release(ctx, end, push...)
+			if err != nil {
+				t.Fatalf("release of %s: %v", end.RunID, err)
+			}
+			next, _ := agent.Resume(ctx, answers...)
+			e.Resumed(ctx, end, answers, next)
+			if next == nil || len(next.Pending) == 0 {
+				return next
+			}
+			end = next
+		}
+		t.Fatal("the calls were never taken")
+		return nil
+	}
+	check := func(t *testing.T, e *Engine, j *journal, bash *bashTool) {
+		t.Helper()
+		if runs := e.Runs(); len(runs) != 0 {
+			t.Errorf("runs left = %v", runs)
+		}
+		released := 0
+		for _, v := range j.all() {
+			if v.Held && v.Action == agentturn.Allow {
+				released++
+				if v.Rule == nil {
+					t.Errorf("a release lost its rule: %+v", v)
+				}
+			}
+		}
+		if released != 2 {
+			t.Errorf("%d releases reported", released)
+		}
+		// Each call ran once; a run that failed part way runs what it
+		// still owes in the order the loop takes it.
+		ran := append([]string(nil), bash.ran...)
+		slices.Sort(ran)
+		if got := strings.Join(ran, "|"); got != "git add -A|git commit -m wip|git push" {
+			t.Errorf("ran = %q", strings.Join(bash.ran, "|"))
+		}
+	}
+
+	t.Run("failed as it started", func(t *testing.T) {
+		e, j, agent, bash := setup(t, func(ev agentturn.Event) bool {
+			s, ok := ev.(*agentturn.RunStart)
+			return ok && s.Source == agentturn.SourceResume
+		})
+		end, err := agent.Prompt(ctx, openresponses.UserText(prompt))
+		if err != nil || len(end.Pending) != 3 {
+			t.Fatalf("prompt: %v %+v", err, end)
+		}
+		settle(t, e, agent, end)
+		check(t, e, j, bash)
+	})
+	t.Run("failed part way", func(t *testing.T) {
+		starts := 0
+		e, j, agent, bash := setup(t, func(ev agentturn.Event) bool {
+			if _, ok := ev.(*agentturn.ToolStart); ok {
+				starts++
+				// The prompt's three, then the resume's second.
+				return starts == 5
+			}
+			return false
+		})
+		end, err := agent.Prompt(ctx, openresponses.UserText(prompt))
+		if err != nil || len(end.Pending) != 3 {
+			t.Fatalf("prompt: %v %+v", err, end)
+		}
+		settle(t, e, agent, end)
+		check(t, e, j, bash)
+	})
 }

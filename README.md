@@ -135,7 +135,13 @@ returned, settles each answered call that end no longer lists as
 pending: it forgets the call and reports its release, or the verdict
 `Answers` reached for it, through the observer. A run that failed as
 it started returns an end with the calls still pending, so nothing is
-settled and nothing reported twice when the front answers again. A held call is known from what the engine remembers, or
+settled and nothing reported twice when the front answers again. Every
+`Resume` is a run of its own; what the engine keeps for a call the
+resumed run still lists moves to that run, so a front answers the end
+each `Resume` returns until its calls are taken. `Answers` keeps its
+answers the same way and gives them again without asking; a front
+that escalates to another reviewer calls `Engine.ForgetAnswers(runID)`
+first. A held call is known from what the engine remembers, or
 from the `Held` mark on `agentturn.PendingCall.Decision`, which the
 loop carries on the run's end and agentturn/session reads back from
 the record, so an engine built after a restart releases the same end.

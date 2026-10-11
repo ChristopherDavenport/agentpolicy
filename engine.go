@@ -297,8 +297,7 @@ type Engine struct {
 	answering map[string]map[string]answeredCall
 	// asked is what [WithAskInRun] asked about each batch in flight,
 	// by batch key, until the batch's last call is decided.
-	asked  map[string]*askBatch
-	askSeq uint64
+	asked map[string]*askBatch
 }
 
 type deferredCall struct {
