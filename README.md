@@ -148,6 +148,15 @@ refusal. A pending call neither the front nor the engine answers is
 `ErrUnanswered`, which names it, rather than a `Resume` that fails
 with nothing to say.
 
+A product that approves every call in place, as Cline does, builds
+the engine `WithAskInRun()`: the engine asks the person about a
+batch's asked calls through the elicitor on the hook's context
+(`agentturn.Ask`) while the run waits, and decides the held calls from
+the answers, released when every ask was accepted and refused when one
+was declined. The run never ends on a held call, and the engine
+remembers nothing for a call settled this way. A question nobody
+answers defers its call as before.
+
 A product's own before-tool-call hooks go to `WithHooks`, which folds
 their decisions into the engine's before the hold, strictest first: a
 hook that asks holds the batch as a rule does, and a hook that blocks

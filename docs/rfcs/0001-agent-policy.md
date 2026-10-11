@@ -751,6 +751,20 @@ followed by the reason it was allowed, or block with `not released:
 the turn was stopped`. An answer the host gave a held call itself is
 the host's decision, and records no release.
 
+### Asking in the run
+
+A host may ask the person about a call while the run waits, rather
+than ending the run on it. The engine then asks, at the first call of
+a batch it is handed, about every call of the batch a rule asks about,
+in the model's order, and keeps the answers for the batch. A call that
+was asked about is decided as the person answered, with `human` as the
+decider. A call the policy allowed and the batch held is allowed when
+every asked call of its batch was accepted, which is its release, and
+blocked with `not run: the user declined <tool>` when one was
+declined. Nothing is remembered for a call decided this way. A
+question nobody answers leaves its call deferred, and the calls held
+beside it wait for the run's end with it, for a release.
+
 ### Answers without a human
 
 A **reviewer** answers a deferred call where a human would: a rule of
@@ -1043,6 +1057,7 @@ The root module of this repository is the reference binding.
 | grants | `Engine.Grant`, `Engine.GrantOver`; `Engine.GrantSet` → granted and `[]Refusal{Rule, Reason}`, `Engine.Revoke`, `Engine.Grants`; the scope: `ContextWithGrantScope(ctx, scope)`, `GrantScopeFromContext(ctx)`, `Engine.GrantsFor(ctx)`, `Engine.RevokeScope(ctx)` |
 | deferred calls | `Engine.Deferred`, `Engine.Runs`, `Engine.Forget` |
 | release | `Engine.Release(ctx, end, answers…)`; `ErrUnanswered`; `Engine.Resumed(ctx, end, answers)` once the resumed run started |
+| asking in the run | `WithAskInRun()`, through the elicitor on the hook's context (`agentturn.Ask`) |
 | reviewer | `Reviewer`, `ReviewerFunc`, `Review{Outcome, Reason, Args, Note, By}`, `Outcome` (`Refused`, `Approved`, `TimedOut`); `Engine.Answers(ctx, r, end)`, whose refusals carry the verdict's reason as `agentturn.Answer.Reason`; a call that may have run is `agentturn.PendingCall.MayHaveRun` |
 | cut-off calls | `WithNeverStarted(fn)`; the tool from the pending call or `WithTools`; the output a call has where it ran from `agentturn.PendingCall.Ran` and `RanWhere`; `agentturn.PendingUndispatched` is approved for the resume, `agentturn.PendingRejected` answered as refused, in `PendingCall.Refused`'s words when it has them |
 | nested calls | `agentturn.ToolCallInfo.Parent` non-empty: decided and reported, no deferral remembered |

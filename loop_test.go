@@ -716,3 +716,113 @@ func TestLoopAReleaseThatDoesNotStartChangesNothing(t *testing.T) {
 		t.Errorf("runs after the resumed run = %v", runs)
 	}
 }
+
+// With WithAskInRun the engine asks the person about a batch's asked
+// calls while the run waits, and decides the calls it held beside
+// them from the answers, so a product that approves in place never
+// ends a run on held calls alone (#79).
+func TestLoopAsksInTheRun(t *testing.T) {
+	ctx := context.Background()
+	prompt := "git add -A\ngit push --force"
+	type outcome struct {
+		reason   agentturn.Reason
+		pending  int
+		ran      string
+		verdicts string
+		asked    int
+		said     string
+	}
+	tests := []struct {
+		name   string
+		answer *agenttool.Answer
+		want   outcome
+	}{
+		{name: "accepted", answer: &agenttool.Answer{Action: agenttool.ActionAccept, Note: "only this once"}, want: outcome{
+			reason: agentturn.ReasonDone, ran: "git add -A|git push --force", asked: 1,
+			verdicts: "allow held=true policy released: allowed by bash(git add:*)|allow held=false human approval required by bash(git push:*)",
+			said:     "The user said: only this once",
+		}},
+		{name: "declined", answer: &agenttool.Answer{Action: agenttool.ActionDecline, Note: "not to main"}, want: outcome{
+			reason: agentturn.ReasonDone, ran: "", asked: 1,
+			verdicts: "block held=true policy not run: the user declined bash|block held=false human declined when asked: approval required by bash(git push:*); the user said: not to main",
+		}},
+		{name: "cancelled", answer: &agenttool.Answer{Action: agenttool.ActionCancel}, want: outcome{
+			reason: agentturn.ReasonInputRequired, pending: 2, ran: "", asked: 1,
+			verdicts: "defer held=true policy held for approval: allowed by bash(git add:*)|defer held=false policy approval required by bash(git push:*)",
+		}},
+		{name: "no elicitor", want: outcome{
+			reason: agentturn.ReasonInputRequired, pending: 2, ran: "", asked: 0,
+			verdicts: "defer held=true policy held for approval: allowed by bash(git add:*)|defer held=false policy approval required by bash(git push:*)",
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			j := &journal{}
+			e, err := Build(Policy{
+				Allow:   rules(t, "bash(git add:*)"),
+				Ask:     rules(t, "bash(git push:*)"),
+				Default: Deny(),
+			}, testMatchers, WithObserver(j.observe), WithAskInRun())
+			if err != nil {
+				t.Fatal(err)
+			}
+			bash := &bashTool{}
+			asked := 0
+			cfg := agentturn.Config{
+				Model:          &batchModel{},
+				Tools:          []agenttool.Tool{bash.tool()},
+				BeforeToolCall: e.BeforeToolCall(),
+				ToolExecution:  agentturn.ExecSequential,
+			}
+			if tt.answer != nil {
+				cfg.ToolElicitor = func(context.Context, agenttool.Elicitation) (agenttool.Answer, error) {
+					asked++
+					return *tt.answer, nil
+				}
+			}
+			agent := agentturn.New(cfg)
+			end, err := agent.Prompt(ctx, openresponses.UserText(prompt))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var verdicts []string
+			for _, v := range j.all() {
+				verdicts = append(verdicts, fmt.Sprintf("%s held=%v %s %s", actionName(v.Action), v.Held, v.By, v.Reason))
+			}
+			got := outcome{reason: end.Reason, pending: len(end.Pending), ran: strings.Join(bash.ran, "|"), verdicts: strings.Join(verdicts, "|"), asked: asked}
+			if tt.want.said != "" {
+				for _, it := range agent.State().Transcript {
+					if m, ok := it.(*openresponses.Message); ok && strings.Contains(m.Text(), tt.want.said) {
+						got.said = tt.want.said
+					}
+				}
+			}
+			if got != tt.want {
+				t.Errorf("got  %+v\nwant %+v", got, tt.want)
+			}
+			if end.Reason == agentturn.ReasonDone {
+				if runs := e.Runs(); len(runs) != 0 {
+					t.Errorf("runs after a run settled in place = %v", runs)
+				}
+			}
+			e.mu.Lock()
+			left := len(e.asked)
+			e.mu.Unlock()
+			if left != 0 {
+				t.Errorf("%d batches still kept", left)
+			}
+		})
+	}
+}
+
+func actionName(a agentturn.ToolAction) string {
+	switch a {
+	case agentturn.Allow:
+		return "allow"
+	case agentturn.Block:
+		return "block"
+	case agentturn.Defer:
+		return "defer"
+	}
+	return fmt.Sprint(int(a))
+}

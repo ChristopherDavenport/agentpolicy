@@ -26,6 +26,17 @@ versions may break the API.
   reason and the note the decision carries, and `Answers` asks its
   reviewer about the asked calls alone, with the decision's reason and
   subject, where it reviewed every call (agentkit#91, agentkit#92).
+- Added: `WithAskInRun()`. `Decide` asks the person about a batch's
+  asked calls while the run waits, through `agentturn.Ask` and the
+  elicitor on the hook's context, once per batch in the model's order,
+  and decides each call from the answers: an asked call as the person
+  answered, by `human`; a held call allowed when every ask of its batch
+  was accepted, and refused with `not run: the user declined <tool>`
+  when one was declined. Nothing is remembered for a call settled in
+  the run, so `Engine.Runs` does not grow and a run never ends on held
+  calls alone. Without an elicitor, or when a question is cancelled,
+  the call is deferred as before. RFC 0001 says so under "Asking in
+  the run" (#79).
 - Changed: an approval `Release` builds carries its verdict's reason,
   `released: <why the policy allowed it>`, as `agentturn.Answer.Reason`,
   so the session recorder writes it on the call's decision.
