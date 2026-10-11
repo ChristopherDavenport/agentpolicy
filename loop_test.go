@@ -369,7 +369,9 @@ func TestLoopHoldsTheBatchForAnAsk(t *testing.T) {
 		t.Fatalf("resume reviewed: err=%v end=%+v ran=%v", err, end, bash.ran)
 	}
 	tail = agent.State().Transcript
-	if note := tail[len(tail)-2].(*openresponses.Message); note.Role != openresponses.RoleUser || note.Text() != "pushed under review" {
+	// A reviewing model's note is said in its voice, as the developer's
+	// (agentturn v0.0.24).
+	if note := tail[len(tail)-2].(*openresponses.Message); note.Role != openresponses.RoleDeveloper || note.Text() != "pushed under review" {
 		t.Errorf("note = %+v", note)
 	}
 
@@ -740,7 +742,7 @@ func TestLoopAsksInTheRun(t *testing.T) {
 		{name: "accepted", answer: &agenttool.Answer{Action: agenttool.ActionAccept, Note: "only this once"}, want: outcome{
 			reason: agentturn.ReasonDone, ran: "git add -A|git push --force", asked: 1,
 			verdicts: "allow held=true policy released: allowed by bash(git add:*)|allow held=false human approval required by bash(git push:*)",
-			said:     "The user said: only this once",
+			said:     "only this once",
 		}},
 		{name: "declined", answer: &agenttool.Answer{Action: agenttool.ActionDecline, Note: "not to main"}, want: outcome{
 			reason: agentturn.ReasonDone, ran: "", asked: 1,
@@ -792,7 +794,9 @@ func TestLoopAsksInTheRun(t *testing.T) {
 			got := outcome{reason: end.Reason, pending: len(end.Pending), ran: strings.Join(bash.ran, "|"), verdicts: strings.Join(verdicts, "|"), asked: asked}
 			if tt.want.said != "" {
 				for _, it := range agent.State().Transcript {
-					if m, ok := it.(*openresponses.Message); ok && strings.Contains(m.Text(), tt.want.said) {
+					// A person's words are a user message of their own
+					// (agentturn v0.0.24).
+					if m, ok := it.(*openresponses.Message); ok && m.Role == openresponses.RoleUser && m.Text() == tt.want.said {
 						got.said = tt.want.said
 					}
 				}

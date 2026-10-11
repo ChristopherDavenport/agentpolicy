@@ -7,7 +7,9 @@ versions may break the API.
 
 ## Unreleased
 
-- Changed: requires agentturn v0.0.23, up from v0.0.22.
+- Changed: requires agentturn v0.0.24, up from v0.0.22. A reviewer's
+  note is said in the reviewer's voice, a developer message for `agent`
+  and `policy`, as agentturn v0.0.24 says every answer's note.
 - Changed, breaking: a release is two phases (#67). `Release` builds
   the answers and changes nothing: it forgets no call and reports no
   verdict, so a `Resume` that does not start leaves the engine as it
