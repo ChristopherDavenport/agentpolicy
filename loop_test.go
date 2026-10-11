@@ -176,7 +176,7 @@ func TestLoopAnswersResumeWithoutAHuman(t *testing.T) {
 	if err != nil || end.Reason != agentturn.ReasonInputRequired {
 		t.Fatalf("prompt: err=%v end=%+v", err, end)
 	}
-	answers, err := e.Answers(ctx, reviewer, end)
+	answers, err := answersResumed(ctx, e, reviewer, end)
 	if err != nil || len(answers) != 1 {
 		t.Fatalf("answers = %v, %v", answers, err)
 	}
@@ -190,7 +190,7 @@ func TestLoopAnswersResumeWithoutAHuman(t *testing.T) {
 	if err != nil || end.Reason != agentturn.ReasonInputRequired {
 		t.Fatalf("prompt: err=%v end=%+v", err, end)
 	}
-	answers, err = e.Answers(ctx, reviewer, end)
+	answers, err = answersResumed(ctx, e, reviewer, end)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -364,7 +364,7 @@ func TestLoopHoldsTheBatchForAnAsk(t *testing.T) {
 	}
 	prior := end
 	end, err = agent.Resume(ctx, answers...)
-	e.Resumed(ctx, prior, answers)
+	e.Resumed(ctx, prior, answers, end)
 	if err != nil || end.Reason != agentturn.ReasonDone || len(bash.ran) != 3 {
 		t.Fatalf("resume reviewed: err=%v end=%+v ran=%v", err, end, bash.ran)
 	}
@@ -394,7 +394,7 @@ func TestLoopHoldsTheBatchForAnAsk(t *testing.T) {
 	}
 	want := "held held asked released released " + // the approval: two releases
 		"held held asked stopped stopped " + // the stop
-		"held held asked reviewed released released" // the review
+		"held held asked released released reviewed" // the review, reported in the model's order once the run resumed
 	if got := strings.Join(kinds, " "); got != want {
 		t.Errorf("verdicts = %q\nwant %q", got, want)
 	}
@@ -508,7 +508,7 @@ func TestLoopAnswersApprovesAnUndispatchedCallForThePolicy(t *testing.T) {
 	if p := agent.State().Pending; len(p) != 1 || p[0].Reason != agentturn.PendingUndispatched {
 		t.Fatalf("seeded pending = %+v", p)
 	}
-	answers, err := e.Answers(ctx, never, seededEnd(agent))
+	answers, err := answersResumed(ctx, e, never, seededEnd(agent))
 	if err != nil || !reflect.DeepEqual(answers, wantAnswers) {
 		t.Fatalf("answers = %s, %v", dump(answers), err)
 	}
@@ -535,7 +535,7 @@ func TestLoopAnswersApprovesAnUndispatchedCallForThePolicy(t *testing.T) {
 		t.Fatal(err)
 	}
 	agent, bash = seed(e)
-	answers, err = e.Answers(ctx, never, seededEnd(agent))
+	answers, err = answersResumed(ctx, e, never, seededEnd(agent))
 	if err != nil || !reflect.DeepEqual(answers, wantAnswers) {
 		t.Fatalf("answers = %s, %v", dump(answers), err)
 	}
@@ -550,7 +550,7 @@ func TestLoopAnswersApprovesAnUndispatchedCallForThePolicy(t *testing.T) {
 	approve := ReviewerFunc(func(context.Context, agentturn.ToolCallInfo, Verdict) (Review, error) {
 		return Review{Outcome: Approved}, nil
 	})
-	answers, err = e.Answers(ctx, approve, end)
+	answers, err = answersResumed(ctx, e, approve, end)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -616,7 +616,7 @@ func TestLoopAnswersRefusesARewriteResumeWouldReject(t *testing.T) {
 		reviewed = append(reviewed, info.Call.CallID+": "+v.Reason)
 		return Review{Outcome: Approved, Args: other}, nil
 	})
-	answers, err := e.Answers(ctx, reviewer, seededEnd(agent))
+	answers, err := answersResumed(ctx, e, reviewer, seededEnd(agent))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -683,9 +683,17 @@ func TestLoopAReleaseThatDoesNotStartChangesNothing(t *testing.T) {
 	if err != nil || len(answers) != 3 {
 		t.Fatalf("release: %s, %v", dump(answers), err)
 	}
-	if ran, err := agent.Resume(ctx, answers...); err == nil || len(bash.ran) != 0 {
+	ran, err := agent.Resume(ctx, answers...)
+	if err == nil || len(bash.ran) != 0 {
 		t.Fatalf("the resume started: end=%+v err=%v ran=%v", ran, err, bash.ran)
 	}
+	// The run failed as it started, and Resume returns its end with every
+	// call still pending: a front that settles whatever end Resume
+	// returned settles nothing.
+	if ran == nil || len(ran.Pending) != 3 {
+		t.Fatalf("the failed resume's end = %+v", ran)
+	}
+	e.Resumed(ctx, end, answers, ran)
 	if len(j.all()) != 0 {
 		t.Errorf("a release that did not start reported %+v", j.all())
 	}
@@ -704,7 +712,7 @@ func TestLoopAReleaseThatDoesNotStartChangesNothing(t *testing.T) {
 	if err != nil || resumed.Reason != agentturn.ReasonDone || len(bash.ran) != 3 {
 		t.Fatalf("resume again: err=%v end=%+v ran=%v", err, resumed, bash.ran)
 	}
-	e.Resumed(ctx, end, again)
+	e.Resumed(ctx, end, again, resumed)
 	var got []string
 	for _, v := range j.all() {
 		got = append(got, fmt.Sprintf("%s %v held=%v %s", v.CallID, v.Action, v.Held, v.Reason))
@@ -744,9 +752,11 @@ func TestLoopAsksInTheRun(t *testing.T) {
 			verdicts: "allow held=true policy released: allowed by bash(git add:*)|allow held=false human approval required by bash(git push:*)",
 			said:     "only this once",
 		}},
+		// A plain decline refuses its own call alone, as at the run's
+		// end: the call held beside it runs.
 		{name: "declined", answer: &agenttool.Answer{Action: agenttool.ActionDecline, Note: "not to main"}, want: outcome{
-			reason: agentturn.ReasonDone, ran: "", asked: 1,
-			verdicts: "block held=true policy not run: the user declined bash|block held=false human declined when asked: approval required by bash(git push:*); the user said: not to main",
+			reason: agentturn.ReasonDone, ran: "git add -A", asked: 1,
+			verdicts: "allow held=true policy released: allowed by bash(git add:*)|block held=false human declined when asked: approval required by bash(git push:*); the user said: not to main",
 		}},
 		{name: "cancelled", answer: &agenttool.Answer{Action: agenttool.ActionCancel}, want: outcome{
 			reason: agentturn.ReasonInputRequired, pending: 2, ran: "", asked: 1,

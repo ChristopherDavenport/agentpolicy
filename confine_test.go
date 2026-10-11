@@ -344,7 +344,7 @@ func TestAnswersLooksUpWithTheRunID(t *testing.T) {
 		{"another run's ID on the context", agentturn.ContextWithRunID(ctx, "other"), agentturn.Output(openresponses.NewFunctionCallOutput("seeded", cut)).WithBy(ByPolicy).WithReason("not reviewed: unknown")},
 	} {
 		seen = nil
-		answers, err := e.Answers(tc.ctx, reviewer, end())
+		answers, err := answersResumed(tc.ctx, e, reviewer, end())
 		if err != nil {
 			t.Fatalf("%s: %v", tc.name, err)
 		}

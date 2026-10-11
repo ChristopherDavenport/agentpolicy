@@ -291,9 +291,14 @@ type Engine struct {
 	// run that ended another way left behind.
 	deferred map[string]map[string]deferredCall
 	reviews  reviewLog
+	// answering is what [Engine.Answers] decided about each pending call
+	// of a run, by run and then by call, until [Engine.Resumed] reports
+	// it or [Engine.Forget] drops the run.
+	answering map[string]map[string]answeredCall
 	// asked is what [WithAskInRun] asked about each batch in flight,
 	// by batch key, until the batch's last call is decided.
-	asked map[string]*askBatch
+	asked  map[string]*askBatch
+	askSeq uint64
 }
 
 type deferredCall struct {
@@ -654,9 +659,8 @@ func (e *Engine) BeforeToolCall() func(context.Context, agentturn.ToolCallInfo) 
 // on its info. Its deferral is reported as a verdict, but nothing is
 // remembered for it: the loop settles it inline, with the elicitor on
 // the invoking tool's context or with a refusal, and it never ends the
-// run pending, so no [Engine.Answers] or [Engine.Release] would
-// forget it and [Engine.Deferred] would list it for as long as the
-// run lives.
+// run pending, so no [Engine.Resumed] would forget it and
+// [Engine.Deferred] would list it for as long as the run lives.
 //
 // One engine serves every agent of a product. What it defers is
 // remembered under the call's own run, so a decision in a sub-agent's

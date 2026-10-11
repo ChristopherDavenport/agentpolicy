@@ -10,38 +10,63 @@ versions may break the API.
 - Changed: requires agentturn v0.0.24, up from v0.0.22. A reviewer's
   note is said in the reviewer's voice, a developer message for `agent`
   and `policy`, as agentturn v0.0.24 says every answer's note.
-- Changed, breaking: a release is two phases (#67). `Release` builds
-  the answers and changes nothing: it forgets no call and reports no
-  verdict, so a `Resume` that does not start leaves the engine as it
-  was, and releasing again gives the same answers. The new
-  `Engine.Resumed(ctx, end, answers)`, called once the resumed run has
-  started, forgets the calls the answers answer and reports each
-  release through the observer. `Answers` releases the same way; its
-  reviews are still reported as they are made. A front that called
-  `Release` alone now calls `Resumed` too, or the release verdicts go
-  unreported and the calls stay remembered until `Forget`.
+- Changed, breaking: answering a run is two phases (#67). `Release`
+  and `Answers` build the answers and change nothing the resume
+  decides: they forget no call and report no verdict, so a `Resume`
+  that does not start leaves the engine as it was, and answering again
+  gives the same answers. `Answers` keeps the verdict it reached for
+  each call, the reviewer's included, so answering the same end again
+  does not ask the reviewer again. The new
+  `Engine.Resumed(ctx, end, answers, next)`, given the end `Resume`
+  returned, settles each answered call `next` no longer lists as
+  pending: it forgets the call and reports its release, or the verdict
+  `Answers` reached for it, with the answer's own reason, and only then
+  counts a review toward the `DenialBound`. A call `next` still lists,
+  because the run failed as it started (`Resume` then returns an end
+  with the calls pending) or the call was deferred again, is neither
+  forgotten nor reported, so nothing is reported or counted twice. A
+  front that called `Release` or `Answers` alone now calls `Resumed`
+  too, or the verdicts go unreported and the calls stay remembered
+  until `Forget`, which now also drops what `Answers` kept and what was
+  asked in the run.
 - Changed: a held call is known from the deferral that left it
   pending: what the engine remembers, or else the `Held` mark on
   `agentturn.PendingCall.Decision`, which agentturn/session reads back
   from the record since agentturn v0.0.23. An engine that never saw
   the run, one built after a restart, releases the held calls with the
-  reason the decision carries, and `Answers` asks its
-  reviewer about the asked calls alone, with the decision's reason and
-  subject, where it reviewed every call (agentkit#91, agentkit#92).
+  reason, subject and decider the decision carries, and `Answers` asks
+  its reviewer about the asked calls alone, with the decision's reason
+  and subject, where it reviewed every call (agentkit#91, agentkit#92).
+- Changed: a held call that an answer stopping the turn refuses
+  (`agentturn.Refuse`) names the call whose answer stopped it: its
+  reason is `not released: the turn was stopped by the answer to <call
+  ID> (<subject or tool>)`, where it was `not released: the turn was
+  stopped`. What the model reads is unchanged.
 - Added: `WithAskInRun()`. `Decide` asks the person about a batch's
   asked calls while the run waits, through `agentturn.Ask` and the
   elicitor on the hook's context, once per batch in the model's order,
-  and decides each call from the answers: an asked call as the person
-  answered, by `human`; a held call allowed when every ask of its batch
-  was accepted, and refused with `not run: the user declined <tool>`
-  when one was declined. Nothing is remembered for a call settled in
-  the run, so `Engine.Runs` does not grow and a run never ends on held
-  calls alone. Without an elicitor, or when a question is cancelled,
-  the call is deferred as before. RFC 0001 says so under "Asking in
-  the run" (#79).
+  from the first call of the batch that is asked about or held, and
+  decides each call from the answers by the release's rule: an asked
+  call as the person answered, by `human`, whatever the call's own
+  decision then reads, unless the policy denies it; a held call
+  released once every ask of its batch is answered, since a plain
+  decline refuses its own call alone, and refused, naming the call,
+  when an answer stops the turn. The answers are kept by the run, its
+  turn and its calls, not the rules of the moment, so a grant made
+  meanwhile does not have the person asked again, and dropped when
+  the run moves to its next batch, when `Forget` or `Resumed` names the
+  run, and, past 64 runs in flight, oldest first. Nothing is
+  remembered for a call settled in the run, so `Engine.Runs` does not
+  grow for it. Without an elicitor, when a question is cancelled, or
+  when a call of the batch could not be read, the call and those held
+  beside it are deferred as before, unless an answer has stopped the
+  turn, so a run can still end on held calls. RFC 0001 says so under
+  "Asking in the run" (#79).
 - Changed: `Answers` names the question a person was being asked under
   a cut-off call, `agentturn.PendingCall.Question` (agentturn v0.0.23):
-  the refusal's reason, and its verdict's, end with
+  wherever such a call is decided, on the engine's refusal, on its
+  approval to run the call again, on the verdict the reviewer is shown
+  and on the reviewer's answer, the reason ends with
   `; a question was open: "<message>"`, and ` about call <id> (<name>)`
   for a question about another call, as agentturn/session's
   `ReplayAnswers` says it (agentturn#241).

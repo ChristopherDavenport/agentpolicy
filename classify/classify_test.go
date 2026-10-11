@@ -236,6 +236,10 @@ func TestReviewerFailsClosed(t *testing.T) {
 	if err != nil || len(answers) != 1 || answers[0].Output == nil || answers[0].Output.Output.Text != "The reviewer could not evaluate the call; the call did not run." {
 		t.Errorf("answers = %+v, %v", answers, err)
 	}
+	// Answers keeps what it decided for the end until a resumed run takes
+	// it; a front that asks another reviewer about the same end forgets
+	// the run first.
+	e.Forget("r")
 	r = NewReviewer(slow{}, "m", "rubric", WithTimeout(10*time.Millisecond))
 	answers, err = e.Answers(ctx, r, end)
 	if err != nil || len(answers) != 1 || answers[0].Output == nil || answers[0].Output.Output.Text != "The reviewer did not answer in time; the call did not run." {

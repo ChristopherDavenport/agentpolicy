@@ -13,6 +13,10 @@ import (
 	"github.com/ChristopherDavenport/openresponses"
 )
 
+// ranAll is the end of a resumed run that took every call it was
+// answered with: none is pending.
+var ranAll = &agentturn.RunEnd{Reason: agentturn.ReasonDone}
+
 // released is [Engine.Release] as a front that answered every asked
 // call sees it, the answers and no error, followed by [Engine.Resumed]
 // as the resumed run starts.
@@ -22,7 +26,7 @@ func released(ctx context.Context, t *testing.T, e *Engine, end *agentturn.RunEn
 	if err != nil {
 		t.Fatalf("release: %v", err)
 	}
-	e.Resumed(ctx, end, out)
+	e.Resumed(ctx, end, out, ranAll)
 	return out
 }
 
@@ -201,14 +205,14 @@ func TestRelease(t *testing.T) {
 	stop := agentturn.Refuse(openresponses.NewFunctionCallOutput("call_c", "no, stop"))
 	got = released(ctx, t, e, end, stop)
 	want = []agentturn.Answer{
-		agentturn.Output(openresponses.NewFunctionCallOutput("call_a", "The call was held for an approval and the turn was stopped; the call did not run.")).WithBy(ByPolicy).WithReason("not released: the turn was stopped"),
-		agentturn.Output(openresponses.NewFunctionCallOutput("call_b", "The call was held for an approval and the turn was stopped; the call did not run.")).WithBy(ByPolicy).WithReason("not released: the turn was stopped"),
+		agentturn.Output(openresponses.NewFunctionCallOutput("call_a", "The call was held for an approval and the turn was stopped; the call did not run.")).WithBy(ByPolicy).WithReason("not released: the turn was stopped by the answer to call_c (bash)"),
+		agentturn.Output(openresponses.NewFunctionCallOutput("call_b", "The call was held for an approval and the turn was stopped; the call did not run.")).WithBy(ByPolicy).WithReason("not released: the turn was stopped by the answer to call_c (bash)"),
 		stop,
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("released after a stop = %s\nwant %s", dump(got), dump(want))
 	}
-	if r := reasons(j); r != "call_a not released: the turn was stopped|call_b not released: the turn was stopped" {
+	if r := reasons(j); r != "call_a not released: the turn was stopped by the answer to call_c (bash)|call_b not released: the turn was stopped by the answer to call_c (bash)" {
 		t.Errorf("verdicts = %q", r)
 	}
 	for _, v := range j.all() {
@@ -336,7 +340,7 @@ func TestEngineServesSeveralRuns(t *testing.T) {
 	if err != nil || len(answers) != 3 {
 		t.Fatalf("Release built %d answers for 3 pending calls: %v", len(answers), err)
 	}
-	e.Resumed(ctx, end, answers)
+	e.Resumed(ctx, end, answers, ranAll)
 
 	// A reviewer sees the asked call alone, not the held ones.
 	e2, err := Build(Policy{Allow: rules(t, "bash(git add:*)"), Ask: rules(t, "bash(git push:*)"), Default: Ask()}, testMatchers)
@@ -862,7 +866,7 @@ func TestReleaseFromTheDecision(t *testing.T) {
 	if len(j.all()) != 0 {
 		t.Errorf("Release reported %+v", j.all())
 	}
-	after.Resumed(ctx, end, got)
+	after.Resumed(ctx, end, got, ranAll)
 	var reasons []string
 	for _, v := range j.all() {
 		if !v.Held || v.Action != agentturn.Allow || v.RunID != "run_1" || v.By != ByPolicy {

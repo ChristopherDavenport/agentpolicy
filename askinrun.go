@@ -11,30 +11,36 @@ import (
 // WithAskInRun has [Engine.Decide] ask the person about a model's call
 // while the run waits, rather than deferring it to the run's end: the
 // way a product that approves every call in place, as Cline does,
-// drives the engine. At the first call of a batch the hook is handed,
+// drives the engine. At the first call of a batch the hook is handed
+// that a rule asks about, or that the policy allows and an ask holds,
 // Decide puts each call of the batch a rule asks about to
 // agentturn.Ask, in the model's order, through the elicitor the loop
 // places on the hook's context (agentturn.Config.ToolElicitor, or
 // agentkit's question events), and keeps the answers for the rest of
-// the batch. It then decides each call from them:
+// the batch. It then decides each call from them, by the rule a release
+// at the run's end follows ([Engine.Release]):
 //
-//   - a call a rule asked about is decided as the person answered,
+//   - a call the person was asked about is decided as they answered,
 //     by human: allowed, with what they said reaching the model after
-//     the batch's outputs, or refused with the rule and what they said;
-//   - a call the policy allowed and the ask held beside it is allowed
-//     when every call of its batch that asked was accepted, reported as
-//     a release, and refused with "not run: the user declined <tool>"
-//     when one was declined, since nothing the model asked for in the
-//     turn runs beside a call the person refused.
+//     the batch's outputs, or refused with the rule and what they said.
+//     The answer stands for the call however its own decision reads it,
+//     unless the policy denies the call, which no answer overrides;
+//   - a call the policy allowed and the ask held beside it is released
+//     once every call of its batch that asked is answered, accepted or
+//     declined, since a plain decline refuses its own call alone; it is
+//     refused, naming the call whose answer stopped the turn, when an
+//     answer stops the turn (a refusal with Terminate set).
 //
-// Nothing is remembered for a call settled this way, so the run ends
-// with no pending call for it and [Engine.Runs] does not grow. When
-// the hook's context carries no elicitor, or a question is cancelled
-// or cannot be asked, the call is deferred as without the option, and
-// the calls held beside it wait for the run's end with it, for
-// [Engine.Release]. A nested call is settled by the loop with the
-// invoking tool's elicitor already, and is decided as without the
-// option.
+// Nothing is remembered for a call settled this way, and [Engine.Runs]
+// does not grow for it. When the hook's context carries no elicitor,
+// or a question is cancelled or cannot be asked, the call is deferred
+// as without the option, and so is every call held beside it while no
+// answer has stopped the turn: they wait for the run's end, for
+// [Engine.Release]. A batch a call of which could not be read, its
+// splitter or a hook having failed, holds its allowed calls the same
+// way, so a run can still end on held calls. A nested call is settled
+// by the loop with the invoking tool's elicitor already, and is
+// decided as without the option.
 func WithAskInRun() Option {
 	return func(e *Engine) { e.askInRun = true }
 }
@@ -42,24 +48,38 @@ func WithAskInRun() Option {
 // askBatch is what was asked about one batch in the run: whether each
 // call, by position, asks, the answer to each that was asked, nil when
 // the question went unanswered, and the positions the hook has
-// decided, so the batch is dropped when its last call is decided.
+// decided, so the batch is dropped when its last call is decided. run
+// names the run it belongs to, and seq the order it was asked in, for
+// dropping the oldest first.
 type askBatch struct {
+	run     string
+	seq     uint64
 	asks    map[int]bool
 	answers map[int]asked
 	decided map[int]bool
 }
 
 // asked is the answer to one question: the decision the answer made,
-// nil when it went unanswered, and the tool of the call asked about.
+// nil when it went unanswered, and the call asked about, by ID and by
+// what the policy asked about it, its subject or else its tool.
 type asked struct {
 	decision *agentturn.ToolDecision
-	tool     string
+	callID   string
+	about    string
 }
 
 // maxAskBatches bounds the batches kept between their first call and
-// their last: a batch whose run was cut before the hook was handed its
-// every call is never dropped by its last decision.
+// their last: one per run in flight, since a run decides one batch at
+// a time.
 const maxAskBatches = 64
+
+// askKey names a batch by its run, its turn and its calls, and not by
+// the rules of the moment: a grant made while the batch is decided,
+// another conversation's or an "always allow" answer, must not have
+// the person asked again.
+func askKey(info agentturn.ToolCallInfo) string {
+	return batchKey(info, 0, "")
+}
 
 // askedInRun decides a model's call from the answers the person gave
 // in the run, as [WithAskInRun] describes, and reports false when the
@@ -72,57 +92,61 @@ func (e *Engine) askedInRun(ctx context.Context, a active, info agentturn.ToolCa
 		return nil, false
 	}
 	self := position(info)
-	key := batchKey(info, a.gen, a.scope)
+	key := askKey(info)
 	defer e.decidedInBatch(key, self, len(info.Batch))
-	if v.Action != agentturn.Defer && (v.Action != agentturn.Allow || !held) {
-		// Nothing to ask: the call is blocked, or allowed with no ask
-		// beside it. The batch is read for the hold already.
+	if v.Action == agentturn.Block {
+		// A deny stands whatever the person said.
 		return nil, false
 	}
-	ab := e.askBatchFor(ctx, a, info, key, self, *v, out)
-
+	if ans, ok := e.answerFor(key, self); ok {
+		// The person answered for this call when the batch was asked
+		// about, whatever its own decision reads now.
+		return answered(v, ans), true
+	}
 	switch {
 	case v.Action == agentturn.Defer:
+		ab := e.askBatchFor(ctx, a, info, key, self, *v, out)
 		e.mu.Lock()
-		ans, ok := ab.answers[self]
+		ans, wasAsked := ab.answers[self]
 		e.mu.Unlock()
-		if !ok {
+		if !wasAsked {
 			// The call was read otherwise when the batch was asked about,
 			// with the tool WithTools names rather than its own: ask now.
 			ans = askCall(ctx, info, *v, out)
-			e.mu.Lock()
-			ab.asks[self], ab.answers[self] = true, ans
-			e.mu.Unlock()
+			e.setAnswer(key, self, ans)
 		}
 		if ans.decision == nil {
+			// Nobody answered: the call waits for the run's end.
 			return nil, false
 		}
-		decided := *ans.decision
-		v.Action, v.By, v.Reason = decided.Action, decided.By, decided.Reason
-		return &decided, true
+		return answered(v, ans), true
 	case v.Action == agentturn.Allow && held:
+		ab := e.askBatchFor(ctx, a, info, key, self, *v, out)
 		e.mu.Lock()
-		declined := ""
+		var stop *asked
+		open := false
 		for i := range len(info.Batch) {
 			if i == self || !ab.asks[i] {
 				continue
 			}
 			ans, ok := ab.answers[i]
-			if !ok || ans.decision == nil {
-				// A question is still open, or a sibling could not be
-				// read: the call is held for the run's end.
-				e.mu.Unlock()
-				return nil, false
-			}
-			if ans.decision.Action == agentturn.Block && declined == "" {
-				declined = ans.tool
+			switch {
+			case !ok || ans.decision == nil:
+				// A question is still open, or a sibling could not be read.
+				open = true
+			case stop == nil && stops(ans.decision):
+				stop = &ans
 			}
 		}
 		e.mu.Unlock()
 		v.Held = true
-		if declined != "" {
-			v.Action, v.Rule, v.Reason = agentturn.Block, nil, "not run: the user declined "+declined
+		if stop != nil {
+			v.Action, v.Rule, v.Reason = agentturn.Block, nil, stoppedReason(stop.callID, stop.about)
 			return &agentturn.ToolDecision{Action: agentturn.Block, Reason: v.Reason, By: ByPolicy}, true
+		}
+		if open {
+			v.Held = false
+			return nil, false
 		}
 		v.Reason = releasedPrefix + v.Reason
 		decided := out
@@ -130,6 +154,46 @@ func (e *Engine) askedInRun(ctx context.Context, a active, info agentturn.ToolCa
 		return &decided, true
 	}
 	return nil, false
+}
+
+// answered is the decision an answer made for the call v is about,
+// with v set to say so.
+func answered(v *Verdict, ans asked) *agentturn.ToolDecision {
+	decided := *ans.decision
+	v.Action, v.By, v.Reason = decided.Action, decided.By, decided.Reason
+	return &decided
+}
+
+// stops reports whether an answer stops the turn: a refusal that ends
+// it, as agentturn.Refuse does at the run's end. A plain decline
+// refuses its own call alone.
+func stops(d *agentturn.ToolDecision) bool {
+	return d.Action == agentturn.Block && d.Terminate
+}
+
+// answerFor returns the answer the person gave in the run for the call
+// at position i of the batch key names.
+func (e *Engine) answerFor(key string, i int) (asked, bool) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	ab, ok := e.asked[key]
+	if !ok {
+		return asked{}, false
+	}
+	ans, ok := ab.answers[i]
+	if !ok || ans.decision == nil {
+		return asked{}, false
+	}
+	return ans, true
+}
+
+// setAnswer keeps an answer for the call at position i of a batch.
+func (e *Engine) setAnswer(key string, i int, ans asked) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if ab, ok := e.asked[key]; ok {
+		ab.asks[i], ab.answers[i] = true, ans
+	}
 }
 
 // askBatchFor returns what was asked about info's batch, asking the
@@ -147,7 +211,7 @@ func (e *Engine) askBatchFor(ctx context.Context, a active, info agentturn.ToolC
 	}
 	e.mu.Unlock()
 
-	ab := &askBatch{asks: map[int]bool{}, answers: map[int]asked{}, decided: map[int]bool{}}
+	ab := &askBatch{run: info.RunID, asks: map[int]bool{}, answers: map[int]asked{}, decided: map[int]bool{}}
 	for i, c := range info.Batch {
 		if c == nil {
 			continue
@@ -177,12 +241,24 @@ func (e *Engine) askBatchFor(ctx context.Context, a active, info agentturn.ToolC
 	if e.asked == nil {
 		e.asked = make(map[string]*askBatch)
 	}
-	for k := range e.asked {
-		if len(e.asked) < maxAskBatches {
-			break
+	// A run decides one batch at a time: a new batch of a run ends the
+	// one before it, even one whose last call the hook was never handed.
+	for k, old := range e.asked {
+		if old.run == ab.run {
+			delete(e.asked, k)
 		}
-		delete(e.asked, k)
 	}
+	for len(e.asked) >= maxAskBatches {
+		oldest := ""
+		for k, old := range e.asked {
+			if oldest == "" || old.seq < e.asked[oldest].seq {
+				oldest = k
+			}
+		}
+		delete(e.asked, oldest)
+	}
+	e.askSeq++
+	ab.seq = e.askSeq
 	e.asked[key] = ab
 	return ab
 }
@@ -195,12 +271,17 @@ func askCall(ctx context.Context, info agentturn.ToolCallInfo, v Verdict, out ag
 	if out.Args != nil {
 		args = out.Args
 	}
+	about := v.Subject
+	if about == "" {
+		about = info.Call.Name
+	}
+	got := asked{callID: info.Call.CallID, about: about}
 	deferral := &agentturn.ToolDecision{Action: agentturn.Defer, Reason: v.Reason, By: v.By, Subject: v.Subject, Args: out.Args, Note: out.Note, Terminate: out.Terminate}
 	decided, ok := agentturn.Ask(ctx, agentturn.AskedCall{CallID: info.Call.CallID, Name: info.Call.Name, Args: json.RawMessage(args), Decision: deferral})
-	if !ok {
-		return asked{tool: info.Call.Name}
+	if ok {
+		got.decision = decided
 	}
-	return asked{decision: decided, tool: info.Call.Name}
+	return got
 }
 
 // decidedInBatch notes that the hook decided the call at position self
@@ -216,5 +297,15 @@ func (e *Engine) decidedInBatch(key string, self, n int) {
 	ab.decided[self] = true
 	if len(ab.decided) >= n {
 		delete(e.asked, key)
+	}
+}
+
+// dropAsked drops what was asked in the run runID. The caller holds
+// e.mu.
+func (e *Engine) dropAsked(runID string) {
+	for k, ab := range e.asked {
+		if ab.run == runID {
+			delete(e.asked, k)
+		}
 	}
 }

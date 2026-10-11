@@ -23,10 +23,10 @@ var ErrUnanswered = errors.New("agentpolicy: pending call has no answer")
 // asked or held, so a front can show why a pending call waits and tell
 // the calls it must answer, the asked ones, from the ones
 // [Engine.Release] answers, the held ones. It reports false for a call
-// the engine did not defer, one of another run, and one already
-// answered: [Engine.Release] and [Engine.Answers] forget a call as
-// they answer it, and a product that records a verdict does so from
-// the observer.
+// the engine did not defer, one of another run, and one a resumed run
+// has taken: [Engine.Resumed] forgets a call once the run that resumed
+// it no longer lists it as pending, and a product that records a
+// verdict does so from the observer.
 func (e *Engine) Deferred(runID, callID string) (Verdict, bool) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -35,16 +35,19 @@ func (e *Engine) Deferred(runID, callID string) (Verdict, bool) {
 }
 
 // Forget drops what the engine remembers of a run: the calls it
-// deferred there and never answered. A front calls it when a run ends
-// without its pending calls being answered, an abandoned conversation
-// or a sub-agent that was cancelled, so the engine does not hold them
-// for the life of the process. [Engine.Release] and [Engine.Answers]
-// forget the calls they answer on their own, so a run answered through
-// either needs no Forget.
+// deferred there and never answered, what [Engine.Answers] decided
+// about them and no resumed run took, and what [WithAskInRun] asked in
+// it. A front calls it when a run ends without its pending calls being
+// answered, an abandoned conversation or a sub-agent that was
+// cancelled, so the engine does not hold them for the life of the
+// process. [Engine.Resumed] forgets the calls a resumed run took, so a
+// run answered and resumed needs no Forget.
 func (e *Engine) Forget(runID string) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	delete(e.deferred, runID)
+	delete(e.answering, runID)
+	e.dropAsked(runID)
 }
 
 // Runs returns the runs the engine is holding deferred calls for, so a
@@ -104,9 +107,12 @@ const heldPrefix = "held for approval: "
 // Every answer the engine builds names the policy as its decider,
 // through agentturn.Answer.By, and carries the verdict's reason,
 // "released: <why the policy allowed it>" or "not released: the turn
-// was stopped", through agentturn.Answer.Reason, which the session
-// recorder writes on the call's decision; the caller's answers are
-// returned as given.
+// was stopped by the answer to <call ID> (<subject or tool>)", naming
+// the call whose answer ended the run, through agentturn.Answer.Reason,
+// which the session recorder writes on the call's decision; the
+// caller's answers are returned as given. A plain refusal, one that
+// does not end the run, refuses its own call alone: the held calls are
+// released beside it.
 //
 // A call is held when the deferral that left it pending says so:
 // what the engine remembers of it in this process, or else
@@ -120,9 +126,9 @@ const heldPrefix = "held for approval: "
 // Release changes nothing: it forgets no call and reports no verdict,
 // so a Resume that then does not start leaves the engine as it was,
 // and the front answers again and releases again. [Engine.Resumed]
-// is the second phase: once the resumed run has started, it forgets
-// the calls the answers answer and reports each release as a Verdict
-// through the observer.
+// is the second phase: given the end the resumed run returned, it
+// forgets the calls that run took and reports each release as a
+// Verdict through the observer.
 //
 // A pending call neither the caller nor the engine answers is
 // [ErrUnanswered], returned with the answers and naming the call,
@@ -136,10 +142,16 @@ func (e *Engine) Release(ctx context.Context, end *agentturn.RunEnd, answers ...
 		return answers, nil
 	}
 	given := make(map[string]int, len(answers))
-	stopped := false
+	stopped, stopper := false, ""
 	for i, a := range answers {
 		given[a.CallID] = i
-		stopped = stopped || a.Terminate
+		if a.Terminate && !stopped {
+			stopped, stopper = true, a.CallID
+		}
+	}
+	stopReason := ""
+	if stopped {
+		stopReason = stoppedReason(stopper, about(end, stopper))
 	}
 	out := make([]agentturn.Answer, 0, len(end.Pending))
 	placed := make(map[string]bool, len(answers))
@@ -167,7 +179,7 @@ func (e *Engine) Release(ctx context.Context, end *agentturn.RunEnd, answers ...
 		}
 		placed[id] = true
 		if stopped {
-			out = append(out, agentturn.Output(openresponses.NewFunctionCallOutput(id, heldStoppedText)).WithBy(ByPolicy).WithReason(notReleasedReason))
+			out = append(out, agentturn.Output(openresponses.NewFunctionCallOutput(id, heldStoppedText)).WithBy(ByPolicy).WithReason(stopReason))
 			continue
 		}
 		ans := agentturn.Approve(id)
@@ -197,25 +209,57 @@ const (
 	notReleasedReason = "not released: the turn was stopped"
 )
 
+// stoppedReason is the reason a held call is not released: the turn was
+// stopped by the answer to the call callID, which asked about about.
+func stoppedReason(callID, about string) string {
+	if callID == "" {
+		return notReleasedReason
+	}
+	r := notReleasedReason + " by the answer to " + callID
+	if about != "" {
+		r += " (" + about + ")"
+	}
+	return r
+}
+
+// about is what the policy asked about the pending call callID of end:
+// its decision's subject, or else its tool.
+func about(end *agentturn.RunEnd, callID string) string {
+	for _, p := range end.Pending {
+		if p.Call == nil || p.Call.CallID != callID {
+			continue
+		}
+		if p.Decision != nil && p.Decision.Subject != "" {
+			return p.Decision.Subject
+		}
+		return p.Call.Name
+	}
+	return ""
+}
+
 // Resumed is the second phase of [Engine.Release] and [Engine.Answers]:
-// a front calls it once the run that resumes end with answers has
-// started, given the answers it resumed with. It forgets the calls of
-// end the answers answer, so an engine shared by several agents does
-// not grow with the runs they finish, and reports each release the
-// answers carry as a Verdict through the observer, with Held set:
-// Allow with the rule that allowed the call, or Block when the turn
-// was stopped. A release is an answer the engine built, one naming the
-// policy as its decider, for a call the engine or the call's decision
-// says was held; an answer the front gave a held call itself reports
-// nothing, since the front's own decision is its record.
+// a front calls it once Resume returns, given the end it resumed, the
+// answers it resumed with and the end the resumed run returned, next.
+// It settles every call of end the answers answer that next no longer
+// lists as pending: it forgets the call, so an engine shared by several
+// agents does not grow with the runs they finish, and reports what was
+// decided about it through the observer: a release the answers carry,
+// with Held set, Allow or Block when the turn was stopped, and the
+// answer's reason; and the verdict [Engine.Answers] reached for it,
+// counted toward the [DenialBound] only now. A release is an answer the
+// engine built, one naming the policy as its decider, for a call the
+// engine or the call's decision says was held; an answer the front
+// gave a held call itself reports nothing, since the front's own
+// decision is its record.
 //
-// A front calls it from the resumed run's run_start event, or once
-// Resume returns a run's end; a Resume that did not start, one that
-// returned an error and no end, is no cause to call it, and the front
-// answers and releases again. Each call reports its releases again,
-// so a front calls it once per resumed run.
-func (e *Engine) Resumed(ctx context.Context, end *agentturn.RunEnd, answers []agentturn.Answer) {
-	if end == nil {
+// A call next still lists as pending did not run: a Resume whose run
+// failed before it took the answers returns an end with the calls
+// still pending, and one whose hook deferred the call again leaves it
+// waiting. Such a call is neither forgotten nor reported, so the front
+// answers it again and releases again, and nothing is reported twice.
+// A nil next, a Resume that returned no end, settles nothing.
+func (e *Engine) Resumed(ctx context.Context, end *agentturn.RunEnd, answers []agentturn.Answer, next *agentturn.RunEnd) {
+	if end == nil || next == nil {
 		return
 	}
 	pending := make(map[string]agentturn.PendingCall, len(end.Pending))
@@ -224,32 +268,63 @@ func (e *Engine) Resumed(ctx context.Context, end *agentturn.RunEnd, answers []a
 			pending[p.Call.CallID] = p
 		}
 	}
-	var releases []Verdict
-	reported := make(map[string]bool, len(answers))
+	still := make(map[string]bool, len(next.Pending))
+	for _, p := range next.Pending {
+		if p.Call != nil {
+			still[p.Call.CallID] = true
+		}
+	}
+	var (
+		report   []Verdict
+		reviewed []bool
+		settled  []string
+	)
+	seen := make(map[string]bool, len(answers))
 	for _, a := range answers {
 		p, ok := pending[a.CallID]
-		if !ok || reported[a.CallID] || a.By != ByPolicy {
+		if !ok || seen[a.CallID] || still[a.CallID] {
+			continue
+		}
+		seen[a.CallID] = true
+		settled = append(settled, a.CallID)
+		if r, ok := e.takeAnswered(end.RunID, a.CallID); ok {
+			report = append(report, r.verdict)
+			if r.reviewed {
+				reviewed = append(reviewed, r.verdict.Action == agentturn.Allow)
+			}
+			continue
+		}
+		if a.By != ByPolicy {
 			continue
 		}
 		d, held := e.heldCall(end.RunID, p)
 		if !held {
 			continue
 		}
-		reported[a.CallID] = true
-		v := Verdict{RunID: end.RunID, Turn: d.info.Turn, CallID: a.CallID, Tool: p.Call.Name, Action: agentturn.Allow, Held: true, By: ByPolicy, Confined: d.verdict.Confined}
+		v := Verdict{RunID: end.RunID, Turn: d.info.Turn, CallID: a.CallID, Tool: p.Call.Name, Action: agentturn.Allow, Held: true, By: ByPolicy, Subject: d.verdict.Subject, Confined: d.verdict.Confined, Reason: a.Reason}
 		if a.Output != nil {
-			v.Action, v.Reason = agentturn.Block, notReleasedReason
+			v.Action = agentturn.Block
+			if v.Reason == "" {
+				v.Reason = notReleasedReason
+			}
 		} else {
-			v.Rule, v.Reason = d.verdict.Rule, releasedPrefix+d.allowed
+			v.Rule = d.verdict.Rule
+			if v.Reason == "" {
+				v.Reason = releasedPrefix + d.allowed
+			}
 		}
-		releases = append(releases, v)
+		report = append(report, v)
 	}
-	for _, a := range answers {
-		if _, ok := pending[a.CallID]; ok {
-			e.answered(end.RunID, a.CallID)
-		}
+	for _, id := range settled {
+		e.answered(end.RunID, id)
 	}
-	for _, v := range releases {
+	e.mu.Lock()
+	e.dropAsked(end.RunID)
+	e.mu.Unlock()
+	for _, approved := range reviewed {
+		e.note(approved)
+	}
+	for _, v := range report {
 		e.observe(ctx, v)
 	}
 }
@@ -269,8 +344,15 @@ func (e *Engine) heldCall(runID string, p agentturn.PendingCall) (deferredCall, 
 	if dec == nil || !dec.Held || dec.Action != agentturn.Defer {
 		return deferredCall{}, false
 	}
+	// What the recorded decision says, its reason, subject and decider,
+	// is what is known of the verdict after a restart; the rule and the
+	// confinement were the engine's and are not on the record.
+	by := dec.By
+	if by == "" {
+		by = ByPolicy
+	}
 	return deferredCall{
-		verdict: Verdict{Held: true},
+		verdict: Verdict{Held: true, Action: agentturn.Defer, Reason: dec.Reason, Subject: dec.Subject, By: by},
 		allowed: strings.TrimPrefix(dec.Reason, heldPrefix),
 	}, true
 }
