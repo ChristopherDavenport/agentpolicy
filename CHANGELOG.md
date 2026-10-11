@@ -5,7 +5,7 @@ All user-visible changes to this library. The format follows
 uses [Semantic Versioning](https://semver.org/); before v1.0.0 minor
 versions may break the API.
 
-## Unreleased
+## v0.0.17 - 2026-10-11
 
 - Fixed: whether a batch with a call that cannot be evaluated holds no
   longer depends on the order of its calls (#83). Read as a sibling,
