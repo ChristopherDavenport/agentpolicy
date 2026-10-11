@@ -679,7 +679,7 @@ func (e *Engine) Decide(ctx context.Context, info agentturn.ToolCallInfo) (*agen
 	}
 	if e.batchAsks(ctx, a, info, v.Action) {
 		d.allowed = v.Reason
-		v.Action, v.Held, v.Reason = agentturn.Defer, true, "held for approval: "+v.Reason
+		v.Action, v.Held, v.Reason = agentturn.Defer, true, heldPrefix+v.Reason
 	}
 	if v.Action == agentturn.Defer && info.Parent == "" {
 		d.verdict = v

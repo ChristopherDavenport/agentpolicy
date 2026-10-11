@@ -729,15 +729,27 @@ them, the model's order:
   and the turn was stopped; the call did not run.`;
 - an answer for a call that is not pending follows the rest;
 - a pending call neither the host nor the engine answers is an error
-  naming every such call, returned with the answers as a preview:
-  nothing is forgotten and nothing is recorded, so the host answers
-  the missing call and releases again.
+  naming every such call, returned with the answers, so the host
+  answers the missing call and releases again.
 
-Every answer the engine builds names `policy` as its decider, and the
-refusal of a held call carries its verdict's reason. Every release is
-a verdict with held set: allow with the rule that allowed the call and
-`released: ` followed by the reason it was allowed, or block with `not
-released: the turn was stopped`.
+A call is held when its deferral says so: what the engine remembers of
+it, or the held mark on the decision that deferred it, which the loop
+carries on the run's end and a session reads back from its record, so
+an engine that never saw the run, one started after a restart,
+releases the same end the same way.
+
+A release is two phases. Building the answers changes nothing: the
+engine forgets no call and records no verdict, so a resume that does
+not start leaves it as it was. Once the resumed run has started, the
+host says so with the answers it resumed with; then the engine forgets
+the calls they answer and records each release.
+
+Every answer the engine builds names `policy` as its decider and
+carries its verdict's reason. Every release is a verdict with held
+set: allow with the rule that allowed the call and `released: `
+followed by the reason it was allowed, or block with `not released:
+the turn was stopped`. An answer the host gave a held call itself is
+the host's decision, and records no release.
 
 ### Answers without a human
 
@@ -1030,7 +1042,7 @@ The root module of this repository is the reference binding.
 | offering tools | `Engine.Removes(tool)`, `Engine.Filter(tools)`, `Engine.ToolProvider(base)` for `agentturn.Config.ToolProvider` |
 | grants | `Engine.Grant`, `Engine.GrantOver`; `Engine.GrantSet` → granted and `[]Refusal{Rule, Reason}`, `Engine.Revoke`, `Engine.Grants`; the scope: `ContextWithGrantScope(ctx, scope)`, `GrantScopeFromContext(ctx)`, `Engine.GrantsFor(ctx)`, `Engine.RevokeScope(ctx)` |
 | deferred calls | `Engine.Deferred`, `Engine.Runs`, `Engine.Forget` |
-| release | `Engine.Release(ctx, end, answers…)`; `ErrUnanswered` |
+| release | `Engine.Release(ctx, end, answers…)`; `ErrUnanswered`; `Engine.Resumed(ctx, end, answers)` once the resumed run started |
 | reviewer | `Reviewer`, `ReviewerFunc`, `Review{Outcome, Reason, Args, Note, By}`, `Outcome` (`Refused`, `Approved`, `TimedOut`); `Engine.Answers(ctx, r, end)`, whose refusals carry the verdict's reason as `agentturn.Answer.Reason`; a call that may have run is `agentturn.PendingCall.MayHaveRun` |
 | cut-off calls | `WithNeverStarted(fn)`; the tool from the pending call or `WithTools`; the output a call has where it ran from `agentturn.PendingCall.Ran` and `RanWhere`; `agentturn.PendingUndispatched` is approved for the resume, `agentturn.PendingRejected` answered as refused, in `PendingCall.Refused`'s words when it has them |
 | nested calls | `agentturn.ToolCallInfo.Parent` non-empty: decided and reported, no deferral remembered |

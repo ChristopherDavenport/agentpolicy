@@ -124,8 +124,21 @@ and `Release` answers the rest from the user's answer:
 
 ```go
 answers, err := eng.Release(ctx, end, agentturn.Approve(callID).WithNote("last time"))
-end, err = agent.Resume(ctx, answers...)
+next, err := agent.Resume(ctx, answers...)
+if next != nil {
+	eng.Resumed(ctx, end, answers) // the run started: forget, and report the releases
+}
 ```
+
+A release is two phases. `Release` builds the answers and changes
+nothing, so a `Resume` that does not start leaves the engine as it
+was and the front answers again. `Resumed`, called once the resumed
+run has started (from its `run_start` event, or when `Resume` returns
+an end), forgets the calls and reports each release through the
+observer. A held call is known from what the engine remembers, or
+from the `Held` mark on `agentturn.PendingCall.Decision`, which the
+loop carries on the run's end and agentturn/session reads back from
+the record, so an engine built after a restart releases the same end.
 
 The held calls run with the approved one, in the model's order. An
 answer built with `agentturn.Refuse` ends the turn instead, and the
@@ -152,8 +165,8 @@ eng, err := agentpolicy.Build(policy, matchers,
 
 One engine serves every agent: what it defers is remembered under the
 call's own run, so a sub-agent deciding a call while the user reads a
-question costs the main agent nothing. `Release` and `Answers` forget
-a call as they answer it, and `Engine.Forget(runID)` drops what an
+question costs the main agent nothing. `Resumed` forgets the calls a
+resumed run answers, and `Engine.Forget(runID)` drops what an
 abandoned run left behind. A nested call, one a tool made with
 `agentturn.Invoke`, has a `ToolCallInfo.Parent`; its deferral is
 reported as a verdict and not remembered, since the loop settles it

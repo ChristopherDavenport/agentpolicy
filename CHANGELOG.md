@@ -8,6 +8,27 @@ versions may break the API.
 ## Unreleased
 
 - Changed: requires agentturn v0.0.23, up from v0.0.22.
+- Changed, breaking: a release is two phases (#67). `Release` builds
+  the answers and changes nothing: it forgets no call and reports no
+  verdict, so a `Resume` that does not start leaves the engine as it
+  was, and releasing again gives the same answers. The new
+  `Engine.Resumed(ctx, end, answers)`, called once the resumed run has
+  started, forgets the calls the answers answer and reports each
+  release through the observer. `Answers` releases the same way; its
+  reviews are still reported as they are made. A front that called
+  `Release` alone now calls `Resumed` too, or the release verdicts go
+  unreported and the calls stay remembered until `Forget`.
+- Changed: a held call is known from the deferral that left it
+  pending: what the engine remembers, or else the `Held` mark on
+  `agentturn.PendingCall.Decision`, which agentturn/session reads back
+  from the record since agentturn v0.0.23. An engine that never saw
+  the run, one built after a restart, releases the held calls with the
+  reason and the note the decision carries, and `Answers` asks its
+  reviewer about the asked calls alone, with the decision's reason and
+  subject, where it reviewed every call (agentkit#91, agentkit#92).
+- Changed: an approval `Release` builds carries its verdict's reason,
+  `released: <why the policy allowed it>`, as `agentturn.Answer.Reason`,
+  so the session recorder writes it on the call's decision.
 
 ## v0.0.15 - 2026-10-10
 

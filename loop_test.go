@@ -362,7 +362,9 @@ func TestLoopHoldsTheBatchForAnAsk(t *testing.T) {
 	if err != nil || len(answers) != 3 || strings.Join(reviewed, "|") != askedID+": approval required by bash(git push:*)" {
 		t.Fatalf("answers = %v, %v, reviewed %v", answers, err, reviewed)
 	}
+	prior := end
 	end, err = agent.Resume(ctx, answers...)
+	e.Resumed(ctx, prior, answers)
 	if err != nil || end.Reason != agentturn.ReasonDone || len(bash.ran) != 3 {
 		t.Fatalf("resume reviewed: err=%v end=%+v ran=%v", err, end, bash.ran)
 	}
@@ -635,5 +637,82 @@ func TestLoopAnswersRefusesARewriteResumeWouldReject(t *testing.T) {
 	vs := j.all()
 	if len(vs) != 1 || vs[0].Action != agentturn.Block || vs[0].Reason != reason || vs[0].By != ByPolicy || vs[0].Rule != nil {
 		t.Errorf("verdicts = %+v", vs)
+	}
+}
+
+// A release is two phases: Release builds the answers and changes
+// nothing, and Resumed, once the resumed run started, forgets the
+// calls and reports the releases. A Resume that does not start leaves
+// the engine as it was, so the front answers again (#67).
+func TestLoopAReleaseThatDoesNotStartChangesNothing(t *testing.T) {
+	ctx := context.Background()
+	j := &journal{}
+	e, err := Build(Policy{
+		Allow:   rules(t, "bash(git add:*) bash(git commit:*)"),
+		Ask:     rules(t, "bash(git push:*)"),
+		Default: Deny(),
+	}, testMatchers, WithObserver(j.observe))
+	if err != nil {
+		t.Fatal(err)
+	}
+	bash := &bashTool{}
+	agent := agentturn.New(agentturn.Config{
+		Model:          &batchModel{},
+		Tools:          []agenttool.Tool{bash.tool()},
+		BeforeToolCall: e.BeforeToolCall(),
+		ToolExecution:  agentturn.ExecSequential,
+	})
+	refuseStart := true
+	agent.Subscribe(func(_ context.Context, ev agentturn.Event) error {
+		if s, ok := ev.(*agentturn.RunStart); ok && s.Source == agentturn.SourceResume && refuseStart {
+			refuseStart = false
+			return errors.New("the store is down")
+		}
+		return nil
+	})
+	end, err := agent.Prompt(ctx, openresponses.UserText("git add -A\ngit commit -m wip\ngit push --force"))
+	if err != nil || end.Reason != agentturn.ReasonInputRequired || len(end.Pending) != 3 {
+		t.Fatalf("prompt: err=%v end=%+v", err, end)
+	}
+	j.verdicts = nil
+	push := agentturn.Approve(end.Pending[2].Call.CallID).WithNote("once")
+
+	answers, err := e.Release(ctx, end, push)
+	if err != nil || len(answers) != 3 {
+		t.Fatalf("release: %s, %v", dump(answers), err)
+	}
+	if ran, err := agent.Resume(ctx, answers...); err == nil || len(bash.ran) != 0 {
+		t.Fatalf("the resume started: end=%+v err=%v ran=%v", ran, err, bash.ran)
+	}
+	if len(j.all()) != 0 {
+		t.Errorf("a release that did not start reported %+v", j.all())
+	}
+	for _, p := range end.Pending {
+		if _, ok := e.Deferred(end.RunID, p.Call.CallID); !ok {
+			t.Errorf("a release that did not start forgot %s", p.Call.CallID)
+		}
+	}
+
+	// The front answers again, and the engine releases as before.
+	again, err := e.Release(ctx, end, push)
+	if err != nil || !reflect.DeepEqual(again, answers) {
+		t.Fatalf("release again: %s, %v", dump(again), err)
+	}
+	resumed, err := agent.Resume(ctx, again...)
+	if err != nil || resumed.Reason != agentturn.ReasonDone || len(bash.ran) != 3 {
+		t.Fatalf("resume again: err=%v end=%+v ran=%v", err, resumed, bash.ran)
+	}
+	e.Resumed(ctx, end, again)
+	var got []string
+	for _, v := range j.all() {
+		got = append(got, fmt.Sprintf("%s %v held=%v %s", v.CallID, v.Action, v.Held, v.Reason))
+	}
+	want := end.Pending[0].Call.CallID + " 0 held=true released: allowed by bash(git add:*)|" +
+		end.Pending[1].Call.CallID + " 0 held=true released: allowed by bash(git commit:*)"
+	if strings.Join(got, "|") != want {
+		t.Errorf("verdicts = %q\nwant %q", strings.Join(got, "|"), want)
+	}
+	if runs := e.Runs(); len(runs) != 0 {
+		t.Errorf("runs after the resumed run = %v", runs)
 	}
 }

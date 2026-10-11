@@ -267,7 +267,11 @@ func cleanReason(reason string) string {
 //
 // Answers completes with [Engine.Release], so a pending call it could
 // not answer is [ErrUnanswered], returned with the answers and joined
-// with [ErrDenialBound] when both hold.
+// with [ErrDenialBound] when both hold. As with Release, the held
+// calls it releases are forgotten, and their releases reported, by
+// [Engine.Resumed] once the resumed run has started; the verdicts of
+// the reviews are reported as the reviewer gives them, since the
+// review is a decision made whether or not the run starts.
 func (e *Engine) Answers(ctx context.Context, r Reviewer, end *agentturn.RunEnd) ([]agentturn.Answer, error) {
 	if end == nil || len(end.Pending) == 0 {
 		return nil, nil
@@ -590,7 +594,10 @@ func decodeNumbers(raw json.RawMessage) (any, error) {
 // run, or the call alone, and the arguments a hook rewrote it to, nil
 // when none did. A call the engine does not remember, one deferred
 // before a restart, carries the loop's own record of a rewrite on
-// PendingCall.Args.
+// PendingCall.Args, and its verdict is the one its decision carries,
+// PendingCall.Decision, which agentturn/session reads back from the
+// record: the rule's reason, the subject, and whether the call was
+// only held beside an asked one.
 func (e *Engine) recall(runID string, p agentturn.PendingCall) (agentturn.ToolCallInfo, Verdict, json.RawMessage) {
 	call := p.Call
 	e.mu.Lock()
@@ -602,9 +609,14 @@ func (e *Engine) recall(runID string, p agentturn.PendingCall) (agentturn.ToolCa
 	if p.Args != nil {
 		args = p.Args
 	}
-	return agentturn.ToolCallInfo{RunID: runID, Call: call, Args: args},
-		Verdict{RunID: runID, CallID: call.CallID, Tool: call.Name, Action: agentturn.Defer, By: ByPolicy},
-		p.Args
+	v := Verdict{RunID: runID, CallID: call.CallID, Tool: call.Name, Action: agentturn.Defer, By: ByPolicy}
+	if d := p.Decision; d != nil && d.Action == agentturn.Defer {
+		v.Reason, v.Subject, v.Held = d.Reason, d.Subject, d.Held
+		if d.By != "" {
+			v.By = d.By
+		}
+	}
+	return agentturn.ToolCallInfo{RunID: runID, Call: call, Args: args}, v, p.Args
 }
 
 // answer turns one review into the answer the loop takes and the

@@ -470,7 +470,7 @@ func TestAnswersReleasesHeldCalls(t *testing.T) {
 	// The reviewer sees only the asked call; the held one is released
 	// with its approval.
 	answers, err := e.Answers(ctx, reviewer(Approved), hold())
-	if err != nil || !reflect.DeepEqual(answers, []agentturn.Answer{agentturn.Approve("call_a").WithBy(ByPolicy), agentturn.Approve("call_b").WithBy(ByAgent)}) || strings.Join(reviewedIDs, ",") != "call_b" {
+	if err != nil || !reflect.DeepEqual(answers, []agentturn.Answer{agentturn.Approve("call_a").WithBy(ByPolicy).WithReason("released: allowed by bash(git add:*)"), agentturn.Approve("call_b").WithBy(ByAgent)}) || strings.Join(reviewedIDs, ",") != "call_b" {
 		t.Errorf("approved: %s, %v, reviewed %v", dump(answers), err, reviewedIDs)
 	}
 	// A refusal at the bound ends the run, so the held call is refused
