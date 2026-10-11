@@ -787,6 +787,52 @@ func TestASiblingThatCouldNotBeReadHolds(t *testing.T) {
 	}
 }
 
+// TestAnUnreadableSiblingHoldsInEitherOrder checks that a call beside
+// one whose subjects can never be evaluated is held whatever the
+// order of the batch (#83): read as a sibling first, the unreadable
+// call holds the call before it, and decided first, its failed
+// reading is kept for the batch as asking, so it holds the call after
+// it too.
+func TestAnUnreadableSiblingHoldsInEitherOrder(t *testing.T) {
+	ctx := context.Background()
+	matchers := map[string]ToolMatcher{"bash": {
+		Match: PrefixMatcher("command"),
+		Subjects: func(ctx context.Context, args json.RawMessage) ([]Subject, error) {
+			if c, _ := stringField(args, "command"); c == `echo "unterminated` {
+				return nil, errors.New("unterminated quote")
+			}
+			return shellSplit(ctx, args)
+		},
+	}}
+	for _, order := range [][]string{
+		{"git status", `echo "unterminated`},
+		{`echo "unterminated`, "git status"},
+	} {
+		t.Run(order[0], func(t *testing.T) {
+			e, err := Build(Policy{Allow: rules(t, "bash(git:*) bash(echo:*)"), Default: Ask()}, matchers)
+			if err != nil {
+				t.Fatal(err)
+			}
+			infos := batch("run_1", order...)
+			decided := map[string]*agentturn.ToolDecision{}
+			for _, info := range infos {
+				d, err := e.Decide(ctx, info)
+				if err != nil {
+					t.Fatal(err)
+				}
+				c, _ := stringField(info.Args, "command")
+				decided[c] = d
+			}
+			if d := decided["git status"]; d.Action != agentturn.Defer || !d.Held {
+				t.Errorf("git status beside an unreadable call: %+v, want held", d)
+			}
+			if d := decided[`echo "unterminated`]; d.Action != agentturn.Block {
+				t.Errorf("the unreadable call: %+v, want blocked", d)
+			}
+		})
+	}
+}
+
 // TestADeniedSiblingDoesNotHold checks that a sibling a rule blocks is
 // not an ask: the call beside it is not held, and the reading is kept
 // for the batch, so the sibling is split once.

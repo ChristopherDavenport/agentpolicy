@@ -677,7 +677,7 @@ func (e *Engine) Decide(ctx context.Context, info agentturn.ToolCallInfo) (*agen
 
 	a := e.active(ctx)
 
-	out, err := e.judge(ctx, a, info, &v)
+	out, failed, err := e.evaluate(ctx, a, info, &v)
 	if err != nil {
 		return nil, err
 	}
@@ -686,7 +686,7 @@ func (e *Engine) Decide(ctx context.Context, info agentturn.ToolCallInfo) (*agen
 		// The verdict is about the rewrite, so a reviewer is shown it.
 		d.info.Args = out.Args
 	}
-	held := e.batchAsks(ctx, a, info, v.Action)
+	held := e.batchAsks(ctx, a, info, v.Action, failed)
 	if e.askInRun && info.Parent == "" {
 		if decided, ok := e.askedInRun(ctx, a, info, &v, out, held); ok {
 			e.observe(ctx, v)
@@ -875,8 +875,12 @@ type batchCache struct {
 // could not be read, its hook or its splitter having failed, holds the
 // call and is not kept: the failure may pass, as a cancelled context or
 // a remote executor that did not answer does, so the next call of the
-// batch reads it again.
-func (e *Engine) batchAsks(ctx context.Context, a active, info agentturn.ToolCallInfo, own agentturn.ToolAction) bool {
+// batch reads it again. A call whose own decision could not be
+// evaluated, blocked because its splitter or a rewrite's failed
+// (failed), is kept as asking: read first as a sibling it held the
+// calls before it, so it holds the calls after it too, and whether the
+// batch holds does not depend on the order of its calls.
+func (e *Engine) batchAsks(ctx context.Context, a active, info agentturn.ToolCallInfo, own agentturn.ToolAction, failed bool) bool {
 	if len(info.Batch) < 2 || info.Call == nil {
 		return false
 	}
@@ -887,7 +891,7 @@ func (e *Engine) batchAsks(ctx context.Context, a active, info agentturn.ToolCal
 		e.batch = batchCache{key: key, asks: make(map[int]bool, len(info.Batch))}
 	}
 	if self >= 0 {
-		e.batch.asks[self] = e.batch.asks[self] || own == agentturn.Defer
+		e.batch.asks[self] = e.batch.asks[self] || own == agentturn.Defer || failed
 	}
 	if own != agentturn.Allow {
 		e.mu.Unlock()
