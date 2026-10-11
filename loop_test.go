@@ -830,3 +830,51 @@ func actionName(a agentturn.ToolAction) string {
 	}
 	return fmt.Sprint(int(a))
 }
+
+// A hook's note on a call the engine holds is the policy's: the loop
+// says it once, as a developer message, when an approval releases the
+// call. The release does not put it on the answer too, or it is said
+// twice (agentturn v0.0.24).
+func TestLoopAHeldCallsHookNoteIsSaidOnce(t *testing.T) {
+	ctx := context.Background()
+	note := func(_ context.Context, info agentturn.ToolCallInfo) (*agentturn.ToolDecision, error) {
+		var a bashArgs
+		_ = json.Unmarshal(info.Args, &a)
+		if strings.HasPrefix(a.Command, "git add") {
+			return &agentturn.ToolDecision{Action: agentturn.Allow, Note: "staged everything"}, nil
+		}
+		return nil, nil
+	}
+	e, err := Build(Policy{Allow: rules(t, "bash(git add:*)"), Ask: rules(t, "bash(git push:*)"), Default: Deny()}, testMatchers, WithHooks(note))
+	if err != nil {
+		t.Fatal(err)
+	}
+	bash := &bashTool{}
+	agent := agentturn.New(agentturn.Config{Model: &batchModel{}, Tools: []agenttool.Tool{bash.tool()}, BeforeToolCall: e.BeforeToolCall(), ToolExecution: agentturn.ExecSequential})
+	end, err := agent.Prompt(ctx, openresponses.UserText("git add -A\ngit push"))
+	if err != nil || end.Reason != agentturn.ReasonInputRequired {
+		t.Fatalf("prompt: %v %+v", err, end)
+	}
+	answers, err := e.Release(ctx, end, agentturn.Approve(end.Pending[1].Call.CallID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if answers[0].Note != "" {
+		t.Errorf("the release put the hook's note on the answer: %q", answers[0].Note)
+	}
+	if _, err := agent.Resume(ctx, answers...); err != nil {
+		t.Fatal(err)
+	}
+	said := 0
+	for _, it := range agent.State().Transcript {
+		if m, ok := it.(*openresponses.Message); ok && m.Text() == "staged everything" {
+			said++
+			if m.Role != openresponses.RoleDeveloper {
+				t.Errorf("the hook's note is a %s message", m.Role)
+			}
+		}
+	}
+	if said != 1 {
+		t.Errorf("the hook's note was said %d times", said)
+	}
+}

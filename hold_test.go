@@ -593,7 +593,9 @@ func TestHooksAreInsideTheHold(t *testing.T) {
 	end := pendingEnd("r", infos[0].Call, infos[1].Call)
 	no := agentturn.Output(openresponses.NewFunctionCallOutput("call_b", "no"))
 	wantAnswers := []agentturn.Answer{
-		agentturn.ApproveWith("call_a", json.RawMessage(`{"command":"git status --short"}`)).WithNote("short form").WithBy(ByPolicy).WithReason("released: allowed by bash(git:*)"),
+		// The hook's note is the held decision's, which the loop says on
+		// release; the answer does not repeat it.
+		agentturn.ApproveWith("call_a", json.RawMessage(`{"command":"git status --short"}`)).WithBy(ByPolicy).WithReason("released: allowed by bash(git:*)"),
 		no,
 	}
 	if got := released(ctx, t, e, end, no); !reflect.DeepEqual(got, wantAnswers) {
@@ -836,7 +838,6 @@ func TestReleaseFromTheDecision(t *testing.T) {
 		}
 		end.Pending = append(end.Pending, agentturn.PendingCall{Call: info.Call, Reason: agentturn.PendingDeferred, Decision: d})
 	}
-	end.Pending[1].Decision.Note = "the hook's note"
 
 	j := &journal{}
 	after, err := Build(policy, testMatchers, WithObserver(j.observe))
@@ -848,7 +849,7 @@ func TestReleaseFromTheDecision(t *testing.T) {
 	got, err := after.Release(ctx, end, agentturn.Approve("call_c"))
 	want := []agentturn.Answer{
 		agentturn.Approve("call_a").WithBy(ByPolicy).WithReason("released: allowed by bash(git add:*)"),
-		agentturn.Approve("call_b").WithNote("the hook's note").WithBy(ByPolicy).WithReason("released: allowed by bash(git commit:*)"),
+		agentturn.Approve("call_b").WithBy(ByPolicy).WithReason("released: allowed by bash(git commit:*)"),
 		agentturn.Approve("call_c"),
 	}
 	if err != nil || !reflect.DeepEqual(got, want) {

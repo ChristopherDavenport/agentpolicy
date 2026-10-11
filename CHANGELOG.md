@@ -25,7 +25,7 @@ versions may break the API.
   `agentturn.PendingCall.Decision`, which agentturn/session reads back
   from the record since agentturn v0.0.23. An engine that never saw
   the run, one built after a restart, releases the held calls with the
-  reason and the note the decision carries, and `Answers` asks its
+  reason the decision carries, and `Answers` asks its
   reviewer about the asked calls alone, with the decision's reason and
   subject, where it reviewed every call (agentkit#91, agentkit#92).
 - Added: `WithAskInRun()`. `Decide` asks the person about a batch's
@@ -45,6 +45,11 @@ versions may break the API.
   `; a question was open: "<message>"`, and ` about call <id> (<name>)`
   for a question about another call, as agentturn/session's
   `ReplayAnswers` says it (agentturn#241).
+- Changed: `Release` no longer puts a hook's note on a held call's
+  approval (`Answer.Note`). The note is the held decision's
+  (`ToolDecision.Note`), which agentturn v0.0.24 says itself, once, as a
+  developer message when an approval releases the call, so on the answer
+  it was said twice, and in the user's voice.
 - Changed: an approval `Release` builds carries its verdict's reason,
   `released: <why the policy allowed it>`, as `agentturn.Answer.Reason`,
   so the session recorder writes it on the call's decision.

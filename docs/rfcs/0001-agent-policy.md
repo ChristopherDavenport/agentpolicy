@@ -723,14 +723,18 @@ returns one answer per pending call in the order the run's end lists
 them, the model's order:
 
 - a pending call the host answered keeps its answer;
-- a held call is approved, with the arguments and the note the hooks
-  gave it, unless any of the host's answers ends the run, in which case
+- a held call is approved, with the arguments the hooks gave it,
+  unless any of the host's answers ends the run, in which case
   it is answered with the output `The call was held for an approval
   and the turn was stopped; the call did not run.`;
 - an answer for a call that is not pending follows the rest;
 - a pending call neither the host nor the engine answers is an error
   naming every such call, returned with the answers, so the host
   answers the missing call and releases again.
+
+A note the hooks gave a held call belongs to the decision that held
+it, and the loop says it once, as the policy's, when an approval
+releases the call; the release does not repeat it on the answer.
 
 A call is held when its deferral says so: what the engine remembers of
 it, or the held mark on the decision that deferred it, which the loop

@@ -300,11 +300,12 @@ type deferredCall struct {
 	info    agentturn.ToolCallInfo
 	verdict Verdict
 	// allowed is the reason the policy allowed a held call, for the
-	// verdict that releases it; args and note are what the hooks
-	// rewrote its arguments to and told the model, for its release.
+	// verdict that releases it; args are what the hooks rewrote its
+	// arguments to, for its release. What the hooks told the model is
+	// the decision's Note, which the loop says when the call is
+	// released.
 	allowed string
 	args    json.RawMessage
-	note    string
 }
 
 // Who a decision names as its decider, in the session format's words.
@@ -677,7 +678,7 @@ func (e *Engine) Decide(ctx context.Context, info agentturn.ToolCallInfo) (*agen
 	if err != nil {
 		return nil, err
 	}
-	d := deferredCall{info: info, args: out.Args, note: out.Note}
+	d := deferredCall{info: info, args: out.Args}
 	if out.Args != nil {
 		// The verdict is about the rewrite, so a reviewer is shown it.
 		d.info.Args = out.Args
