@@ -129,6 +129,16 @@
       ]
     },
     {
+      "name": "a server glob in the deny list denies a name its rest begins with _, and in the allow list does not allow it",
+      "policy": {"allow": "mcp__ok__*", "deny": "mcp__gh__*", "default": "ask"},
+      "calls": [
+        {"tool": "mcp__gh___x", "args": {}, "want": {"action": "block", "rule": "mcp__gh__*", "reason": "denied by mcp__gh__*"}},
+        {"tool": "mcp__ok___x", "args": {}, "want": {"action": "defer", "reason": "no rule allows mcp__ok___x: approval required by default"}},
+        {"tool": "mcp__ok__y", "args": {}, "want": {"action": "allow", "rule": "mcp__ok__*", "reason": "allowed by mcp__ok__*"}}
+      ],
+      "offer": {"tools": ["mcp__gh___x", "mcp__ok___x"], "want": ["mcp__ok___x"]}
+    },
+    {
       "name": "a glob over several servers is refused in the allow list",
       "policy": {"allow": "mcp__gh*", "default": "ask"},
       "build_error": "tool_glob"

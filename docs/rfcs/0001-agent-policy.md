@@ -209,12 +209,15 @@ every tool of every MCP server.
 
 A **server glob** is a tool-name glob `mcp__S__*`, where `S` is not
 empty, contains neither `*` nor `__`, and neither begins nor ends with
-`_`. It names every tool whose name begins `mcp__S__` and whose rest
-does not begin with `_`, which is every tool of the MCP server `S`
-under the `mcp__<server>__<tool>` naming the reference agents use, and
-no tool of a server `S_`, whose tools begin `mcp__S___`. A host MUST
-refuse a server name that begins or ends with `_`, so a tool name never
-reads as two servers'. A host whose
+`_`. In the allow list it names every tool whose name begins `mcp__S__`
+and whose rest does not begin with `_`, which is every tool of the MCP
+server `S` under the `mcp__<server>__<tool>` naming the reference
+agents use, and no tool of a server `S_`, whose tools begin
+`mcp__S___`. In the deny and ask lists, and for the offer, it is the
+full glob and names every name that begins `mcp__S__`, so the
+exclusion narrows only what an allow grants and never lets a tool
+through a rule that restricts. A host MUST refuse a server name that
+begins or ends with `_`, so a tool name never reads as two servers'. A host whose
 settings write a server as `mcp__S`, as the reference agent's do, reads
 it as `mcp__S__*`.
 
@@ -464,7 +467,9 @@ apply, the subject's arguments, and the call's confinement.
 A rule **fires** for a tool `T` and arguments `A`, within the list `L`
 it belongs to, when all of these hold:
 
-1. its tool name is `T`, or is a tool-name glob that matches `T`;
+1. its tool name is `T`, or is a tool-name glob that matches `T`, a
+   server glob in an allow list matching as [the grammar](#the-grammar)
+   says;
 2. it is not a carve-out;
 3. it is bare, or its tool's matcher matches its specifier against `A`;
 4. no carve-out in `L` whose tool name is the rule's tool name, and
@@ -1264,7 +1269,7 @@ The root module of this repository is the reference binding.
 
 | Contract | Go |
 | --- | --- |
-| rule | `Rule{Tool, Spec, Source, Note}`; `String`, `Bare`, `Glob`, `ServerGlob`, `MatchesTool`, `CarveOut` |
+| rule | `Rule{Tool, Spec, Source, Note}`; `String`, `Bare`, `Glob`, `ServerGlob`, `MatchesTool`, `AllowsTool` (the allow list's reading), `CarveOut` |
 | grammar | `ParseRules(s)`; every error begins `agentpolicy: rule "<token>": ` and ends with the kind's text, `unbalanced parentheses`, `missing tool name`, `empty specifier`, `empty carve-out`, `text after the specifier` |
 | source | `Source{Name, Path, Hash, Trusted, Rank}` |
 | policy | `Policy{Allow, Deny, Ask, Default, Sources, Withheld}`; `Allow()`, `Deny()`, `Ask()`; the zero `Default` is unset; `Policy.WithDefault(d)` |
@@ -1467,8 +1472,8 @@ listed in the changelog as one.
   agent did too, which was wrong: Claude Code allows `mcp__<server>` and
   `mcp__<server>__*`. Every other glob in an allow list is still
   `tool_glob`. A server name neither begins nor ends with `_`, and a
-  server glob does not match a name whose rest after `mcp__S__` begins
-  with `_`. A grant set's server glob is refused only by a bare deny,
+  server glob in the allow list does not match a name whose rest after
+  `mcp__S__` begins with `_`; in the deny and ask lists it does. A grant set's server glob is refused only by a bare deny,
   or an outranking bare ask rule, that names every tool it names
   ([Grant sets](#grant-sets)).
 - A hook is called at most once per call of a batch: a sibling's

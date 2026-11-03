@@ -121,18 +121,32 @@ func (r Rule) ServerGlob() bool {
 // own test, exported so a product that offers the model a tool list
 // does not write a second one that can disagree.
 //
-// A server glob, "mcp__S__*", matches a name that begins "mcp__S__"
-// and whose rest does not begin with "_", so it names server S's tools
-// and never those of a server whose name is S followed by "_".
+// It is the full glob, which the deny and ask lists and the offer read,
+// so a deny of "mcp__S__*" names every name that begins "mcp__S__". The
+// allow list reads [Rule.AllowsTool].
 func (r Rule) MatchesTool(tool string) bool {
 	if !r.Glob() {
 		return r.Tool == tool
 	}
-	if r.ServerGlob() {
-		rest, ok := strings.CutPrefix(tool, strings.TrimSuffix(r.Tool, "*"))
-		return ok && !strings.HasPrefix(rest, "_")
-	}
 	return globMatch(r.Tool, tool)
+}
+
+// AllowsTool reports whether the rule, in an allow list, names the
+// tool: as [Rule.MatchesTool] does, except that a server glob,
+// "mcp__S__*", names no tool whose rest after "mcp__S__" begins with
+// "_", so it allows server S's tools and never those of a server whose
+// name is S followed by "_". Only an allow is narrowed: a deny or an ask
+// of the same glob still names such a tool, so the exclusion never lets
+// a tool through a rule that restricts.
+func (r Rule) AllowsTool(tool string) bool {
+	if !r.MatchesTool(tool) {
+		return false
+	}
+	if r.ServerGlob() {
+		rest := strings.TrimPrefix(tool, strings.TrimSuffix(r.Tool, "*"))
+		return !strings.HasPrefix(rest, "_")
+	}
+	return true
 }
 
 // globMatch matches a pattern whose "*" stands for any run of

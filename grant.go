@@ -434,7 +434,7 @@ func (e *Engine) shadowedBy(a active, ask Rule, tool string, args json.RawMessag
 		if g.Source.Name == ask.Source.Name || g.Source.Rank < ask.Source.Rank {
 			continue
 		}
-		if r, ok := e.match(g.Allow, tool, args); ok {
+		if r, ok := e.match(g.Allow, tool, args, true); ok {
 			return r, true
 		}
 	}

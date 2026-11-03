@@ -1649,7 +1649,7 @@ func restrictiveness(a agentturn.ToolAction) int {
 // deny or ask rule fires for has no verdict, and ok is false.
 func (e *Engine) decideSubject(a active, tool string, c confinement, args json.RawMessage, constrain bool) (act agentturn.ToolAction, rule *Rule, reason string, ok bool) {
 	p := a.policy
-	if r, ok := e.match(p.Deny, tool, args); ok {
+	if r, ok := e.match(p.Deny, tool, args, false); ok {
 		return agentturn.Block, &r, "denied by " + r.cite(), true
 	}
 	r, skipped, asked := e.matchAsk(a, tool, args, c.ok)
@@ -1662,7 +1662,7 @@ func (e *Engine) decideSubject(a active, tool string, c confinement, args json.R
 	if skipped {
 		return agentturn.Allow, &r, confinedReason(c.by, r), true
 	}
-	if r, ok := e.match(p.Allow, tool, args); ok {
+	if r, ok := e.match(p.Allow, tool, args, true); ok {
 		return agentturn.Allow, &r, "allowed by " + r.cite(), true
 	}
 	action, _ := p.Default.Action()
@@ -1678,19 +1678,21 @@ func (e *Engine) decideSubject(a active, tool string, c confinement, args json.R
 // match returns the first rule of list that matches the subject: the
 // rule names the tool, itself or through a glob, is not a carve-out,
 // is bare or its specifier matches, and no carve-out from the same
-// source cancels it.
-func (e *Engine) match(list []Rule, tool string, args json.RawMessage) (Rule, bool) {
+// source cancels it. allow says list is an allow list, whose server
+// globs read [Rule.AllowsTool].
+func (e *Engine) match(list []Rule, tool string, args json.RawMessage, allow bool) (Rule, bool) {
 	for _, r := range list {
-		if e.fires(list, r, tool, args) {
+		if e.fires(list, r, tool, args, allow) {
 			return r, true
 		}
 	}
 	return Rule{}, false
 }
 
-// fires reports whether one rule of a list matches the subject.
-func (e *Engine) fires(list []Rule, r Rule, tool string, args json.RawMessage) bool {
-	if !r.MatchesTool(tool) {
+// fires reports whether one rule of a list matches the subject, the
+// rule's tool name read as an allow list reads it when allow is set.
+func (e *Engine) fires(list []Rule, r Rule, tool string, args json.RawMessage, allow bool) bool {
+	if names := r.MatchesTool(tool); !names || allow && !r.AllowsTool(tool) {
 		return false
 	}
 	if _, carve := r.CarveOut(); carve {
@@ -1713,7 +1715,7 @@ func (e *Engine) fires(list []Rule, r Rule, tool string, args json.RawMessage) b
 // returned with skipped set, so the verdict names it.
 func (e *Engine) matchAsk(a active, tool string, args json.RawMessage, confined bool) (r Rule, skipped, ok bool) {
 	for _, rule := range a.policy.Ask {
-		if !e.fires(a.policy.Ask, rule, tool, args) {
+		if !e.fires(a.policy.Ask, rule, tool, args, false) {
 			continue
 		}
 		if _, shadowed := e.shadowedBy(a, rule, tool, args); shadowed {

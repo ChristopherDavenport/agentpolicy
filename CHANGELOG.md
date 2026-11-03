@@ -135,9 +135,11 @@ versions may break the API.
   allows every tool of the one MCP server `S`, including one the server
   adds later (#85). `Rule.ServerGlob` reports the shape: `S` is not
   empty and holds neither `*` nor `__`, and neither begins nor ends
-  with `_`. A server glob does not match a tool whose name continues
-  `_` after `mcp__S__`, so `mcp__gh__*` names no tool of a server
-  `gh_`, in any list; a host refuses such server names. Every other
+  with `_`. In the allow list a server glob does not match a tool whose
+  name continues `_` after `mcp__S__`, so `allow mcp__gh__*` allows no
+  tool of a server `gh_` (`Rule.AllowsTool`); in the deny and ask lists
+  and for the offer it is the full glob, so `deny mcp__gh__*` still
+  denies and removes `mcp__gh___x`. A host refuses such server names. Every other
   tool-name glob in the allow list, `mcp__*` or `mcp__gh*`, is still
   `ErrToolGlob`, and a glob with a specifier still is too. A grant
   set's server glob is refused only by a bare deny, or an outranking
