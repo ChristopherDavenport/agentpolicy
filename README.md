@@ -176,12 +176,24 @@ chained after `Decide` with `agentturn.ChainBeforeToolCall` is outside
 the hold, so the siblings of a call it defers run before anyone
 answers. The engine reads a call's siblings to decide the hold, so a
 hook is also called for a sibling before the loop hands it that
-sibling's own call, and must decide a call the same way each time.
+sibling's own call, and must decide a call the same way each time; the
+sibling's reading is kept and is the call's own decision when the loop
+hands the same call with the same tool, so with `WithTools` each hook
+runs once per call. A hook that defers a call the policy already
+defers adds its reason to the question, `no rule allows bash: approval
+required by default; git touches the remote`, and its
+`ToolDecision.Subject` names the part of the call it asks about.
 
 ```go
 eng, err := agentpolicy.Build(policy, matchers,
 	agentpolicy.WithHooks(meterFetches))
 ```
+
+A hook whose allow should answer the policy's ask, as a reference
+`PreToolUse` hook that allows `go version` skips the prompt, goes to
+`WithAnsweringHooks` instead. It is asked only when the policy's own
+ask rule or default deferred the call, and its allow never lifts a
+deny, a `WithHooks` hook's ask or a hold.
 
 One engine serves every agent: what it defers is remembered under the
 call's own run, so a sub-agent deciding a call while the user reads a
@@ -218,6 +230,20 @@ allow the skill call; that still takes the skill tool's own allow.
 When no deny or ask rule fires for a constraint it adds nothing to the
 fold, and the default does not apply to it. A splitter that returns
 only constraints has the call itself decided before them.
+
+`WithConstraints` adds constraints to every call, a tool with no
+splitter included: a source returns `{Tool: "tainted"}` once the host,
+keyed by `GrantScopeFromContext`, has seen untrusted content enter the
+conversation, and `ask tainted` then asks before any call, a
+`send_message` an MCP server added later among them.
+
+A tool that claims what a call would touch, `agenttool.Factual`, is
+split by its claim when no `Subjects` is registered for it: each
+claimed call is a subject under the tool it names, so `deny read(.env)`
+refuses a tool that says it reads `.env`. A claim of nothing, or an
+error, blocks the call; facts that are hints, from a server the host
+does not trust, are constraints; and a claim's rewrite is what the call
+runs with. `WithoutFacts()` turns claim reading off.
 
 A call its tool says runs confined is not asked about by a bare ask
 rule naming that tool, as both references skip a bare `Bash` ask for

@@ -289,6 +289,37 @@ A splitter that fails blocks the call, with its error in the reason. A
 splitter that returns no subjects is a failure too, since a call with
 no subjects would be allowed by every rule.
 
+### Claims
+
+agenttool RFC 0001 lets a tool claim, per call, what the call would
+touch: its **facts**, calls in tool-call terms, a rewrite, and whether
+they are hints from a source the host does not trust. A policy layer is
+the reader it names. A call whose tool claims facts, for which the host
+registered no splitter, is split by the claim:
+
+- each claimed call is an ordinary subject under the tool it names, the
+  called tool when it names none, with the claim's text;
+- absent calls are the call itself;
+- an empty list, or an error, blocks the call as a failed splitter
+  does, `E` being `facts claim returned no calls` for the empty list;
+- facts that are hints are constraints, put after the call itself, so
+  they can make the call stricter and never decide it; an empty hint
+  list, or a hint's error, blocks it as a claim's does;
+- a claim's rewrite, never a hint's, is what the call runs with. It is
+  decided as a hook's rewrite is, on the claim's subjects with the
+  rewrite's confinement: the stricter of the two actions stands, and on
+  an equal one the rewrite's rule and reason. The hooks are handed the
+  rewrite, and a held call is released with it.
+
+An engine MUST read one claim per call per batch, and the hold and the
+call's own decision MUST read the same claim: a claim is kept for its
+batch by the call's position, its arguments and the tool that made it.
+A claim that failed is not kept, as a reading that failed is not. A
+hook's rewrite is a call with other arguments, whose claim is read in
+its own right and whose rewrite is not taken. A registered splitter is
+the host's override and the claim is not read for its tool. A binding
+MAY let the host turn claim reading off.
+
 ### Constraint sources
 
 A constraint subject is how a host holds one tool's calls to another
@@ -497,8 +528,8 @@ off, so every ask rule asks.
 
 A call is decided in four steps.
 
-1. **Split.** The call's subjects are its splitter's, or the call
-   itself. A splitter that fails, or returns no subjects, blocks the
+1. **Split.** The call's subjects are its splitter's, its tool's
+   claim's (see [Claims](#claims)), or the call itself. A splitter that fails, or returns no subjects, blocks the
    call with no rule and the reason `N call could not be evaluated:
    E`, where `N` is the tool name and `E` the error, `splitter returned
    no subjects` for none. When every subject the splitter returns is a
@@ -1169,6 +1200,7 @@ The root module of this repository is the reference binding.
 | matcher | `Matcher func(spec, args) bool`; `PrefixMatcher(field)`, `GlobMatcher(field)` |
 | splitter, subject | `Subjects func(ctx, args) ([]Subject, error)`, `Subject{Args, Tool, Text, Constrain}`; `ToolMatcher{Match, Subjects}` per tool |
 | constraint sources | `WithConstraints(fns…)`, each `func(ctx, agentturn.ToolCallInfo) ([]Subject, error)` |
+| claims | read by default through `agenttool.FactsOf` on the call's tool; `WithoutFacts()` turns reading off, `WithFacts()` back on |
 | aliases | `WithAliases(map[string][]string)` |
 | build | `Build(policy, matchers, opts…)`; `ErrNoDefault`, `ErrNoMatcher`, `ErrToolGlob` for the kinds, and a plain error for `invalid_rule` |
 | engine | `Engine`; `Policy`, `PolicyOf(source)`, `Sources`, `Withheld`, `SetPolicy` |
@@ -1234,9 +1266,12 @@ parser is one.
 could never fire and a tool-name glob it will not honour; decides
 every subject by the precedence as an algorithm, whatever the order of
 the lists; holds a constraint to its tool's deny and ask rules alone
-and decides a call of constraints alone with the call itself; folds a
+and decides a call of constraints alone with the call itself; splits a
+call by its tool's claim when the host registered no splitter, holds a
+hint to a constraint, and reads one claim per call per batch; adds a
+constraint source's subjects as constraints; folds a
 call's subjects to the most restrictive; blocks a
-call whose splitter fails; reads confinement from the called tool and
+call whose splitter, claim or constraint source fails; reads confinement from the called tool and
 reads an unanswered tool as unconfined; holds every call it allows
 when another of its batch asks, and never runs one beside an ask;
 gives the reason texts this document states; reports every verdict to
@@ -1300,16 +1335,22 @@ A call has `tool` and `args`. The splitter and the confinement are the
 host's, so the corpus writes out what they answer for the call:
 `subjects`, an array of `{"args", "text"?, "tool"?, "constrain"?}`
 the splitter returns, one subject of the call's own arguments when absent;
-`subjects_error`, the splitter's error text; and `confined`, present
+`subjects_error`, the splitter's error text; `confined`, present
 when the tool says the call runs confined, with what confines it, `""`
-for nothing named. The calls of one case have distinct arguments per
+for nothing named; and `facts`, present when the tool claims facts for
+the call: `calls`, an array of `{"tool"?, "args", "text"?}`, absent for
+the call itself; `rewrite`; `hint`; and `error`, the claim's error
+text. A tool claims when any call of it in the case has `facts`, and
+its calls without the member claim the call itself. The calls of one case have distinct arguments per
 tool, so a harness can find a call's answers from what the splitter
 and the tool are handed. The tool a harness offers the engine for a
 sibling is the one it offers for the call.
 
 `want` is the verdict: `action`, `"allow"`, `"block"` or `"defer"`;
 `held`; `rule` in string form and `source`, its source's name; the
-exact `reason`; `subject`; and `confined`. An absent member is empty.
+exact `reason`; `subject`; `confined`; and `args`, the arguments the
+decision says the call runs with, absent for the model's. An absent
+member is empty.
 The decision the loop receives carries the same action and reason and
 the decider `policy`, and deciding the same call again gives the same
 decision.
@@ -1346,6 +1387,13 @@ listed in the changelog as one.
   agentturn's chain fold.
 - Answering hooks (#86): a host MAY register hooks whose allow answers
   the policy's own ask, never a deny, an ordinary hook's ask or a hold.
+- Claims (#81): a call whose tool claims facts, with no splitter, is
+  split by the claim; hints are constraints after the call itself; a
+  claim's rewrite is decided again and is what the call runs with; one
+  claim per call per batch, read by the hold and the decision alike
+  ([Claims](#claims)). A binding MAY turn reading off. The corpus gains
+  `facts` on a call and `args` in `want`. Draft 0.2 did not read
+  claims.
 - Constraint sources (#89): a host MAY supply functions from a call to
   subjects, added to every call's as constraints after its split, so a
   data-flow rule holds for a tool with no splitter

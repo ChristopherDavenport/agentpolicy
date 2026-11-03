@@ -35,6 +35,22 @@ versions may break the API.
   deny, an ordinary hook's ask or a hold: a call it allows is still
   held when its batch asks. It does what a product's run end, resume
   and "approved by policy" record did, and records what was decided.
+- Changed, breaking: the engine reads a tool's facts claim
+  (`agenttool.Factual`) for a call whose tool has no `Subjects`
+  splitter, by default (#81). Each claimed call is a subject under the
+  tool it names, so `deny read(.env)` blocks a claiming tool an MCP
+  server added later that says it reads `.env`; absent calls are the
+  call itself; a claim of no calls, or an error, blocks the call with
+  `<tool> call could not be evaluated: <error>`, `facts claim returned
+  no calls` for none. Facts that are hints (`Facts.Hint`) are
+  constraints after the call itself and never allow. A claim's
+  `Rewrite` is decided again with its own confinement, the stricter
+  action standing, and is the decision's `Args`, handed to the hooks
+  and released with a held call. A claim is asked once per call per
+  batch, the hold and the decision reading the same one. A registered
+  splitter still wins. `WithoutFacts()` turns reading off, as before;
+  `WithFacts()` turns it back on. A host whose claiming tools ran on
+  their own arguments decides them on their claims now.
 - Added: `WithConstraints(fns...)`, constraint sources (#89). Each is
   called for every call the engine decides or reads as a sibling, after
   the call's own split, and its subjects are added as constraints,

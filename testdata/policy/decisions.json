@@ -170,6 +170,58 @@
       ]
     },
     {
+      "name": "a claim splits a call whose tool has no splitter",
+      "policy": {"allow": "read(src:*) shell", "deny": "read(.env)", "default": "ask"},
+      "calls": [
+        {"tool": "shell", "args": {"command": "cat .env"}, "facts": {"calls": [{"tool": "read", "args": {"path": ".env"}, "text": "read .env"}]},
+         "want": {"action": "block", "rule": "read(.env)", "reason": "denied by read(.env)", "subject": "read .env"}},
+        {"tool": "shell", "args": {"command": "cat src/a.go && ls"}, "facts": {"calls": [{"tool": "read", "args": {"path": "src/a.go"}, "text": "read src/a.go"}, {"args": {"command": "ls"}, "text": "ls"}]},
+         "want": {"action": "allow", "rule": "read(src:*)", "reason": "allowed by read(src:*)", "subject": "read src/a.go"}},
+        {"tool": "shell", "args": {"command": "true"}, "facts": {},
+         "want": {"action": "allow", "rule": "shell", "reason": "allowed by shell"}}
+      ]
+    },
+    {
+      "name": "a claim of nothing, or an error, blocks the call",
+      "policy": {"allow": "shell", "default": "allow"},
+      "calls": [
+        {"tool": "shell", "args": {"command": "eval x"}, "facts": {"calls": []},
+         "want": {"action": "block", "reason": "shell call could not be evaluated: facts claim returned no calls"}},
+        {"tool": "shell", "args": {"command": "broken"}, "facts": {"error": "executor unreachable"},
+         "want": {"action": "block", "reason": "shell call could not be evaluated: executor unreachable"}}
+      ]
+    },
+    {
+      "name": "hints are constraints after the call itself",
+      "policy": {"allow": "read shell", "ask": "read(.env)", "default": "ask"},
+      "calls": [
+        {"tool": "shell", "args": {"command": "peek .env"}, "facts": {"hint": true, "calls": [{"tool": "read", "args": {"path": ".env"}, "text": "read .env"}]},
+         "want": {"action": "defer", "rule": "read(.env)", "reason": "approval required by read(.env)", "subject": "read .env"}},
+        {"tool": "shell", "args": {"command": "peek README"}, "facts": {"hint": true, "calls": [{"tool": "read", "args": {"path": "README"}, "text": "read README"}]},
+         "want": {"action": "allow", "rule": "shell", "reason": "allowed by shell"}},
+        {"tool": "web", "args": {"url": "x"}, "facts": {"hint": true, "calls": [{"tool": "read", "args": {"path": "src/x"}, "text": "read src/x"}]},
+         "want": {"action": "defer", "reason": "no rule allows web: approval required by default"}}
+      ]
+    },
+    {
+      "name": "a claim's rewrite is what the call runs with, and a hint's is not",
+      "policy": {"allow": "shell", "default": "ask"},
+      "calls": [
+        {"tool": "shell", "args": {"command": "make"}, "facts": {"rewrite": {"command": "make", "plan": "p1"}},
+         "want": {"action": "allow", "rule": "shell", "reason": "allowed by shell", "args": {"command": "make", "plan": "p1"}}},
+        {"tool": "shell", "args": {"command": "make all"}, "facts": {"hint": true, "rewrite": {"command": "rm -rf /"}},
+         "want": {"action": "allow", "rule": "shell", "reason": "allowed by shell"}}
+      ]
+    },
+    {
+      "name": "a claim's rewrite is decided with its own confinement",
+      "policy": {"allow": "read", "ask": "shell", "default": "ask"},
+      "calls": [
+        {"tool": "shell", "args": {"command": "make"}, "confined": "box", "facts": {"rewrite": {"command": "make", "sandbox": "off"}},
+         "want": {"action": "defer", "rule": "shell", "reason": "approval required by shell", "args": {"command": "make", "sandbox": "off"}}}
+      ]
+    },
+    {
       "name": "a tool-name glob denies and removes the tool",
       "policy": {"deny": "mcp__github__*", "ask": "mcp__*", "default": "allow"},
       "calls": [

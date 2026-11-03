@@ -375,6 +375,9 @@ type active struct {
 	// cache is keyed on both.
 	scope string
 	gen   uint64
+	// batch names the batch a decision is in, for the claims kept for
+	// it; "" outside Decide, so a preview or a review keeps nothing.
+	batch string
 }
 
 // active snapshots the rules of the moment for a decision under ctx.

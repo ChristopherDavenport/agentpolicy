@@ -258,6 +258,40 @@ func WithHooks(fns ...func(context.Context, agentturn.ToolCallInfo) (*agentturn.
 	}
 }
 
+// WithFacts has the engine split a call by its tool's facts claim,
+// agenttool.Factual, when the host registered no [Subjects] splitter
+// for the tool, which is the default; it undoes [WithoutFacts]. Each
+// claimed call is an ordinary subject under the tool it names, the
+// called tool when it names none, with the claim's text, so a tool an
+// MCP server adds later that claims, accurately, to read .env is
+// denied by read(.env) without a splitter written for it. Absent calls
+// are the call itself; a claim of no calls, or an error, blocks the
+// call as a failed splitter does, with the reason "<tool> call could
+// not be evaluated: <error>".
+//
+// Facts that are hints (agenttool.Facts.Hint), from a source the host
+// does not trust, are constraints put after the call itself: they can
+// make the call stricter and never decide it, and their rewrite is
+// never taken. A claim's rewrite is what the call runs with: it is
+// decided again as a hook's rewrite is, on the claim's subjects with
+// its own confinement, the stricter action standing, and it is the
+// decision's Args, handed to the [WithHooks] hooks, and what a held
+// call is released with. A claim is asked under the decision's context
+// and kept for its batch, so the hold and the call's own decision read
+// one claim, asked once per call per batch for the tool [WithTools]
+// names; a claim that failed is asked again. A registered splitter is
+// the host's override, and the claim is not read for its tool.
+func WithFacts() Option {
+	return func(e *Engine) { e.noFacts = false }
+}
+
+// WithoutFacts turns claim reading off: a call whose tool has no
+// [Subjects] splitter is the one subject of its own arguments, whatever
+// its tool claims, as before claims were read.
+func WithoutFacts() Option {
+	return func(e *Engine) { e.noFacts = true }
+}
+
 // WithConstraints registers constraint sources: functions from a call,
 // under the decision's context, to subjects the call is held to besides
 // its own. The engine calls each for every call it decides or reads as
@@ -341,9 +375,11 @@ type Engine struct {
 	// answerers may answer the policy's own ask after them, and
 	// neverStarted reads the record for a cut-off call. All are set at
 	// Build and never written after.
-	hooks        []func(context.Context, agentturn.ToolCallInfo) (*agentturn.ToolDecision, error)
-	answerers    []func(context.Context, agentturn.ToolCallInfo) (*agentturn.ToolDecision, error)
-	constraints  []func(context.Context, agentturn.ToolCallInfo) ([]Subject, error)
+	hooks       []func(context.Context, agentturn.ToolCallInfo) (*agentturn.ToolDecision, error)
+	answerers   []func(context.Context, agentturn.ToolCallInfo) (*agentturn.ToolDecision, error)
+	constraints []func(context.Context, agentturn.ToolCallInfo) ([]Subject, error)
+	// noFacts is [WithoutFacts], set at Build and never written after.
+	noFacts      bool
 	neverStarted func(context.Context, string, string) bool
 	// askInRun is [WithAskInRun], set at Build and never written after.
 	askInRun bool
@@ -758,6 +794,7 @@ func (e *Engine) Decide(ctx context.Context, info agentturn.ToolCallInfo) (*agen
 	v := Verdict{RunID: info.RunID, Turn: info.Turn, CallID: callID, Tool: name, By: ByPolicy}
 
 	a := e.active(ctx)
+	a.batch = e.batchOf(info, a)
 
 	// A call the engine already read as a sibling, with the tool the
 	// loop now hands it, is decided by that reading: the hooks are not
@@ -858,9 +895,18 @@ func (e *Engine) evaluate(ctx context.Context, a active, info agentturn.ToolCall
 	}
 	c := e.confinement(ctx, info.Tool, info.Args)
 	var failed bool
-	v.Action, v.Rule, v.Reason, v.Subject, failed = e.decide(ctx, a, info, c)
+	var rewrite json.RawMessage
+	v.Action, v.Rule, v.Reason, v.Subject, failed, rewrite, c = e.decide(ctx, a, info, c, true)
 	v.Confined = c.by
+	if rewrite != nil {
+		// The claim's rewrite is what the call runs with: the hooks are
+		// handed it, as they are a hook's rewrite.
+		info.Args = rewrite
+	}
 	out, rewriteFailed, err := e.foldHooks(ctx, a, name, info, v)
+	if out.Args == nil {
+		out.Args = rewrite
+	}
 	return out, failed || rewriteFailed, err
 }
 
@@ -914,7 +960,7 @@ func (e *Engine) foldHooks(ctx context.Context, a active, name string, info agen
 		if d.Args != nil {
 			out.Args, info.Args = d.Args, d.Args
 			c := e.confinement(ctx, info.Tool, d.Args)
-			act, rule, reason, subject, bad := e.decide(ctx, a, info, c)
+			act, rule, reason, subject, bad, _, _ := e.decide(ctx, a, info, c, false)
 			if r, cur := restrictiveness(act), restrictiveness(v.Action); r > cur || policy && r == cur {
 				keep := v.Subject
 				v.Action, v.Rule, v.Reason, v.Subject, v.By = act, rule, reason, subject, ByPolicy
@@ -987,22 +1033,38 @@ func (e *Engine) confinement(ctx context.Context, tool agenttool.Tool, args json
 
 // decide evaluates one call, info's with info.Args, as Decide does,
 // without recording it. ctx is the decision's, handed to the tool's
-// splitter and the constraint sources. failed reports a block because
-// the subjects could not be read, rather than one a rule made.
-func (e *Engine) decide(ctx context.Context, a active, info agentturn.ToolCallInfo, c confinement) (act agentturn.ToolAction, rule *Rule, reason, subject string, failed bool) {
+// splitter, its facts claim and the constraint sources. failed reports
+// a block because the subjects could not be read, rather than one a
+// rule made.
+//
+// With claimed set, a facts claim's rewrite is taken: the call is
+// decided again on the claim's subjects with the rewrite's confinement,
+// as a hook's rewrite is decided again, the stricter action standing
+// and the rewrite's rule and reason on an equal one, and the rewrite
+// and its confinement are returned. Without it, a claim's rewrite is
+// ignored, since the arguments being decided are already a hook's.
+func (e *Engine) decide(ctx context.Context, a active, info agentturn.ToolCallInfo, c confinement, claimed bool) (act agentturn.ToolAction, rule *Rule, reason, subject string, failed bool, rewrite json.RawMessage, _ confinement) {
 	name := ""
 	if info.Call != nil {
 		name = info.Call.Name
 	}
-	subjects, err := e.split(ctx, name, info.Args)
+	subjects, rewrite, err := e.split(ctx, a, info)
 	if err == nil {
 		subjects, err = e.constrain(ctx, info, subjects)
 	}
 	if err != nil {
-		return agentturn.Block, nil, name + " call could not be evaluated: " + err.Error(), "", true
+		return agentturn.Block, nil, name + " call could not be evaluated: " + err.Error(), "", true, nil, c
 	}
 	act, rule, reason, subject = e.fold(a, name, c, subjects)
-	return act, rule, reason, subject, false
+	if !claimed || rewrite == nil {
+		return act, rule, reason, subject, false, nil, c
+	}
+	rc := e.confinement(ctx, info.Tool, rewrite)
+	ract, rrule, rreason, rsubject := e.fold(a, name, rc, subjects)
+	if restrictiveness(ract) >= restrictiveness(act) {
+		act, rule, reason, subject = ract, rrule, rreason, rsubject
+	}
+	return act, rule, reason, subject, false, rewrite, rc
 }
 
 // batchCache is whether each call of one batch asks, by its position
@@ -1017,6 +1079,7 @@ type batchCache struct {
 	key      string
 	asks     map[int]bool
 	readings map[int]reading
+	claims   map[claimKey]claimed
 }
 
 // reading is what the engine made of one call of a batch, policy and
@@ -1058,6 +1121,16 @@ func (e *Engine) siblingReading(info agentturn.ToolCallInfo, a active) (reading,
 		return reading{}, false
 	}
 	return r, true
+}
+
+// batchOf names the batch info's call is decided in for the caches,
+// or "" for a call with no siblings, a nested call or one not in its
+// batch.
+func (e *Engine) batchOf(info agentturn.ToolCallInfo, a active) string {
+	if len(info.Batch) < 2 || info.Call == nil || info.Parent != "" || position(info) < 0 {
+		return ""
+	}
+	return batchKey(info, a.gen, a.scope)
 }
 
 // sameTool reports whether two tools are one, by identity; no tool is
@@ -1153,7 +1226,7 @@ func (e *Engine) batchAsks(ctx context.Context, a active, info agentturn.ToolCal
 // caller holds e.mu.
 func (e *Engine) batchFor(key string, n int) {
 	if e.batch.key != key {
-		e.batch = batchCache{key: key, asks: make(map[int]bool, n), readings: make(map[int]reading, n)}
+		e.batch = batchCache{key: key, asks: make(map[int]bool, n), readings: make(map[int]reading, n), claims: make(map[claimKey]claimed, n)}
 	}
 }
 
@@ -1244,28 +1317,119 @@ func callArgs(c *openresponses.FunctionCall) json.RawMessage {
 	return json.RawMessage(c.Arguments)
 }
 
-// split returns the subjects of a call: the splitter's, or the call
-// itself, the splitter called with ctx. A splitter that returns nothing
-// is an error, since a call with no subjects would be allowed by every
-// rule. A splitter that returns only constraints has the call itself
-// put before them, since constraints never allow and the call needs a
+// split returns the subjects of info's call with info.Args: the
+// splitter's, the splitter called with ctx; else, for a tool that
+// claims facts and claim reading is on, the claim's, with the claim's
+// rewrite; else the call itself. A splitter that returns nothing is an
+// error, since a call with no subjects would be allowed by every rule.
+// A splitter that returns only constraints has the call itself put
+// before them, since constraints never allow and the call needs a
 // subject that can.
-func (e *Engine) split(ctx context.Context, name string, args json.RawMessage) ([]Subject, error) {
+func (e *Engine) split(ctx context.Context, a active, info agentturn.ToolCallInfo) ([]Subject, json.RawMessage, error) {
+	name, args := "", info.Args
+	if info.Call != nil {
+		name = info.Call.Name
+	}
 	m := e.matchers[name]
 	if m.Subjects == nil {
-		return []Subject{{Args: args}}, nil
+		if e.noFacts || info.Tool == nil || !agenttool.IsFactual(info.Tool) {
+			return []Subject{{Args: args}}, nil, nil
+		}
+		f, err := e.claim(ctx, a, info)
+		if err != nil {
+			return nil, nil, err
+		}
+		return claimSubjects(f, args)
 	}
 	subjects, err := m.Subjects(ctx, args)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if len(subjects) == 0 {
-		return nil, errors.New("splitter returned no subjects")
+		return nil, nil, errors.New("splitter returned no subjects")
 	}
 	if !slices.ContainsFunc(subjects, func(s Subject) bool { return !s.Constrain }) {
 		subjects = append([]Subject{{Args: args}}, subjects...)
 	}
-	return subjects, nil
+	return subjects, nil, nil
+}
+
+// claimSubjects is a facts claim as subjects: each claimed call an
+// ordinary subject under the tool it names, the called tool for none,
+// and absent calls the call itself, args. Facts that are hints are
+// constraints after the call itself, so they make the call stricter and
+// never decide it, and their rewrite, which agenttool.FactsOf drops,
+// is not taken. A claim of no calls is an error: there is nothing to
+// decide the call on.
+func claimSubjects(f agenttool.Facts, args json.RawMessage) ([]Subject, json.RawMessage, error) {
+	if f.Calls != nil && len(f.Calls) == 0 {
+		return nil, nil, errors.New("facts claim returned no calls")
+	}
+	if f.Hint {
+		out := []Subject{{Args: args}}
+		for _, c := range f.Calls {
+			out = append(out, Subject{Args: c.Args, Tool: c.Tool, Text: c.Text, Constrain: true})
+		}
+		return out, nil, nil
+	}
+	if f.Calls == nil {
+		return []Subject{{Args: args}}, f.Rewrite, nil
+	}
+	out := make([]Subject, 0, len(f.Calls))
+	for _, c := range f.Calls {
+		out = append(out, Subject{Args: c.Args, Tool: c.Tool, Text: c.Text})
+	}
+	return out, f.Rewrite, nil
+}
+
+// claim returns what info's tool claims a call with info.Args would
+// touch. Within a batch Decide is deciding, a.batch naming it, the
+// claim is kept by the call's position, its arguments and its tool, so
+// the hold and the call's own decision read one claim, asked once,
+// even when a reading that holds it failed for another reason and was
+// not kept. A claim that failed is not kept: the failure may pass.
+func (e *Engine) claim(ctx context.Context, a active, info agentturn.ToolCallInfo) (agenttool.Facts, error) {
+	at := -1
+	if a.batch != "" {
+		at = position(info)
+	}
+	k := claimKey{at: at, args: string(info.Args)}
+	if at >= 0 {
+		e.mu.Lock()
+		if e.batch.key == a.batch {
+			if c, ok := e.batch.claims[k]; ok && sameTool(c.tool, info.Tool) {
+				e.mu.Unlock()
+				return c.facts, nil
+			}
+		}
+		e.mu.Unlock()
+	}
+	f, _, err := agenttool.FactsOf(ctx, info.Tool, info.Args)
+	if err != nil {
+		return agenttool.Facts{}, err
+	}
+	if at >= 0 {
+		e.mu.Lock()
+		e.batchFor(a.batch, len(info.Batch))
+		if _, kept := e.batch.claims[k]; !kept {
+			e.batch.claims[k] = claimed{tool: info.Tool, facts: f}
+		}
+		e.mu.Unlock()
+	}
+	return f, nil
+}
+
+// claimKey names a claim within a batch: the call's position and the
+// arguments it was asked about, a hook's rewrite being asked apart.
+type claimKey struct {
+	at   int
+	args string
+}
+
+// claimed is a claim kept for a batch, with the tool that made it.
+type claimed struct {
+	tool  agenttool.Tool
+	facts agenttool.Facts
 }
 
 // constrain adds the constraint sources' subjects to a call's, each a
