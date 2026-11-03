@@ -17,6 +17,16 @@ versions may break the API.
   names a decider the session format does not know is no answer, as
   agentturn v0.0.35's `Ask` refuses it: the call is deferred to the
   run's end. RFC 0001 draft 0.3, Asking in the run.
+- Fixed: a hook given to `WithHooks` runs once per call of a batch
+  (#87). The engine reads a call's siblings, hooks included, to decide
+  the hold, and decided each again when the loop handed it, so in a
+  batch the policy allows every call but the first ran its hooks twice,
+  2N-1 times for N calls. The sibling's reading, its verdict and the
+  hooks' note, `Terminate` and rewrite, is now kept for the batch and
+  is the call's decision when the loop hands the same call, arguments
+  and tool under the same rules and scope; a sibling read with no tool,
+  `WithTools` naming none, is decided again. `WithAskInRun` reads the
+  batch from the same readings. RFC 0001 draft 0.3, Hooks.
 - Added: a server glob, `mcp__S__*`, builds in the allow list and
   allows every tool of the one MCP server `S`, including one the server
   adds later (#85). `Rule.ServerGlob` reports the shape. Every other

@@ -535,6 +535,16 @@ is called for a sibling before the loop hands it that sibling's own
 call. A hook MUST decide a call the same way however often it is
 asked, and a hook that fails for a sibling reads as asking.
 
+A binding SHOULD call each of the host's hooks at most once per call of
+a batch, since a hook that is a process or a service is a cost, and how
+often it is called is observable. When the engine has read a call as a
+sibling, policy and hooks, and the loop then hands it that call with
+the same ID, arguments and tool, in the same batch under the same rules
+and grant scope, the reading is the call's decision: the hold and the
+call then read one answer, even from a hook whose answer changes. A
+sibling read with no tool, or with another tool than the loop hands, is
+decided again. A reading that failed is not kept, as for the hold.
+
 ### The batch hold
 
 An ask holds its batch, so nothing the model asked for in the same turn
@@ -1276,6 +1286,10 @@ listed in the changelog as one.
   agentsession RFC 0001 does not know is no answer, following agenttool
   RFC 0001 draft 0.9 and agentturn RFC 0001 draft 0.4 ([Asking in the
   run](#asking-in-the-run)). Draft 0.2 named `human` for every answer.
+- A hook is called at most once per call of a batch: a sibling's
+  reading is the call's decision when the loop hands the same call with
+  the same tool ([Hooks](#hooks), #87). Draft 0.2 let the engine call a
+  hook twice for every call of a batch the policy allows but the first.
 - A server glob, `mcp__S__*`, is honoured in the allow list (#85).
   Draft 0.2 refused every tool-name glob there and said the reference
   agent did too, which was wrong: Claude Code allows `mcp__<server>` and

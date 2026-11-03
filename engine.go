@@ -1,11 +1,13 @@
 package agentpolicy
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"maps"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -233,7 +235,11 @@ func WithToolsFor(lookup func(ctx context.Context, name string) (agenttool.Tool,
 // batch position and the tool [WithTools] names. A hook must therefore
 // decide a call the same way however often it is asked, and one that
 // fails for a sibling reads as asking, so the call is held, and is
-// asked again for that sibling by the next call of the batch. Each
+// asked again for that sibling by the next call of the batch. A
+// sibling's reading is kept for the batch, and is the call's own
+// decision when the loop hands the same call with the same tool, so
+// each hook runs once per call of a batch; a sibling read with no tool,
+// [WithTools] naming none, or another tool, is decided again. Each
 // WithHooks adds its hooks after those already given; a nil hook adds
 // nothing.
 func WithHooks(fns ...func(context.Context, agentturn.ToolCallInfo) (*agentturn.ToolDecision, error)) Option {
@@ -679,16 +685,30 @@ func (e *Engine) Decide(ctx context.Context, info agentturn.ToolCallInfo) (*agen
 
 	a := e.active(ctx)
 
-	out, failed, err := e.evaluate(ctx, a, info, &v)
-	if err != nil {
-		return nil, err
+	// A call the engine already read as a sibling, with the tool the
+	// loop now hands it, is decided by that reading: the hooks are not
+	// asked again, and the hold and the call read one answer.
+	out, failed := agentturn.ToolDecision{}, false
+	if r, ok := e.siblingReading(info, a); ok {
+		out = r.out
+		v.Action, v.Rule, v.Reason, v.Subject, v.Confined, v.By = r.verdict.Action, r.verdict.Rule, r.verdict.Reason, r.verdict.Subject, r.verdict.Confined, r.verdict.By
+	} else {
+		var err error
+		out, failed, err = e.evaluate(ctx, a, info, &v)
+		if err != nil {
+			return nil, err
+		}
 	}
 	d := deferredCall{info: info, args: out.Args}
 	if out.Args != nil {
 		// The verdict is about the rewrite, so a reviewer is shown it.
 		d.info.Args = out.Args
 	}
-	held := e.batchAsks(ctx, a, info, v.Action, failed)
+	var mine *reading
+	if !failed {
+		mine = &reading{tool: info.Tool, args: info.Args, own: true, out: out, verdict: v}
+	}
+	held := e.batchAsks(ctx, a, info, v.Action, failed, mine)
 	if e.askInRun && info.Parent == "" {
 		if decided, ok := e.askedInRun(ctx, a, info, &v, out, held); ok {
 			e.observe(ctx, v)
@@ -848,15 +868,71 @@ func (e *Engine) decide(ctx context.Context, a active, name string, c confinemen
 }
 
 // batchCache is whether each call of one batch asks, by its position
-// in the batch, kept for the rest of that batch's decisions. key names
-// the batch, its run and turn, every call's ID, name and arguments,
-// and the rules it was decided under, the grant scope included, so a
-// batch is never read against another's calls, even one whose provider
-// numbers its calls the same way, against a policy that has changed
-// since, or against another scope's grants.
+// in the batch, kept for the rest of that batch's decisions, and the
+// reading each sibling was given, policy and hooks. key names the
+// batch, its run and turn, every call's ID, name and arguments, and the
+// rules it was decided under, the grant scope included, so a batch is
+// never read against another's calls, even one whose provider numbers
+// its calls the same way, against a policy that has changed since, or
+// against another scope's grants.
 type batchCache struct {
-	key  string
-	asks map[int]bool
+	key      string
+	asks     map[int]bool
+	readings map[int]reading
+}
+
+// reading is what the engine made of one call of a batch, policy and
+// hooks folded: the verdict, the decision's note, Terminate and
+// rewritten arguments, and the tool and arguments it was read with.
+// own is set for the reading of the call the loop handed the hook,
+// with its own tool; it is unset for a sibling's. A reading that
+// failed is never kept.
+type reading struct {
+	tool    agenttool.Tool
+	args    json.RawMessage
+	own     bool
+	out     agentturn.ToolDecision
+	verdict Verdict
+}
+
+// siblingReading returns the reading the engine made of info's call as
+// a sibling, when it is the call's decision: the same batch under the
+// same rules and grant scope, which the batch key holds, and the same
+// arguments and tool. A sibling read with no tool, or another tool
+// than the loop hands, is decided again, as is a nested call, which
+// has no batch of siblings to have been read in.
+func (e *Engine) siblingReading(info agentturn.ToolCallInfo, a active) (reading, bool) {
+	if len(info.Batch) < 2 || info.Call == nil || info.Parent != "" {
+		return reading{}, false
+	}
+	self := position(info)
+	if self < 0 {
+		return reading{}, false
+	}
+	key := batchKey(info, a.gen, a.scope)
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.batch.key != key {
+		return reading{}, false
+	}
+	r, ok := e.batch.readings[self]
+	if !ok || r.own || !sameTool(r.tool, info.Tool) || !bytes.Equal(r.args, info.Args) {
+		return reading{}, false
+	}
+	return r, true
+}
+
+// sameTool reports whether two tools are one, by identity; no tool is
+// never the same as any.
+func sameTool(a, b agenttool.Tool) bool {
+	if a == nil || b == nil {
+		return false
+	}
+	ta := reflect.TypeOf(a)
+	if ta != reflect.TypeOf(b) || !ta.Comparable() {
+		return false
+	}
+	return a == b
 }
 
 // batchAsks reports whether a call the policy allowed is held: whether
@@ -882,18 +958,23 @@ type batchCache struct {
 // (failed), is kept as asking: read first as a sibling it held the
 // calls before it, so it holds the calls after it too, and whether the
 // batch holds does not depend on the order of its calls.
-func (e *Engine) batchAsks(ctx context.Context, a active, info agentturn.ToolCallInfo, own agentturn.ToolAction, failed bool) bool {
+//
+// The readings are kept too, mine for the call's own when it did not
+// fail, so the loop's own decision of a sibling read here is that
+// reading ([Engine.siblingReading]) and the hooks run once per call.
+func (e *Engine) batchAsks(ctx context.Context, a active, info agentturn.ToolCallInfo, own agentturn.ToolAction, failed bool, mine *reading) bool {
 	if len(info.Batch) < 2 || info.Call == nil {
 		return false
 	}
 	self := position(info)
 	key := batchKey(info, a.gen, a.scope)
 	e.mu.Lock()
-	if e.batch.key != key {
-		e.batch = batchCache{key: key, asks: make(map[int]bool, len(info.Batch))}
-	}
+	e.batchFor(key, len(info.Batch))
 	if self >= 0 {
 		e.batch.asks[self] = e.batch.asks[self] || own == agentturn.Defer || failed
+		if _, read := e.batch.readings[self]; mine != nil && !read && info.Parent == "" {
+			e.batch.readings[self] = *mine
+		}
 	}
 	if own != agentturn.Allow {
 		e.mu.Unlock()
@@ -909,9 +990,10 @@ func (e *Engine) batchAsks(ctx context.Context, a active, info agentturn.ToolCal
 		}
 		ask, ok := known[i]
 		if !ok {
-			var keep bool
-			ask, keep = e.siblingAsks(ctx, a, info, i)
-			if keep {
+			// A sibling that could not be read asks, and is not kept.
+			r, read := e.readSibling(ctx, a, info, key, i)
+			ask = !read || r.verdict.Action == agentturn.Defer
+			if read {
 				decided[i] = ask
 			}
 		}
@@ -929,22 +1011,45 @@ func (e *Engine) batchAsks(ctx context.Context, a active, info agentturn.ToolCal
 	return asks
 }
 
-// siblingAsks reports whether the call at position i of info's batch
-// asks, decided as Decide would decide it, the hooks included, with the
-// tool [WithTools] names. A sibling that could not be read, a hook
-// having failed or its subjects not evaluated, reads as asking, and
-// keep is false so the reading is not kept for the batch. A sibling a
-// rule blocks does not ask, and is kept.
-func (e *Engine) siblingAsks(ctx context.Context, a active, info agentturn.ToolCallInfo, i int) (ask, keep bool) {
-	c := info.Batch[i]
-	args := callArgs(c)
-	sib := agentturn.ToolCallInfo{RunID: info.RunID, Turn: info.Turn, Call: c, Tool: e.sibling(ctx, c.Name), Args: args, Batch: info.Batch, Index: i}
-	v := Verdict{}
-	_, failed, err := e.evaluate(ctx, a, sib, &v)
-	if err != nil || failed {
-		return true, false
+// batchFor makes the batch cache key's, dropping another batch's. The
+// caller holds e.mu.
+func (e *Engine) batchFor(key string, n int) {
+	if e.batch.key != key {
+		e.batch = batchCache{key: key, asks: make(map[int]bool, n), readings: make(map[int]reading, n)}
 	}
-	return v.Action == agentturn.Defer, true
+}
+
+// readSibling returns the reading of the call at position i of info's
+// batch, key naming the batch: the one kept for it, its own decision's
+// or an earlier sibling reading's, or else one made now as Decide would
+// decide it, the hooks included, with the tool [WithTools] names, and
+// kept. ok is false for a sibling that could not be read, a hook having
+// failed or its subjects not evaluated, which is not kept, since the
+// failure may pass. A sibling a rule blocks is read, and kept.
+func (e *Engine) readSibling(ctx context.Context, a active, info agentturn.ToolCallInfo, key string, i int) (r reading, ok bool) {
+	e.mu.Lock()
+	if e.batch.key == key {
+		if r, ok := e.batch.readings[i]; ok {
+			e.mu.Unlock()
+			return r, true
+		}
+	}
+	e.mu.Unlock()
+	c := info.Batch[i]
+	sib := agentturn.ToolCallInfo{RunID: info.RunID, Turn: info.Turn, Call: c, Tool: e.sibling(ctx, c.Name), Args: callArgs(c), Batch: info.Batch, Index: i}
+	v := Verdict{RunID: info.RunID, Turn: info.Turn, CallID: c.CallID, Tool: c.Name, By: ByPolicy}
+	out, failed, err := e.evaluate(ctx, a, sib, &v)
+	if err != nil || failed {
+		return reading{}, false
+	}
+	r = reading{tool: sib.Tool, args: sib.Args, out: out, verdict: v}
+	e.mu.Lock()
+	e.batchFor(key, len(info.Batch))
+	if _, kept := e.batch.readings[i]; !kept {
+		e.batch.readings[i] = r
+	}
+	e.mu.Unlock()
+	return r, true
 }
 
 // position returns the index of info's own call in its batch: Index

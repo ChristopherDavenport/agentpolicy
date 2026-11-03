@@ -5,10 +5,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"reflect"
 	"strings"
 	"testing"
 
+	"github.com/ChristopherDavenport/agenttool"
 	"github.com/ChristopherDavenport/agentturn"
 	"github.com/ChristopherDavenport/openresponses"
 )
@@ -933,5 +935,55 @@ func TestReleaseFromTheDecision(t *testing.T) {
 	}), end)
 	if err != nil || len(answers) != 3 || strings.Join(reviewed, "|") != "call_c: approval required by bash(git push:*)" {
 		t.Errorf("answers = %s, %v, reviewed %v", dump(answers), err, reviewed)
+	}
+}
+
+// A hook runs once per call of a batch: the reading the engine made of
+// a call as a sibling is that call's decision when the loop hands it
+// with the same tool, so a hook that is a process or a service is not
+// asked twice, and its answer cannot change between the hold and the
+// call. A sibling read with no tool is decided again with its own.
+func TestHooksRunOncePerCallOfABatch(t *testing.T) {
+	ctx := context.Background()
+	read := agenttool.New("read", "Reads a file", func(context.Context, agenttool.NoArgs) (string, error) { return "", nil })
+	tests := []struct {
+		name   string
+		def    Default
+		lookup func(string) (agenttool.Tool, bool)
+		want   map[string]int
+	}{
+		{"allow default", Allow(), func(string) (agenttool.Tool, bool) { return read, true }, map[string]int{"c0": 1, "c1": 1, "c2": 1, "c3": 1}},
+		{"ask default", Ask(), func(string) (agenttool.Tool, bool) { return read, true }, map[string]int{"c0": 1, "c1": 1, "c2": 1, "c3": 1}},
+		{"no tool for the sibling", Allow(), nil, map[string]int{"c0": 1, "c1": 2, "c2": 2, "c3": 2}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			calls := map[string]int{}
+			count := func(_ context.Context, info agentturn.ToolCallInfo) (*agentturn.ToolDecision, error) {
+				calls[info.Call.CallID]++
+				return &agentturn.ToolDecision{Action: agentturn.Allow, Note: "counted"}, nil
+			}
+			e, err := Build(Policy{Default: tt.def}, testMatchers, WithHooks(count), WithTools(tt.lookup))
+			if err != nil {
+				t.Fatal(err)
+			}
+			batch := make([]*openresponses.FunctionCall, 4)
+			for i := range batch {
+				batch[i] = &openresponses.FunctionCall{CallID: fmt.Sprintf("c%d", i), Name: "read", Arguments: fmt.Sprintf(`{"path":"/f%d"}`, i)}
+			}
+			for i, c := range batch {
+				info := agentturn.ToolCallInfo{RunID: "run_1", Turn: 1, Call: c, Tool: read, Args: json.RawMessage(c.Arguments), Batch: batch, Index: i}
+				d, err := e.Decide(ctx, info)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if d.Note != "counted" {
+					t.Errorf("%s: the note %q was lost", c.CallID, d.Note)
+				}
+			}
+			if !maps.Equal(calls, tt.want) {
+				t.Errorf("hook calls per call = %v, want %v", calls, tt.want)
+			}
+		})
 	}
 }

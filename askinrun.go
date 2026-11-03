@@ -244,13 +244,12 @@ func (e *Engine) askBatchFor(ctx context.Context, a active, info agentturn.ToolC
 			continue
 		}
 		sib := agentturn.ToolCallInfo{RunID: info.RunID, Turn: info.Turn, Call: c, Tool: e.sibling(ctx, c.Name), Args: callArgs(c), Batch: info.Batch, Index: i}
-		var v Verdict
-		out, failed, err := e.evaluate(ctx, a, sib, &v)
+		r, read := e.readSibling(ctx, a, info, batchKey(info, a.gen, a.scope), i)
 		switch {
-		case err != nil || failed:
+		case !read:
 			asks[i] = true
-		case v.Action == agentturn.Defer:
-			asks[i], answers[i] = true, askCall(ctx, sib, v, out)
+		case r.verdict.Action == agentturn.Defer:
+			asks[i], answers[i] = true, askCall(ctx, sib, r.verdict, r.out)
 		}
 	}
 
