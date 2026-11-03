@@ -434,7 +434,7 @@ func (c Chain) BeforeModelCall() func(context.Context, *openresponses.Request) e
 		if c.Scope == FirstTurn && !firstTurn(ctx) {
 			return nil
 		}
-		runID := agentturn.RunIDFromContext(ctx)
+		runID, turn := agentturn.RunIDFromContext(ctx), agentturn.TurnFromContext(ctx)
 		// The items the loop built the request from, the only ones a
 		// guard may quarantine.
 		built := slices.Clone(req.Input)
@@ -442,7 +442,7 @@ func (c Chain) BeforeModelCall() func(context.Context, *openresponses.Request) e
 		return c.checks(ctx, subject, func(g Guard, a checked, beside bool) (bool, error) {
 			v, err := a.v, a.err
 			if err != nil {
-				return true, c.fail(ctx, agentpolicy.Verdict{RunID: runID, Guard: g.Name()}, err)
+				return true, c.fail(ctx, agentpolicy.Verdict{RunID: runID, Turn: turn, Guard: g.Name()}, err)
 			}
 			held := v.Action == agentturn.Allow && len(v.Quarantine) > 0
 			if beside && changes(v) && !held {
@@ -454,11 +454,11 @@ func (c Chain) BeforeModelCall() func(context.Context, *openresponses.Request) e
 					// fails the run: the items it named reach the model
 					// otherwise.
 					reason := "quarantine refused: " + err.Error()
-					c.observe(ctx, agentpolicy.Verdict{RunID: runID, Guard: g.Name(), Action: agentturn.Block, Reason: reason, Quarantined: slices.Clone(v.Quarantine)})
+					c.observe(ctx, agentpolicy.Verdict{RunID: runID, Turn: turn, Guard: g.Name(), Action: agentturn.Block, Reason: reason, Quarantined: slices.Clone(v.Quarantine)})
 					return true, fmt.Errorf("agentpolicy/guard: %s: %s", g.Name(), reason)
 				}
 			}
-			verdict := agentpolicy.Verdict{RunID: runID, Guard: g.Name(), Action: v.Action, Reason: v.Reason}
+			verdict := agentpolicy.Verdict{RunID: runID, Turn: turn, Guard: g.Name(), Action: v.Action, Reason: v.Reason}
 			if held {
 				verdict.Quarantined = slices.Clone(v.Quarantine)
 			}

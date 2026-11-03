@@ -1183,7 +1183,7 @@ A verdict is what was decided and why:
 
 | member | meaning |
 | --- | --- |
-| run, turn | the run and the turn it was decided in; empty for a grant, and the turn empty for an input guard's |
+| run, turn | the run and the turn it was decided in, an input guard's the turn whose model call it checked, as agentturn RFC 0001 numbers turns; empty for a grant |
 | call ID, tool | the call decided; a grant names the rule's tool; empty for content |
 | guard | the guard that decided content; empty otherwise |
 | action | allow, block or defer |
@@ -1490,6 +1490,8 @@ listed in the changelog as one.
   answer judges as a final message (#78). The output subject carries
   the turn's tool results. Draft 0.2 called final only a turn with no
   calls, so a terminating tool's answer reached the caller unjudged.
+- An input guard's verdict names its turn, where draft 0.2 left it
+  empty: agentturn RFC 0001 draft 0.4 carries the turn to every hook.
 - A chain MAY check an input only on a run's first turn, and MAY check
   guards that do not rewrite at the same time, giving the outcome and
   the verdicts of checking in order (#88). Conformance says so.

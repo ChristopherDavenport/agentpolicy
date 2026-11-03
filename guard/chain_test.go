@@ -181,3 +181,26 @@ func TestChainParallel(t *testing.T) {
 		}
 	})
 }
+
+// An input guard's verdict names the turn whose model call it checked,
+// as the loop puts it on the hook's context, its block and its failure
+// included.
+func TestAnInputVerdictNamesItsTurn(t *testing.T) {
+	ctx := agentturn.ContextWithTurn(agentturn.ContextWithRunID(context.Background(), "run_1"), 3)
+	j := &journal{}
+	err := Chain{Guards: []Guard{fixed("a", allow, nil), fixed("b", block("bad"), nil)}, Observer: j.observe}.BeforeModelCall()(ctx, &openresponses.Request{})
+	if !errors.Is(err, agentturn.ErrGuard) {
+		t.Fatalf("err = %v", err)
+	}
+	failing := fixed("c", allow, fmt.Errorf("%w: spent", agentturn.ErrGuard))
+	_ = Chain{Guards: []Guard{failing}, Observer: j.observe}.BeforeModelCall()(ctx, &openresponses.Request{})
+	vs := j.all()
+	if len(vs) != 3 {
+		t.Fatalf("verdicts = %+v", vs)
+	}
+	for _, v := range vs {
+		if v.RunID != "run_1" || v.Turn != 3 {
+			t.Errorf("verdict = %+v, want run_1 turn 3", v)
+		}
+	}
+}

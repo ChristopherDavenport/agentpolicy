@@ -37,6 +37,9 @@ versions may break the API.
   deny, an ordinary hook's ask or a hold: a call it allows is still
   held when its batch asks. It does what a product's run end, resume
   and "approved by policy" record did, and records what was decided.
+- Changed: an input guard's verdict names the turn whose model call
+  it checked, read from agentturn v0.0.35's `TurnFromContext`, where
+  `Verdict.Turn` was 0.
 - Added: an input guard can quarantine items (#90).
   `guard.Verdict.Quarantine` names items of the input, as the guard was
   handed them; `Chain.BeforeModelCall` quarantines them with agentturn
