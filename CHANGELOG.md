@@ -5,6 +5,19 @@ All user-visible changes to this library. The format follows
 uses [Semantic Versioning](https://semver.org/); before v1.0.0 minor
 versions may break the API.
 
+## Unreleased
+
+- Dependencies: agentturn v0.0.24 to v0.0.35, agenttool v0.0.22 to
+  v0.0.28 and openresponses v0.0.14 to v0.0.18. No API of this module
+  changes with them.
+- Changed: under `WithAskInRun`, an answer given in the run is decided
+  by the decider it names, `agenttool.Answer.By`, and by `human` when
+  it names none, where every answer was `human`'s. A reviewer front
+  that answers as a model (`agent`) is recorded as one. An answer that
+  names a decider the session format does not know is no answer, as
+  agentturn v0.0.35's `Ask` refuses it: the call is deferred to the
+  run's end. RFC 0001 draft 0.3, Asking in the run.
+
 ## v0.0.17 - 2026-10-11
 
 - Fixed: whether a batch with a call that cannot be evaluated holds no

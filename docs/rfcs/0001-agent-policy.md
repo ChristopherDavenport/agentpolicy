@@ -1,6 +1,6 @@
 # RFC 0001: Agent Policy
 
-Status: draft 0.2
+Status: draft 0.3
 Author: Christopher Davenport
 Discussion: to be opened against this repository. The Go module at its
 root is the reference binding. agentturn RFC 0001 is the loop whose
@@ -784,9 +784,11 @@ the rules of the moment, so a grant made meanwhile does not ask again.
 It decides the calls by the rule a release follows, one rule in both
 modes:
 
-- a call that was asked about is decided as the person answered, with
-  `human` as the decider, whatever its own decision then reads, unless
-  the policy denies it, which no answer overrides;
+- a call that was asked about is decided as the answer says, with the
+  decider the answer names, `human` when it names none, whatever its
+  own decision then reads, unless the policy denies it, which no answer
+  overrides. An answer naming a decider agentsession RFC 0001 does not
+  know is no answer;
 - a plain decline refuses its own call alone;
 - a call the policy allowed and the batch held is released once every
   asked call of its batch is answered, and refused with `not released:
@@ -797,7 +799,7 @@ In the run, only a hook's terminate hint on the asked call stops the
 batch. A person's answer in the run is accept, decline or cancel, with
 no stop, so a person's decline in the run is always plain. A decision
 made in the run carries the subject and the held mark its deferral
-would have, and the verdict of a person's answer names no rule.
+would have, and the verdict of an answer names no rule.
 
 Nothing is remembered for a call decided this way. A question nobody
 answers, or a call of the batch that could not be read, leaves the
@@ -1096,7 +1098,7 @@ The root module of this repository is the reference binding.
 | grants | `Engine.Grant`, `Engine.GrantOver`; `Engine.GrantSet` → granted and `[]Refusal{Rule, Reason}`, `Engine.Revoke`, `Engine.Grants`; the scope: `ContextWithGrantScope(ctx, scope)`, `GrantScopeFromContext(ctx)`, `Engine.GrantsFor(ctx)`, `Engine.RevokeScope(ctx)` |
 | deferred calls | `Engine.Deferred`, `Engine.Runs`, `Engine.Forget` |
 | release | `Engine.Release(ctx, end, answers…)`; `ErrUnanswered`; `Engine.Resumed(ctx, end, answers, next)` with the end the resume returned; `Engine.ForgetAnswers(runID)` |
-| asking in the run | `WithAskInRun()`, through the elicitor on the hook's context (`agentturn.Ask`) |
+| asking in the run | `WithAskInRun()`, through the elicitor on the hook's context (`agentturn.Ask`); the decider is `agenttool.Answer.By` |
 | reviewer | `Reviewer`, `ReviewerFunc`, `Review{Outcome, Reason, Args, Note, By}`, `Outcome` (`Refused`, `Approved`, `TimedOut`); `Engine.Answers(ctx, r, end)`, whose refusals carry the verdict's reason as `agentturn.Answer.Reason`; a call that may have run is `agentturn.PendingCall.MayHaveRun` |
 | cut-off calls | `WithNeverStarted(fn)`; the tool from the pending call or `WithTools`; the output a call has where it ran from `agentturn.PendingCall.Ran` and `RanWhere`; `agentturn.PendingUndispatched` is approved for the resume, `agentturn.PendingRejected` answered as refused, in `PendingCall.Refused`'s words when it has them |
 | nested calls | `agentturn.ToolCallInfo.Parent` non-empty: decided and reported, no deferral remembered |
@@ -1241,6 +1243,14 @@ when a rule is added or changed, a reason text included, since the
 model reads it; a rule's removal, or a change that makes a conforming
 engine non-conforming, is a breaking change to the module and is
 listed in the changelog as one.
+
+## Changes since 0.2
+
+- An answer given in the run is decided by the decider it names,
+  `human` when it names none, and an answer naming a decider
+  agentsession RFC 0001 does not know is no answer, following agenttool
+  RFC 0001 draft 0.9 and agentturn RFC 0001 draft 0.4 ([Asking in the
+  run](#asking-in-the-run)). Draft 0.2 named `human` for every answer.
 
 ## Prior art
 

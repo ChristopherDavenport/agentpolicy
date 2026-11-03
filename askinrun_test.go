@@ -246,3 +246,41 @@ func TestAskInRunDecisionsSayWhatTheyAreAbout(t *testing.T) {
 		}
 	}
 }
+
+// An answer in the run is decided by whoever it names: a reviewer that
+// is a model answers as the agent, one that names nobody as the person,
+// and an answer naming a decider the session format does not know is
+// no answer, so the call waits for the run's end.
+func TestAskInRunTheAnswerNamesItsDecider(t *testing.T) {
+	tests := []struct {
+		name   string
+		by     string
+		action agentturn.ToolAction
+		want   string
+	}{
+		{"agent", ByAgent, agentturn.Allow, ByAgent},
+		{"nobody", "", agentturn.Allow, ByHuman},
+		{"unknown", "robot", agentturn.Defer, ByPolicy},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var verdicts []Verdict
+			e, err := Build(Policy{Ask: rules(t, "bash(git push:*)"), Default: Deny()}, testMatchers, WithAskInRun(),
+				WithObserver(func(_ context.Context, v Verdict) { verdicts = append(verdicts, v) }))
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx, asked := askingCtx(agenttool.Answer{Action: agenttool.ActionAccept, By: tt.by})
+			d, err := e.Decide(ctx, batch("run_1", "git push")[0])
+			if err != nil {
+				t.Fatal(err)
+			}
+			if *asked != 1 || d.Action != tt.action || d.By != tt.want {
+				t.Errorf("asked %d; decision %s by %q, want %s by %q", *asked, actionName(d.Action), d.By, actionName(tt.action), tt.want)
+			}
+			if len(verdicts) != 1 || verdicts[0].By != tt.want {
+				t.Errorf("verdicts = %+v, want one by %q", verdicts, tt.want)
+			}
+		})
+	}
+}
