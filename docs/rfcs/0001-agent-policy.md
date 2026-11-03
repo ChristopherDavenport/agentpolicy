@@ -1099,9 +1099,13 @@ guards after it see the input without them, as the request will carry
 it. Only items the loop built the request from can be quarantined,
 named by identity as the guard was handed them: a verdict naming an
 item an earlier guard's rewrite made fails the check closed, and so
-does one that both quarantines and rewrites, or a quarantine the loop
-cannot keep. A guard that quarantines is a guard that rewrites, for a
-chain that checks guards at the same time.
+does one that both quarantines and rewrites, one from a guard checked
+beside others, or a quarantine the loop cannot keep. A refused
+quarantine is reported as that guard's block, naming the items, with
+the reason `quarantine refused: C`, `C` the cause, and fails the run,
+since the items would otherwise reach the model. A guard that
+quarantines is a guard that rewrites, for a chain that checks guards
+at the same time.
 
 A **chain** runs guards in order, each seeing the subject as the one
 before left it, and reports every guard's verdict exactly once per
@@ -1188,7 +1192,7 @@ A verdict is what was decided and why:
 | held | set on a hold, and on the release or refusal that answers it |
 | subject | the text of the subject whose verdict the fold kept, or of the part a hook decided on; empty for a call no splitter split and no hook named a part of |
 | confined | what confines the call, whatever the action; empty when unconfined or unnamed |
-| quarantined | the items an input guard quarantined, on its allow; empty otherwise |
+| quarantined | the items an input guard quarantined, on its allow, or named in a refused quarantine, on its block; empty otherwise |
 
 Every verdict reaches every observer the host registered, exactly
 once, in the order they were registered, and outside any lock the
@@ -1216,7 +1220,7 @@ with `ns` set to `agentpolicy:verdict` and `data` a JSON object:
 | `source_hash` | the rule's source's hash, the digest of the settings file or the skill frontmatter the rule was read from, so a reader says which version of the source a decision or a grant was built from and not only its name |
 | `note` | the rule's note, whatever its source |
 | `reason`, `by`, `held`, `subject`, `confined` | as the verdict names them |
-| `quarantined` | an array of the items an input guard quarantined, each in its Open Responses JSON encoding |
+| `quarantined` | an array naming each quarantined item by reference, `{"type", "id"?, "call_id"?}`, from its Open Responses form; never its content, so its text is redacted with the entry that holds it and is not copied into this one |
 
 Every member but `action` is omitted when the verdict leaves it empty,
 zero or false. A reader MUST ignore members it does not know.
@@ -1348,7 +1352,10 @@ decides and offers as the case says.
 the one before left, or, checking guards that do not rewrite at the
 same time, gives the outcome and reports the verdicts that order gives;
 checks an input only on a run's first turn when it is so scoped;
-judges a terminating tool's answer as a final message; never defers
+judges a terminating tool's answer as a final message; quarantines
+the items an input guard names, only those the loop built the request
+from, before the request is sent, with the guards after seeing the
+input without them, and refuses any other quarantine closed; never defers
 content; stops the run as a guard
 stop on a blocked input or output and withholds a blocked message; and
 reports every guard's verdict exactly once.
@@ -1488,8 +1495,9 @@ listed in the changelog as one.
 - An input guard MAY quarantine items of the input (#90): an allow,
   not a rewrite, kept under agentturn RFC 0001's quarantine before the
   request is sent, with the guards after it seeing the input without
-  them; only items the loop built the request from; the verdict and
-  its record gain `quarantined`.
+  them; only items the loop built the request from, and a refused
+  quarantine is the guard's block; the verdict gains `quarantined`, and
+  its record names the items by reference.
 
 ## Prior art
 

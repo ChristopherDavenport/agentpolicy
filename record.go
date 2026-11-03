@@ -32,9 +32,9 @@ type verdictRecord struct {
 	Held       bool   `json:"held,omitempty"`
 	Subject    string `json:"subject,omitempty"`
 	Confined   string `json:"confined,omitempty"`
-	// Quarantined is the items an input guard quarantined, as their
-	// JSON encoding.
-	Quarantined openresponses.Items `json:"quarantined,omitempty"`
+	// Quarantined names the items an input guard quarantined, each by
+	// reference: its type, id and call ID, never its content.
+	Quarantined []itemRef `json:"quarantined,omitempty"`
 }
 
 // Record returns the namespace and the bytes of the custom entry a
@@ -56,12 +56,12 @@ type verdictRecord struct {
 // so a review of the session can say which version of a skill or a
 // settings file a grant or a decision was built from, and note saying
 // why it exists; then reason, by, held, subject and confined; and
-// quarantined, the items an input guard quarantined, each as its JSON
-// encoding. A member the verdict leaves empty is left out, except
-// action. Encoding an item the openresponses package wrote cannot fail;
-// one that does is recorded as an object naming the error, so the
-// entry still says something went wrong, and a caller that wants an
-// error of its own marshals the value itself.
+// quarantined, a reference to each item an input guard quarantined,
+// {type, id, call_id}, with no content, so the item's text is redacted
+// with the entry that holds it and not copied here. A member the
+// verdict leaves empty is left out, except action. A record is strings,
+// numbers and flags, so encoding it cannot fail; a caller that wants
+// an error of its own marshals the value itself.
 func (v Verdict) Record() (ns string, data []byte) {
 	rec := verdictRecord{
 		RunID:    v.RunID,
@@ -76,20 +76,43 @@ func (v Verdict) Record() (ns string, data []byte) {
 		Subject:  v.Subject,
 		Confined: v.Confined,
 	}
-	if len(v.Quarantined) > 0 {
-		rec.Quarantined = v.Quarantined
+	for _, item := range v.Quarantined {
+		rec.Quarantined = append(rec.Quarantined, refOf(item))
 	}
 	if v.Rule != nil {
 		rec.Rule, rec.Source, rec.SourceHash, rec.Note = v.Rule.String(), v.Rule.Source.Name, v.Rule.Source.Hash, v.Rule.Note
 	}
 	data, err := json.Marshal(rec)
 	if err != nil {
-		// Only a quarantined item can fail to encode. Recording
-		// something a reader can see went wrong beats recording
-		// nothing.
+		// Unreachable: every member is a string, an int or a bool.
+		// Recording something a reader can see went wrong beats
+		// recording nothing.
 		data = fmt.Appendf(nil, "{%q:%q}", "error", err.Error())
 	}
 	return VerdictNS, data
+}
+
+// itemRef names an item without its content, so a quarantined item's
+// text, an injected instruction or a secret, is not copied out of the
+// entry that holds it, past the redaction a record applies to that
+// entry: the type, and the id and call ID when the item has them.
+type itemRef struct {
+	Type   string `json:"type"`
+	ID     string `json:"id,omitempty"`
+	CallID string `json:"call_id,omitempty"`
+}
+
+// refOf is the reference to item, read from its wire form.
+func refOf(item openresponses.Item) itemRef {
+	ref := itemRef{}
+	if item == nil {
+		return ref
+	}
+	ref.Type = item.ItemType()
+	if data, err := json.Marshal(item); err == nil {
+		_ = json.Unmarshal(data, &ref)
+	}
+	return ref
 }
 
 // actionWord names an action as a session holds it.

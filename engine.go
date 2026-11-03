@@ -88,7 +88,9 @@ type Verdict struct {
 	// is and names nothing.
 	Confined string
 	// Quarantined is the items an input guard quarantined
-	// (guard.Verdict.Quarantine), on its allow; nil otherwise.
+	// (guard.Verdict.Quarantine), on its allow, or named in a quarantine
+	// that was refused, on the block that reports it; nil otherwise.
+	// The record names each by reference, never by its content.
 	Quarantined openresponses.Items
 }
 

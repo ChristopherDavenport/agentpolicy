@@ -46,9 +46,12 @@ versions may break the API.
   see the input so. It is an allow: the transcript and the record keep
   the items. Naming an item the loop did not build the request from,
   such as one an earlier guard's rewrite made, quarantining and
-  rewriting at once, or quarantining outside a run, fails the check.
-  `agentpolicy.Verdict` gains `Quarantined`, and the record a
-  `quarantined` member, the items' JSON.
+  rewriting at once, quarantining beside other guards, or quarantining
+  outside a run, fails the run, and is reported as the guard's block
+  with the reason `quarantine refused: <cause>`. `agentpolicy.Verdict`
+  gains `Quarantined`, and the record a `quarantined` member naming
+  each item by reference, `{type, id, call_id}`, never its content, so
+  a quarantined text is redacted with the entry that holds it.
 - Added: `guard.Chain.Scope` and `guard.Chain.Parallel` (#88). Under
   `Scope: guard.FirstTurn`, `BeforeModelCall` checks the input of a
   run's first model call alone, the turn read from agentturn v0.0.35's

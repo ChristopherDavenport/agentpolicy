@@ -334,20 +334,22 @@ func changes(v Verdict) bool {
 
 // quarantine quarantines the items v names, as [Verdict.Quarantine]
 // says, when each is one of built, the items the loop built the
-// request from.
-func quarantine(ctx context.Context, g Guard, v Verdict, built openresponses.Items) error {
+// request from, and v rewrites nothing; beside says the guard was
+// checked beside others, where it may not. The error is the refusal's
+// cause.
+func quarantine(ctx context.Context, v Verdict, built openresponses.Items, beside bool) error {
+	if beside {
+		return errors.New("a guard checked beside others quarantined")
+	}
 	if v.Items != nil || v.Instructions != nil {
-		return fmt.Errorf("agentpolicy/guard: %s: a quarantine is not a rewrite", g.Name())
+		return errors.New("a quarantine is not a rewrite")
 	}
 	for _, item := range v.Quarantine {
 		if !slices.ContainsFunc(built, func(b openresponses.Item) bool { return sameItem(b, item) }) {
-			return fmt.Errorf("agentpolicy/guard: %s: quarantines an item the loop did not build the request from", g.Name())
+			return errors.New("an item the loop did not build the request from")
 		}
 	}
-	if err := agentturn.Quarantine(ctx, v.Quarantine...); err != nil {
-		return fmt.Errorf("agentpolicy/guard: %s: %w", g.Name(), err)
-	}
-	return nil
+	return agentturn.Quarantine(ctx, v.Quarantine...)
 }
 
 // sameItem reports whether two items are one, by identity.
@@ -439,13 +441,18 @@ func (c Chain) BeforeModelCall() func(context.Context, *openresponses.Request) e
 			if err != nil {
 				return true, c.fail(ctx, agentpolicy.Verdict{RunID: runID, Guard: g.Name()}, err)
 			}
-			if beside && changes(v) {
+			held := v.Action == agentturn.Allow && len(v.Quarantine) > 0
+			if beside && changes(v) && !held {
 				return true, together(g)
 			}
-			held := v.Action == agentturn.Allow && len(v.Quarantine) > 0
 			if held {
-				if err := quarantine(ctx, g, v, built); err != nil {
-					return true, err
+				if err := quarantine(ctx, v, built, beside); err != nil {
+					// The refusal is the guard's verdict, a block, and
+					// fails the run: the items it named reach the model
+					// otherwise.
+					reason := "quarantine refused: " + err.Error()
+					c.observe(ctx, agentpolicy.Verdict{RunID: runID, Guard: g.Name(), Action: agentturn.Block, Reason: reason, Quarantined: slices.Clone(v.Quarantine)})
+					return true, fmt.Errorf("agentpolicy/guard: %s: %s", g.Name(), reason)
 				}
 			}
 			verdict := agentpolicy.Verdict{RunID: runID, Guard: g.Name(), Action: v.Action, Reason: v.Reason}

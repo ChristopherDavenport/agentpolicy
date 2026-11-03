@@ -111,15 +111,17 @@ func TestAnInputGuardQuarantines(t *testing.T) {
 	if len(named.Quarantined) != 1 || named.Action != agentturn.Allow || named.Reason != "instruction injected into a tool output" {
 		t.Fatalf("verdicts = %+v", j.all())
 	}
+	// The record names the item, by its type and call ID, and never
+	// copies its text past the record's own redaction of the entry.
 	_, data := named.Record()
 	var rec struct {
-		Quarantined []struct {
-			Type   string `json:"type"`
-			CallID string `json:"call_id"`
-		} `json:"quarantined"`
+		Quarantined []map[string]any `json:"quarantined"`
 	}
-	if err := json.Unmarshal(data, &rec); err != nil || len(rec.Quarantined) != 1 || rec.Quarantined[0].Type != "function_call_output" || rec.Quarantined[0].CallID == "" {
+	if err := json.Unmarshal(data, &rec); err != nil || len(rec.Quarantined) != 1 || rec.Quarantined[0]["type"] != "function_call_output" || rec.Quarantined[0]["call_id"] == "" || len(rec.Quarantined[0]) > 3 {
 		t.Errorf("record = %s, %v", data, err)
+	}
+	if strings.Contains(string(data), "IGNORE") {
+		t.Errorf("the record copies the quarantined text: %s", data)
 	}
 	// The transcript keeps the output as it arrived.
 	kept := false
@@ -162,10 +164,10 @@ func TestAQuarantineFailsClosed(t *testing.T) {
 		guards []Guard
 		want   string
 	}{
-		{"an item a rewrite made", inRun(), []Guard{copying, injection()}, "agentpolicy/guard: injection: quarantines an item the loop did not build the request from"},
-		{"outside a run", context.Background(), []Guard{injection()}, "agentpolicy/guard: injection: agentturn: no run to quarantine items in"},
-		{"a quarantine and a rewrite", inRun(), []Guard{both}, "agentpolicy/guard: both: a quarantine is not a rewrite"},
-		{"beside other guards", inRun(), []Guard{ReadOnly(injection()), ReadOnly(fixed("b", allow, nil))}, "agentpolicy/guard: injection: rewrote a subject it was checked on beside other guards"},
+		{"an item a rewrite made", inRun(), []Guard{copying, injection()}, "quarantine refused: an item the loop did not build the request from"},
+		{"outside a run", context.Background(), []Guard{injection()}, "quarantine refused: agentturn: no run to quarantine items in"},
+		{"a quarantine and a rewrite", inRun(), []Guard{both}, "quarantine refused: a quarantine is not a rewrite"},
+		{"beside other guards", inRun(), []Guard{ReadOnly(injection()), ReadOnly(fixed("b", allow, nil))}, "quarantine refused: a guard checked beside others quarantined"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -173,13 +175,19 @@ func TestAQuarantineFailsClosed(t *testing.T) {
 			c := Chain{Guards: tt.guards, Observer: j.observe, Parallel: true}
 			req := &openresponses.Request{Input: openresponses.Items{openresponses.UserText("hi"), output()}}
 			err := c.BeforeModelCall()(tt.ctx, req)
-			if err == nil || err.Error() != tt.want || errors.Is(err, agentturn.ErrGuard) {
+			guard := tt.guards[len(tt.guards)-1].Name()
+			if tt.name == "beside other guards" {
+				guard = "injection"
+			}
+			if err == nil || err.Error() != "agentpolicy/guard: "+guard+": "+tt.want || errors.Is(err, agentturn.ErrGuard) {
 				t.Errorf("err = %v, want %q", err, tt.want)
 			}
-			for _, v := range j.all() {
-				if len(v.Quarantined) > 0 {
-					t.Errorf("a failed quarantine was reported: %+v", v)
-				}
+			// The refusal is reported, as a block of the guard that named
+			// the items, and fails the run.
+			vs := j.all()
+			last := vs[len(vs)-1]
+			if last.Guard != guard || last.Action != agentturn.Block || last.Reason != tt.want || len(last.Quarantined) == 0 || last.Turn != 0 {
+				t.Errorf("verdicts = %+v", vs)
 			}
 		})
 	}
