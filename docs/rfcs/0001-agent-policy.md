@@ -1080,6 +1080,23 @@ check:
 | output guard | message | a rewrite replaces the message for the guards after and for the transcript | the message is withheld behind a placeholder built from the message as the guards before left it, or, when the chain stops on a block, withheld and the run stops as a guard stop; the guards after are not consulted | fails the run |
 | should stop after turn | output | — | the run stops after the turn as a guard stop, and the guards after are not consulted | fails the run |
 
+A chain MAY check an input only on the first turn of a run, as
+agentturn RFC 0001 numbers turns, and not in a run a handoff started,
+one whose trigger is of kind `handoff`: what the run was started with
+is then checked once, and the turns after it are not checked, nor
+reported.
+
+A chain MAY check guards that do not rewrite at the same time. The
+outcome and the verdicts it reports MUST then be those of checking them
+in order: each verdict is reported in chain order, the first block in
+chain order stands, and the guards after it are not reported. A guard
+still running when an earlier one blocks, or fails, is cancelled. A
+guard that rewrites, or that does not say it never does, is checked in
+sequence, over the subject the guards before it left, and the guards
+after it see what it left. A guard checked beside others that rewrites
+anyway fails the check, since the guards beside it judged the subject
+it changed.
+
 A guard's error that is a guard stop, one that wraps agentturn's guard
 error, is not a failure on any hook: the run stops as a guard stop,
 and the chain reports it as that guard's block, its reason the
@@ -1232,7 +1249,7 @@ The root module of this repository is the reference binding.
 | record | `VerdictNS = "agentpolicy:verdict"`; `Verdict.Record()` → namespace and bytes |
 | presets | `Tools{Read, Edit, Execute}`; `Suggest`, `AutoEdit`, `FullAuto` |
 | guard | `guard.Guard{Name, Check}`, `guard.New`; `guard.Input{Items, Instructions}`, `guard.Message`, `guard.Output{Response, Results, Final}` and `Output.Answer()`; `guard.Verdict{Action, Reason, Items, Instructions}` |
-| chain | `guard.Chain{Guards, Observer, Placeholder, Stop}`; `BeforeModelCall`, `OutputGuard`, `ShouldStopAfterTurn`; `guard.Withheld` |
+| chain | `guard.Chain{Guards, Observer, Placeholder, Stop, Scope, Parallel}`; `BeforeModelCall`, `OutputGuard`, `ShouldStopAfterTurn`; `guard.Withheld`; the scope `guard.EveryCall`, `guard.FirstTurn`, read from `agentturn.TurnFromContext` and `agentturn.TriggerFromContext`; a guard that says whether it rewrites, `guard.Rewriting`, `guard.ReadOnly(g)` |
 | guard stop | `guard.BlockedError{Guard, Subject, Reason}`, which wraps `agentturn.ErrGuard` |
 | reference guards | `guard.Limit`, `guard.Deny`, `guard.Secrets`, `guard.Redact`, `guard.Pattern`, `guard.DefaultSecrets` |
 | model-backed | `classify.New` for a guard, `classify.NewReviewer` for a reviewer |
@@ -1290,7 +1307,11 @@ for every case of `testdata/policy/decisions.json` builds, grants,
 decides and offers as the case says.
 
 **A conforming guard chain** runs its guards in order over the subject
-the one before left; never defers content; stops the run as a guard
+the one before left, or, checking guards that do not rewrite at the
+same time, gives the outcome and reports the verdicts that order gives;
+checks an input only on a run's first turn when it is so scoped;
+judges a terminating tool's answer as a final message; never defers
+content; stops the run as a guard
 stop on a blocked input or output and withholds a blocked message; and
 reports every guard's verdict exactly once.
 
@@ -1396,6 +1417,9 @@ listed in the changelog as one.
   agentturn's chain fold.
 - Answering hooks (#86): a host MAY register hooks whose allow answers
   the policy's own ask, never a deny, an ordinary hook's ask or a hold.
+- A chain MAY check an input only on a run's first turn, and MAY check
+  guards that do not rewrite at the same time, giving the outcome and
+  the verdicts of checking in order (#88). Conformance says so.
 - A turn a terminating tool result ends is final, and the outputs of
   the results that end the run are its answer, which a guard over the
   answer judges as a final message (#78). The output subject carries

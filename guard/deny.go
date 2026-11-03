@@ -10,7 +10,7 @@ import (
 // parts, a function call's arguments, a function call output, a
 // reasoning summary. The reason names the first pattern that matched.
 func Deny(patterns ...*regexp.Regexp) Guard {
-	return New("deny", func(_ context.Context, subject any) (Verdict, error) {
+	return ReadOnly(New("deny", func(_ context.Context, subject any) (Verdict, error) {
 		items, ok := items(subject)
 		if !ok {
 			return allow, nil
@@ -40,5 +40,5 @@ func Deny(patterns ...*regexp.Regexp) Guard {
 			return block(`matched denied pattern "` + matched + `"`), nil
 		}
 		return allow, nil
-	})
+	}))
 }

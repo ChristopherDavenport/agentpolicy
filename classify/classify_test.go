@@ -126,6 +126,15 @@ func TestGuardCheck(t *testing.T) {
 
 func ptr[T any](v T) *T { return &v }
 
+// A classifier never rewrites, so a parallel chain checks it beside
+// another judge (#88).
+func TestGuardSaysItDoesNotRewrite(t *testing.T) {
+	var g guard.Guard = New(&echo.Adapter{}, "m", "rubric")
+	if r, ok := g.(guard.Rewriting); !ok || r.Rewrites() {
+		t.Error("the classifier does not say it reads only")
+	}
+}
+
 func TestRender(t *testing.T) {
 	items := openresponses.Items{
 		openresponses.SystemText("be brief"),

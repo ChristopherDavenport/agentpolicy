@@ -154,6 +154,11 @@ func New(model openresponses.Streamer, modelName, rubric string, opts ...Option)
 // Name returns the guard's name.
 func (g *Guard) Name() string { return g.o.name }
 
+// Rewrites reports false: the guard allows or blocks and never
+// rewrites, so a parallel guard.Chain checks it beside the guards
+// around it that say so too (guard.Rewriting).
+func (g *Guard) Rewrites() bool { return false }
+
 // Check renders the subject as text, an input's instructions and then
 // one line per item, sends it under the rubric and returns Allow or
 // Block with the model's reason. An empty subject passes without a

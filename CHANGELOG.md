@@ -35,6 +35,19 @@ versions may break the API.
   deny, an ordinary hook's ask or a hold: a call it allows is still
   held when its batch asks. It does what a product's run end, resume
   and "approved by policy" record did, and records what was decided.
+- Added: `guard.Chain.Scope` and `guard.Chain.Parallel` (#88). Under
+  `Scope: guard.FirstTurn`, `BeforeModelCall` checks the input of a
+  run's first model call alone, the turn read from agentturn v0.0.35's
+  `TurnFromContext`, and not in a run a `handoff` trigger started, so
+  two judges over a ten-turn run make two judge calls. Under
+  `Parallel`, guards that say they never rewrite (`guard.Rewriting`,
+  `guard.ReadOnly(g)`) are checked at the same time, and the chain
+  reports what checking them in order reports: verdicts in chain
+  order, the first block standing, the guards after it unreported and
+  cancelled. A guard that may rewrite is checked in sequence. `Limit`,
+  `Deny`, `Secrets` and `classify.Guard` say they never rewrite;
+  `Redact` says it does. A product's run-ID memory and one-guard
+  wrapper for these go.
 - Fixed: a guard over the answer judges the answer a terminating tool
   gives (#78). `guard.Output` gains `Results`, the turn's tool results,
   and `Final` is set when a result ends the run (`Terminate`), not only
