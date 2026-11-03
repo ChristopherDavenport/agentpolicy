@@ -289,9 +289,32 @@ A splitter that fails blocks the call, with its error in the reason. A
 splitter that returns no subjects is a failure too, since a call with
 no subjects would be allowed by every rule.
 
+### Constraint sources
+
+A constraint subject is how a host holds one tool's calls to another
+tool's asks and denies; a **constraint source** is how it holds every
+call to them, a tool it wrote no splitter for included, such as one an
+MCP server adds later. A host MAY supply constraint sources: functions
+from a call, under the decision's context, to subjects. The engine
+calls each one for every call it decides or reads as a sibling, after
+the call's own split, with the arguments being decided, a hook's
+rewrite included, and adds what it returns as constraints, whatever a
+subject says of itself. A source that fails blocks the call as a failed
+splitter does, with the reason `N call could not be evaluated: E`. A
+source's subjects can block or defer a call and never allow it. Their
+readings are cached and kept with the batch as a splitter's are.
+
+The state a source reads is the host's, kept under the grant scope of
+the decision's context: "untrusted content is in context" is a subject
+`{"tool": "tainted"}` the host returns once a call whose output is
+untrusted has run, which `ask tainted` then asks about for every tool.
+agenttool RFC 0001's flow property, a tool's labels on what it reads
+and whether it sends, is the per-tool fact a host derives such state
+from, for a tool added later as for one it built.
+
 A splitter is given the context of the decision that asked: a
 decision's, a preview's, or, when the batch hold reads a sibling, that
-of the decision being held. A splitter that asks something remote,
+of the decision being held. So is a constraint source. A splitter that asks something remote,
 such as the executor a tool runs on, is cancelled with the decision
 and keeps its deadline. A splitter that fails because that context is done
 has failed: the call is blocked.
@@ -480,7 +503,8 @@ A call is decided in four steps.
    E`, where `N` is the tool name and `E` the error, `splitter returned
    no subjects` for none. When every subject the splitter returns is a
    constraint, the call itself is put before them as an ordinary
-   subject.
+   subject. The constraint sources' subjects are added after, as
+   constraints, and a source that fails blocks the call the same way.
 2. **Fold the subjects.** Each subject is decided as the previous
    section says, and a constraint with no verdict is passed over. The
    most restrictive verdict stands, block over defer
@@ -1144,6 +1168,7 @@ The root module of this repository is the reference binding.
 | merge | `RuleSet{Source, Allow, Deny, Ask}`, `Merge(sets…)` |
 | matcher | `Matcher func(spec, args) bool`; `PrefixMatcher(field)`, `GlobMatcher(field)` |
 | splitter, subject | `Subjects func(ctx, args) ([]Subject, error)`, `Subject{Args, Tool, Text, Constrain}`; `ToolMatcher{Match, Subjects}` per tool |
+| constraint sources | `WithConstraints(fns…)`, each `func(ctx, agentturn.ToolCallInfo) ([]Subject, error)` |
 | aliases | `WithAliases(map[string][]string)` |
 | build | `Build(policy, matchers, opts…)`; `ErrNoDefault`, `ErrNoMatcher`, `ErrToolGlob` for the kinds, and a plain error for `invalid_rule` |
 | engine | `Engine`; `Policy`, `PolicyOf(source)`, `Sources`, `Withheld`, `SetPolicy` |
@@ -1321,6 +1346,11 @@ listed in the changelog as one.
   agentturn's chain fold.
 - Answering hooks (#86): a host MAY register hooks whose allow answers
   the policy's own ask, never a deny, an ordinary hook's ask or a hold.
+- Constraint sources (#89): a host MAY supply functions from a call to
+  subjects, added to every call's as constraints after its split, so a
+  data-flow rule holds for a tool with no splitter
+  ([Constraint sources](#constraint-sources)). Draft 0.2 took subjects
+  only from the called tool's splitter.
 - A server glob, `mcp__S__*`, is honoured in the allow list (#85).
   Draft 0.2 refused every tool-name glob there and said the reference
   agent did too, which was wrong: Claude Code allows `mcp__<server>` and

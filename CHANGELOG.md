@@ -35,6 +35,15 @@ versions may break the API.
   deny, an ordinary hook's ask or a hold: a call it allows is still
   held when its batch asks. It does what a product's run end, resume
   and "approved by policy" record did, and records what was decided.
+- Added: `WithConstraints(fns...)`, constraint sources (#89). Each is
+  called for every call the engine decides or reads as a sibling, after
+  the call's own split, and its subjects are added as constraints,
+  whatever `Subject.Constrain` says, so they can block or defer a call
+  and never allow it. A source that fails blocks the call as a failed
+  splitter does. A host keeps conversation state, a taint under its
+  grant scope, and holds every tool to it, one with no splitter, such
+  as one an MCP server added later, included: `ask tainted` then holds
+  for all of them. RFC 0001 draft 0.3, Constraint sources.
 - Fixed: a hook given to `WithHooks` runs once per call of a batch
   (#87). The engine reads a call's siblings, hooks included, to decide
   the hold, and decided each again when the loop handed it, so in a

@@ -258,6 +258,39 @@ func WithHooks(fns ...func(context.Context, agentturn.ToolCallInfo) (*agentturn.
 	}
 }
 
+// WithConstraints registers constraint sources: functions from a call,
+// under the decision's context, to subjects the call is held to besides
+// its own. The engine calls each for every call it decides or reads as
+// a sibling, after the call's own split (its splitter's subjects, or
+// the call itself), with the arguments being decided, a hook's rewrite
+// included, and adds what it returns as constraints, whatever
+// Subject.Constrain says: each is held to its tool's deny and ask rules
+// alone, so a source can block or defer a call and never allow it.
+//
+// It is how a host holds every call to state it keeps about the
+// conversation, a tool added later included, which no per-tool
+// [Subjects] splitter can: "untrusted content is in context" as a
+// subject {Tool: "tainted"} under ask tainted, kept by the host under
+// [GrantScopeFromContext] and set from what a tool's agenttool.Flow says
+// it reads. The library ships the seam; the host keeps the state.
+//
+// A source that fails blocks the call as a failed splitter does, with
+// the reason "<tool> call could not be evaluated: <error>", and a
+// sibling it fails for reads as asking. Its subjects are part of the
+// call's reading, kept for the batch as a splitter's are, so a source
+// is asked at most once per call of a batch when the reading is reused
+// (see [WithHooks]). Each WithConstraints adds its sources after those
+// already given; a nil source adds nothing.
+func WithConstraints(fns ...func(context.Context, agentturn.ToolCallInfo) ([]Subject, error)) Option {
+	return func(e *Engine) {
+		for _, fn := range fns {
+			if fn != nil {
+				e.constraints = append(e.constraints, fn)
+			}
+		}
+	}
+}
+
 // WithAnsweringHooks registers hooks that may answer the policy's own
 // ask, as the reference agent's PreToolUse hook skips its permission
 // prompt by allowing a call. When the fold of the policy and the
@@ -310,6 +343,7 @@ type Engine struct {
 	// Build and never written after.
 	hooks        []func(context.Context, agentturn.ToolCallInfo) (*agentturn.ToolDecision, error)
 	answerers    []func(context.Context, agentturn.ToolCallInfo) (*agentturn.ToolDecision, error)
+	constraints  []func(context.Context, agentturn.ToolCallInfo) ([]Subject, error)
 	neverStarted func(context.Context, string, string) bool
 	// askInRun is [WithAskInRun], set at Build and never written after.
 	askInRun bool
@@ -824,7 +858,7 @@ func (e *Engine) evaluate(ctx context.Context, a active, info agentturn.ToolCall
 	}
 	c := e.confinement(ctx, info.Tool, info.Args)
 	var failed bool
-	v.Action, v.Rule, v.Reason, v.Subject, failed = e.decide(ctx, a, name, c, info.Args)
+	v.Action, v.Rule, v.Reason, v.Subject, failed = e.decide(ctx, a, info, c)
 	v.Confined = c.by
 	out, rewriteFailed, err := e.foldHooks(ctx, a, name, info, v)
 	return out, failed || rewriteFailed, err
@@ -880,7 +914,7 @@ func (e *Engine) foldHooks(ctx context.Context, a active, name string, info agen
 		if d.Args != nil {
 			out.Args, info.Args = d.Args, d.Args
 			c := e.confinement(ctx, info.Tool, d.Args)
-			act, rule, reason, subject, bad := e.decide(ctx, a, name, c, d.Args)
+			act, rule, reason, subject, bad := e.decide(ctx, a, info, c)
 			if r, cur := restrictiveness(act), restrictiveness(v.Action); r > cur || policy && r == cur {
 				keep := v.Subject
 				v.Action, v.Rule, v.Reason, v.Subject, v.By = act, rule, reason, subject, ByPolicy
@@ -951,11 +985,19 @@ func (e *Engine) confinement(ctx context.Context, tool agenttool.Tool, args json
 	return confinement{ok: true, by: by}
 }
 
-// decide evaluates one call as Decide does, without recording it. ctx
-// is the decision's, handed to the tool's splitter. failed reports a
-// block because the splitter failed, rather than one a rule made.
-func (e *Engine) decide(ctx context.Context, a active, name string, c confinement, args json.RawMessage) (act agentturn.ToolAction, rule *Rule, reason, subject string, failed bool) {
-	subjects, err := e.split(ctx, name, args)
+// decide evaluates one call, info's with info.Args, as Decide does,
+// without recording it. ctx is the decision's, handed to the tool's
+// splitter and the constraint sources. failed reports a block because
+// the subjects could not be read, rather than one a rule made.
+func (e *Engine) decide(ctx context.Context, a active, info agentturn.ToolCallInfo, c confinement) (act agentturn.ToolAction, rule *Rule, reason, subject string, failed bool) {
+	name := ""
+	if info.Call != nil {
+		name = info.Call.Name
+	}
+	subjects, err := e.split(ctx, name, info.Args)
+	if err == nil {
+		subjects, err = e.constrain(ctx, info, subjects)
+	}
 	if err != nil {
 		return agentturn.Block, nil, name + " call could not be evaluated: " + err.Error(), "", true
 	}
@@ -1222,6 +1264,22 @@ func (e *Engine) split(ctx context.Context, name string, args json.RawMessage) (
 	}
 	if !slices.ContainsFunc(subjects, func(s Subject) bool { return !s.Constrain }) {
 		subjects = append([]Subject{{Args: args}}, subjects...)
+	}
+	return subjects, nil
+}
+
+// constrain adds the constraint sources' subjects to a call's, each a
+// constraint whatever it says of itself.
+func (e *Engine) constrain(ctx context.Context, info agentturn.ToolCallInfo, subjects []Subject) ([]Subject, error) {
+	for _, fn := range e.constraints {
+		more, err := fn(ctx, info)
+		if err != nil {
+			return nil, err
+		}
+		for _, s := range more {
+			s.Constrain = true
+			subjects = append(subjects, s)
+		}
 	}
 	return subjects, nil
 }
