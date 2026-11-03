@@ -46,7 +46,8 @@ versions may break the API.
   see the input so. It is an allow: the transcript and the record keep
   the items. Naming an item the loop did not build the request from,
   such as one an earlier guard's rewrite made, quarantining and
-  rewriting at once, quarantining beside other guards, or quarantining
+  rewriting at once, naming an item held by value, which is compared
+  by pointer alone, quarantining beside other guards, or quarantining
   outside a run, fails the run, and is reported as the guard's block
   with the reason `quarantine refused: <cause>`. `agentpolicy.Verdict`
   gains `Quarantined`, and the record a `quarantined` member naming

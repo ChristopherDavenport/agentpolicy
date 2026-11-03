@@ -1097,7 +1097,8 @@ each out, or carry a function call output as the placeholder that
 section names, while the transcript and the record keep them; and the
 guards after it see the input without them, as the request will carry
 it. Only items the loop built the request from can be quarantined,
-named by identity as the guard was handed them: a verdict naming an
+named by identity as the guard was handed them, an item a binding
+holds by value being one it cannot name: a verdict naming an
 item an earlier guard's rewrite made fails the check closed, and so
 does one that both quarantines and rewrites, one from a guard checked
 beside others, or a quarantine the loop cannot keep. A refused

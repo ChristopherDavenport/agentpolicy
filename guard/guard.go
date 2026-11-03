@@ -165,9 +165,9 @@ type Verdict struct {
 	// not a rewrite: the transcript and the record keep the items, and a
 	// verdict that sets it with Items or Instructions fails the check.
 	// Only items the loop built the request from can be named, as the
-	// guard was handed them, by identity; one an earlier guard's rewrite
-	// made fails the check closed. It is ignored for a Message, an
-	// Output and on a Block.
+	// guard was handed them, by pointer identity; one an earlier guard's
+	// rewrite made, or one held by value, fails the check closed. It is
+	// ignored for a Message, an Output and on a Block.
 	Quarantine openresponses.Items
 }
 
@@ -352,13 +352,16 @@ func quarantine(ctx context.Context, v Verdict, built openresponses.Items, besid
 	return agentturn.Quarantine(ctx, v.Quarantine...)
 }
 
-// sameItem reports whether two items are one, by identity.
+// sameItem reports whether two items are one, by pointer identity: an
+// item held by value is never the same as any, since == on one whose
+// field holds a value that cannot be compared panics, so it cannot be
+// quarantined.
 func sameItem(a, b openresponses.Item) bool {
 	if a == nil || b == nil {
 		return false
 	}
 	ta := reflect.TypeOf(a)
-	return ta == reflect.TypeOf(b) && ta.Comparable() && a == b
+	return ta == reflect.TypeOf(b) && ta.Kind() == reflect.Pointer && a == b
 }
 
 // checked is one guard's answer.

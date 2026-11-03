@@ -1162,14 +1162,16 @@ func (e *Engine) batchOf(info agentturn.ToolCallInfo, a active) string {
 	return batchKey(info, a.gen, a.scope)
 }
 
-// sameTool reports whether two tools are one, by identity; no tool is
-// never the same as any.
+// sameTool reports whether two tools are one, by pointer identity: a
+// tool held by value is never the same as any, since == on one whose
+// field holds a value that cannot be compared panics, and no tool is
+// never the same either. A tool read as another is decided again.
 func sameTool(a, b agenttool.Tool) bool {
 	if a == nil || b == nil {
 		return false
 	}
 	ta := reflect.TypeOf(a)
-	if ta != reflect.TypeOf(b) || !ta.Comparable() {
+	if ta != reflect.TypeOf(b) || ta.Kind() != reflect.Pointer {
 		return false
 	}
 	return a == b

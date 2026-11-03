@@ -192,3 +192,22 @@ func TestAQuarantineFailsClosed(t *testing.T) {
 		})
 	}
 }
+
+// valueItem is an item held by value whose field holds a value that
+// cannot be compared.
+type valueItem struct{ extra any }
+
+func (valueItem) ItemType() string { return "x:value" }
+
+// An item is named by pointer identity alone: one held by value is
+// never the same, and comparing it never panics.
+func TestSameItemNeverPanics(t *testing.T) {
+	v := valueItem{extra: []int{1}}
+	if sameItem(v, v) {
+		t.Error("an item held by value read as the same")
+	}
+	m := openresponses.UserText("hi")
+	if !sameItem(m, m) {
+		t.Error("an item is not the same as itself")
+	}
+}

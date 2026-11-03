@@ -987,3 +987,24 @@ func TestHooksRunOncePerCallOfABatch(t *testing.T) {
 		})
 	}
 }
+
+// valueTool is a tool held by value whose field holds a value that
+// cannot be compared, so == on two of them panics though the type is
+// comparable.
+type valueTool struct {
+	agenttool.Tool
+	extra any
+}
+
+// A tool is the same as another by pointer identity alone: a tool held
+// by value is never the same, and comparing it never panics.
+func TestSameToolNeverPanics(t *testing.T) {
+	base := agenttool.New("read", "Reads", func(context.Context, agenttool.NoArgs) (string, error) { return "", nil })
+	v := valueTool{Tool: base, extra: []int{1}}
+	if sameTool(v, v) {
+		t.Error("a tool held by value read as the same")
+	}
+	if !sameTool(base, base) {
+		t.Error("a tool is not the same as itself")
+	}
+}
