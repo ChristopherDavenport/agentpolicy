@@ -502,7 +502,8 @@ A call is decided in four steps.
 
 The decision the loop receives carries the verdict's action and
 reason, and names the policy as its decider unless a hook that made
-the action stricter named another. A block's reason is the text the
+the action stricter, or an answering hook that allowed the call, named
+another. A block's reason is the text the
 model reads as the call's output.
 
 The same policy and the same call in the same batch MUST give the same
@@ -519,16 +520,38 @@ first:
 
 - the strictest action wins, block over defer over allow, and a block
   ends the fold;
-- a hook that makes the action stricter brings its reason and its
-  decider, `policy` when it names none, and the verdict then has no
-  rule and no subject;
+- a hook that makes the action stricter brings its reason, its decider,
+  `policy` when it names none, and its subject, the text of the part of
+  the call it decided on, and the verdict then has no rule;
+- a hook that defers a call the verdict already defers leaves the
+  verdict's action, rule and decider. When it gives a reason that the
+  verdict's reason does not already hold, the reason continues `; ` and
+  the hook's reason, and when the verdict has no subject it takes the
+  hook's. This differs from agentturn RFC 0001's chain fold, which
+  keeps the first reason on an equal action: here the person asked
+  reads why the host's hook asks as well as why the policy does;
 - the first note stands, and terminate is set when any hook sets it;
 - arguments a hook rewrites pass to the hooks after it, are what the
   call runs with, and are decided again, their confinement read from
   them: the stricter of the two actions stands, a verdict the policy
   still owns takes the rewrite's rule and reason, and the verdict's
-  confinement is the rewrite's;
+  confinement is the rewrite's, and the reasons equal deferring hooks
+  added are kept;
 - a hook's error fails the call's decision.
+
+A host MAY also register **answering hooks**, which answer the policy's
+own question rather than ask their own, as the reference agent's
+`PreToolUse` hook skips its prompt by allowing a call. When the fold of
+the policy and the ordinary hooks stands at a defer the policy's own
+verdict raised, by an ask rule or the default, the answering hooks are
+asked in order, and the first allow replaces the defer. The verdict
+then has no rule, the hook's reason and decider (`policy` when it names
+none), and the subject the policy deferred on. An answering hook never
+lifts a block, a defer an ordinary hook raised or joined, or a hold: a
+call it allows is still held when another call of its batch asks, so it
+never runs beside an ask. Anything an answering hook says but an allow
+is no answer, and it rewrites nothing; its error fails the call's
+decision as an ordinary hook's does.
 
 Since the engine decides a call's siblings to decide the hold, a hook
 is called for a sibling before the loop hands it that sibling's own
@@ -1045,11 +1068,11 @@ A verdict is what was decided and why:
 | call ID, tool | the call decided; a grant names the rule's tool; empty for content |
 | guard | the guard that decided content; empty otherwise |
 | action | allow, block or defer |
-| rule | the rule that fired, the rule a confined call passed over, or the rule granted; none for the default, a hook's stricter action, a guard or a reviewer |
+| rule | the rule that fired, the rule a confined call passed over, or the rule granted; none for the default, a hook's stricter action, an answering hook's allow, a guard or a reviewer |
 | reason | the stable text; for a block of a call, what the model reads |
 | by | the decider: `policy`, `agent` or `human`; empty for a guard's, whose decider is the guard |
 | held | set on a hold, and on the release or refusal that answers it |
-| subject | the text of the subject whose verdict the fold kept; empty for a call no splitter split |
+| subject | the text of the subject whose verdict the fold kept, or of the part a hook decided on; empty for a call no splitter split and no hook named a part of |
 | confined | what confines the call, whatever the action; empty when unconfined or unnamed |
 
 Every verdict reaches every observer the host registered, exactly
@@ -1128,7 +1151,7 @@ The root module of this repository is the reference binding.
 | confinement | `agenttool.ConfinedBy` by default; `WithConfinement(fn)`, `nil` to turn it off |
 | sibling tools | `WithTools(lookup)`, `WithToolsFor(lookup)` for one given the decision's context |
 | model-backed output | `classify.WithEveryTurn()` to judge a turn that is not final |
-| hooks | `WithHooks(fns…)` |
+| hooks | `WithHooks(fns…)`; answering hooks `WithAnsweringHooks(fns…)`; a hook's subject is `agentturn.ToolDecision.Subject` |
 | offering tools | `Engine.Removes(tool)`, `Engine.Filter(tools)`, `Engine.ToolProvider(base)` for `agentturn.Config.ToolProvider` |
 | grants | `Engine.Grant`, `Engine.GrantOver`; `Engine.GrantSet` → granted and `[]Refusal{Rule, Reason}`, `Engine.Revoke`, `Engine.Grants`; the scope: `ContextWithGrantScope(ctx, scope)`, `GrantScopeFromContext(ctx)`, `Engine.GrantsFor(ctx)`, `Engine.RevokeScope(ctx)` |
 | deferred calls | `Engine.Deferred`, `Engine.Runs`, `Engine.Forget` |
@@ -1290,6 +1313,14 @@ listed in the changelog as one.
   reading is the call's decision when the loop hands the same call with
   the same tool ([Hooks](#hooks), #87). Draft 0.2 let the engine call a
   hook twice for every call of a batch the policy allows but the first.
+- The hook fold keeps a hook's part (#80): a hook that makes the action
+  stricter brings its subject, where draft 0.2 left the verdict with
+  none, and a hook that defers a call the verdict already defers adds
+  its reason after `; `, and its subject when the verdict has none,
+  where draft 0.2 dropped both. This is stated as differing from
+  agentturn's chain fold.
+- Answering hooks (#86): a host MAY register hooks whose allow answers
+  the policy's own ask, never a deny, an ordinary hook's ask or a hold.
 - A server glob, `mcp__S__*`, is honoured in the allow list (#85).
   Draft 0.2 refused every tool-name glob there and said the reference
   agent did too, which was wrong: Claude Code allows `mcp__<server>` and

@@ -216,9 +216,15 @@ func WithToolsFor(lookup func(ctx context.Context, name string) (agenttool.Tool,
 // The fold is agentturn.ChainBeforeToolCall's, with the engine's
 // decision first: the strictest action wins, Block over Defer over
 // Allow, a block ends the fold, and a hook that makes the action
-// stricter brings its reason and its decider, By, with ByPolicy for an
-// empty one; the verdict then has no Rule and no Subject. The first
-// note stands, Terminate is set when any hook sets it, and arguments a
+// stricter brings its reason, its decider, By, with ByPolicy for an
+// empty one, and its Subject; the verdict then has no Rule. A hook that
+// defers a call the verdict already defers leaves its action, rule and
+// decider, and adds what it says: a reason the verdict's does not
+// already hold continues it after "; ", and its Subject is the
+// verdict's when the verdict has none, so the person asked reads the
+// hook's why beside the rule's. That differs from
+// agentturn.ChainBeforeToolCall, which keeps the first reason of equal
+// actions. The first note stands, Terminate is set when any hook sets it, and arguments a
 // hook rewrites are passed to the hooks after it and are what the call
 // runs with, a held call's included when [Engine.Release] releases it.
 // Rewritten arguments are decided again, their confinement read from
@@ -252,6 +258,37 @@ func WithHooks(fns ...func(context.Context, agentturn.ToolCallInfo) (*agentturn.
 	}
 }
 
+// WithAnsweringHooks registers hooks that may answer the policy's own
+// ask, as the reference agent's PreToolUse hook skips its permission
+// prompt by allowing a call. When the fold of the policy and the
+// [WithHooks] hooks stands at a defer the policy raised, by an ask rule
+// or the default, the answering hooks are asked in order, and the first
+// that allows the call replaces the defer: the verdict then has no
+// Rule, the hook's reason and decider, By, ByPolicy for an empty one,
+// and keeps the Subject the policy deferred on. Its Note is the
+// decision's when no hook gave one.
+//
+// An answering hook answers and never rewrites: its Args and Terminate
+// are ignored, and so is anything but an allow, so it can only lift an
+// ask. It is not asked about a call the fold blocks, nor about one an
+// ordinary hook deferred, whether that hook raised the defer or
+// deferred a call the policy already deferred, since the host's own
+// hooks asking is not the policy's question to answer. A call it allows
+// is still held when another call of its batch asks, as any allowed
+// call is: it never runs beside an ask. Its error fails the call's
+// decision as a [WithHooks] hook's does, and it is called for a sibling
+// as one is. Each WithAnsweringHooks adds its hooks after those already
+// given; a nil hook adds nothing.
+func WithAnsweringHooks(fns ...func(context.Context, agentturn.ToolCallInfo) (*agentturn.ToolDecision, error)) Option {
+	return func(e *Engine) {
+		for _, fn := range fns {
+			if fn != nil {
+				e.answerers = append(e.answerers, fn)
+			}
+		}
+	}
+}
+
 // Engine is the runtime form of a [Policy]: the policy in force, the
 // matchers it is evaluated with, the grants made since it was built
 // and the calls it has deferred. It is safe for concurrent use.
@@ -267,10 +304,12 @@ type Engine struct {
 	bound     DenialBound
 	confine   func(context.Context, agenttool.Tool, json.RawMessage) (bool, string)
 	lookup    func(context.Context, string) (agenttool.Tool, bool)
-	// hooks are folded into every decision after the policy's, and
-	// neverStarted reads the record for a cut-off call. Both are set
-	// at Build and never written after.
+	// hooks are folded into every decision after the policy's,
+	// answerers may answer the policy's own ask after them, and
+	// neverStarted reads the record for a cut-off call. All are set at
+	// Build and never written after.
 	hooks        []func(context.Context, agentturn.ToolCallInfo) (*agentturn.ToolDecision, error)
+	answerers    []func(context.Context, agentturn.ToolCallInfo) (*agentturn.ToolDecision, error)
 	neverStarted func(context.Context, string, string) bool
 	// askInRun is [WithAskInRun], set at Build and never written after.
 	askInRun bool
@@ -658,7 +697,8 @@ func (e *Engine) BeforeToolCall() func(context.Context, agentturn.ToolCallInfo) 
 // siblings Decide held waiting on a question nobody is asked.
 //
 // The decision names the policy as its decider, or the hook that made
-// it stricter. The verdict reaches
+// it stricter, or the [WithAnsweringHooks] hook that allowed it. The
+// verdict reaches
 // the observer before Decide returns, and the same policy and the same
 // call in the same batch always give the same verdict.
 //
@@ -800,7 +840,12 @@ func (e *Engine) evaluate(ctx context.Context, a active, info agentturn.ToolCall
 // verdict is the block of a rewrite whose subjects could not be
 // evaluated.
 func (e *Engine) foldHooks(ctx context.Context, a active, name string, info agentturn.ToolCallInfo, v *Verdict) (out agentturn.ToolDecision, failed bool, err error) {
-	policy := true
+	// policy is whether the verdict is still the policy's; asked whether
+	// an ordinary hook deferred the call, which no answering hook lifts;
+	// added the reasons hooks added to an equal defer, kept across a
+	// rewrite's decision.
+	policy, asked := true, false
+	var added []string
 	for _, fn := range e.hooks {
 		if v.Action == agentturn.Block {
 			break
@@ -812,12 +857,21 @@ func (e *Engine) foldHooks(ctx context.Context, a active, name string, info agen
 		if d == nil {
 			continue
 		}
-		if restrictiveness(d.Action) > restrictiveness(v.Action) {
-			v.Action, v.Reason, v.Rule, v.Subject, v.By = d.Action, d.Reason, nil, "", d.By
+		switch r, cur := restrictiveness(d.Action), restrictiveness(v.Action); {
+		case r > cur:
+			v.Action, v.Reason, v.Rule, v.Subject, v.By = d.Action, d.Reason, nil, d.Subject, d.By
 			if v.By == "" {
 				v.By = ByPolicy
 			}
-			policy = false
+			policy, asked, added = false, d.Action == agentturn.Defer, nil
+		case r == cur && d.Action == agentturn.Defer:
+			asked = true
+			if addReason(v, d.Reason) {
+				added = append(added, d.Reason)
+			}
+			if v.Subject == "" {
+				v.Subject = d.Subject
+			}
 		}
 		if out.Note == "" {
 			out.Note = d.Note
@@ -828,13 +882,55 @@ func (e *Engine) foldHooks(ctx context.Context, a active, name string, info agen
 			c := e.confinement(ctx, info.Tool, d.Args)
 			act, rule, reason, subject, bad := e.decide(ctx, a, name, c, d.Args)
 			if r, cur := restrictiveness(act), restrictiveness(v.Action); r > cur || policy && r == cur {
+				keep := v.Subject
 				v.Action, v.Rule, v.Reason, v.Subject, v.By = act, rule, reason, subject, ByPolicy
 				policy, failed = true, bad
+				if r == cur && v.Action == agentturn.Defer {
+					// The hooks that deferred with the policy still did.
+					for _, why := range added {
+						addReason(v, why)
+					}
+					if v.Subject == "" {
+						v.Subject = keep
+					}
+				} else {
+					asked, added = false, nil
+				}
 			}
 			v.Confined = c.by
 		}
 	}
+	if v.Action == agentturn.Defer && policy && !asked {
+		for _, fn := range e.answerers {
+			d, err := fn(ctx, info)
+			if err != nil {
+				return agentturn.ToolDecision{}, false, err
+			}
+			if d == nil || d.Action != agentturn.Allow {
+				continue
+			}
+			v.Action, v.Rule, v.Reason, v.By = agentturn.Allow, nil, d.Reason, d.By
+			if v.By == "" {
+				v.By = ByPolicy
+			}
+			if out.Note == "" {
+				out.Note = d.Note
+			}
+			break
+		}
+	}
 	return out, failed, nil
+}
+
+// addReason continues v's reason with a hook's, after "; ", when it
+// says something the reason does not already hold, and reports whether
+// it did.
+func addReason(v *Verdict, why string) bool {
+	if why == "" || strings.Contains(v.Reason, why) {
+		return false
+	}
+	v.Reason += "; " + why
+	return true
 }
 
 // confinement is what a call's tool says of where it runs.

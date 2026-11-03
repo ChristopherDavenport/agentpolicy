@@ -17,6 +17,24 @@ versions may break the API.
   names a decider the session format does not know is no answer, as
   agentturn v0.0.35's `Ask` refuses it: the call is deferred to the
   run's end. RFC 0001 draft 0.3, Asking in the run.
+- Changed: the `WithHooks` fold keeps a hook's part of the decision
+  (#80). A hook that makes the action stricter brings its
+  `ToolDecision.Subject` to the verdict and the decision, where the
+  subject was cleared. A hook that defers a call the policy already
+  defers adds its reason after `; `, so the person asked reads both,
+  `no rule allows bash: approval required by default; git touches the
+  remote`, and its subject when the verdict has none; the action, rule
+  and decider stay the policy's. A product that appended a hook's
+  reason to the question itself drops that. The reason text the
+  question shows changes; what the model reads for a block does not.
+- Added: `WithAnsweringHooks(fns...)` (#86). When the policy's own ask
+  rule or default defers a call and no `WithHooks` hook deferred it,
+  the answering hooks are asked in order and the first allow answers
+  the ask: the call is allowed, with no rule, the hook's reason and
+  decider, and the subject the policy deferred on. It never lifts a
+  deny, an ordinary hook's ask or a hold: a call it allows is still
+  held when its batch asks. It does what a product's run end, resume
+  and "approved by policy" record did, and records what was decided.
 - Fixed: a hook given to `WithHooks` runs once per call of a batch
   (#87). The engine reads a call's siblings, hooks included, to decide
   the hold, and decided each again when the loop handed it, so in a
