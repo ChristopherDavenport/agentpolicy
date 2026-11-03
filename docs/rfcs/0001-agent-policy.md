@@ -1314,7 +1314,10 @@ hint to a constraint, and reads one claim per call per batch; adds a
 constraint source's subjects as constraints; folds a
 call's subjects to the most restrictive; blocks a
 call whose splitter, claim or constraint source fails; reads confinement from the called tool and
-reads an unanswered tool as unconfined; holds every call it allows
+reads an unanswered tool as unconfined; folds the host's hooks as
+[Hooks](#hooks) says, a stricter hook's subject and an equal deferring
+hook's reason included, and lets an answering hook lift only the
+policy's own ask; holds every call it allows
 when another of its batch asks, and never runs one beside an ask;
 gives the reason texts this document states; reports every verdict to
 every observer exactly once; remembers a deferred call under its own
@@ -1421,6 +1424,13 @@ listed in the changelog as one.
   agentsession RFC 0001 does not know is no answer, following agenttool
   RFC 0001 draft 0.9 and agentturn RFC 0001 draft 0.4 ([Asking in the
   run](#asking-in-the-run)). Draft 0.2 named `human` for every answer.
+- A server glob, `mcp__S__*`, is honoured in the allow list (#85).
+  Draft 0.2 refused every tool-name glob there and said the reference
+  agent did too, which was wrong: Claude Code allows `mcp__<server>` and
+  `mcp__<server>__*`. Every other glob in an allow list is still
+  `tool_glob`. A grant set's server glob is refused only by a bare deny,
+  or an outranking bare ask rule, that names every tool it names
+  ([Grant sets](#grant-sets)).
 - A hook is called at most once per call of a batch: a sibling's
   reading is the call's decision when the loop hands the same call with
   the same tool ([Hooks](#hooks), #87). Draft 0.2 let the engine call a
@@ -1433,19 +1443,11 @@ listed in the changelog as one.
   agentturn's chain fold.
 - Answering hooks (#86): a host MAY register hooks whose allow answers
   the policy's own ask, never a deny, an ordinary hook's ask or a hold.
-- An input guard MAY quarantine items of the input (#90): an allow,
-  not a rewrite, kept under agentturn RFC 0001's quarantine before the
-  request is sent, with the guards after it seeing the input without
-  them; only items the loop built the request from; the verdict and
-  its record gain `quarantined`.
-- A chain MAY check an input only on a run's first turn, and MAY check
-  guards that do not rewrite at the same time, giving the outcome and
-  the verdicts of checking in order (#88). Conformance says so.
-- A turn a terminating tool result ends is final, and the outputs of
-  the results that end the run are its answer, which a guard over the
-  answer judges as a final message (#78). The output subject carries
-  the turn's tool results. Draft 0.2 called final only a turn with no
-  calls, so a terminating tool's answer reached the caller unjudged.
+- Constraint sources (#89): a host MAY supply functions from a call to
+  subjects, added to every call's as constraints after its split, so a
+  data-flow rule holds for a tool with no splitter
+  ([Constraint sources](#constraint-sources)). Draft 0.2 took subjects
+  only from the called tool's splitter.
 - Claims (#81): a call whose tool claims facts, with no splitter, is
   split by the claim; hints are constraints after the call itself; a
   claim's rewrite is decided again and is what the call runs with; one
@@ -1453,18 +1455,19 @@ listed in the changelog as one.
   ([Claims](#claims)). A binding MAY turn reading off. The corpus gains
   `facts` on a call and `args` in `want`. Draft 0.2 did not read
   claims.
-- Constraint sources (#89): a host MAY supply functions from a call to
-  subjects, added to every call's as constraints after its split, so a
-  data-flow rule holds for a tool with no splitter
-  ([Constraint sources](#constraint-sources)). Draft 0.2 took subjects
-  only from the called tool's splitter.
-- A server glob, `mcp__S__*`, is honoured in the allow list (#85).
-  Draft 0.2 refused every tool-name glob there and said the reference
-  agent did too, which was wrong: Claude Code allows `mcp__<server>` and
-  `mcp__<server>__*`. Every other glob in an allow list is still
-  `tool_glob`. A grant set's server glob is refused only by a bare deny,
-  or an outranking bare ask rule, that names every tool it names
-  ([Grant sets](#grant-sets)).
+- A turn a terminating tool result ends is final, and the outputs of
+  the results that end the run are its answer, which a guard over the
+  answer judges as a final message (#78). The output subject carries
+  the turn's tool results. Draft 0.2 called final only a turn with no
+  calls, so a terminating tool's answer reached the caller unjudged.
+- A chain MAY check an input only on a run's first turn, and MAY check
+  guards that do not rewrite at the same time, giving the outcome and
+  the verdicts of checking in order (#88). Conformance says so.
+- An input guard MAY quarantine items of the input (#90): an allow,
+  not a rewrite, kept under agentturn RFC 0001's quarantine before the
+  request is sent, with the guards after it seeing the input without
+  them; only items the loop built the request from; the verdict and
+  its record gain `quarantined`.
 
 ## Prior art
 
