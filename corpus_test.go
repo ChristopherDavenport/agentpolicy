@@ -199,7 +199,11 @@ type corpusCall struct {
 	Subjects      *[]corpusSubject `json:"subjects"`
 	SubjectsError string           `json:"subjects_error"`
 	Facts         *corpusFacts     `json:"facts"`
-	Want          struct {
+	// Constraints is what the host's constraint source returns for the
+	// call, and ConstraintsError its error; absent, it returns none.
+	Constraints      []corpusSubject `json:"constraints"`
+	ConstraintsError string          `json:"constraints_error"`
+	Want             struct {
 		Action   string          `json:"action"`
 		Held     bool            `json:"held"`
 		Rule     string          `json:"rule"`
@@ -303,10 +307,12 @@ func runDecisionCase(t *testing.T, defaults map[string]corpusMatcher, tc decisio
 	// writes out what they answer for each call, found by its
 	// arguments.
 	type answer struct {
-		subjects *[]corpusSubject
-		err      string
-		confined *string
-		facts    *corpusFacts
+		subjects    *[]corpusSubject
+		err         string
+		confined    *string
+		facts       *corpusFacts
+		constraints []corpusSubject
+		cerr        string
 	}
 	answers := map[string]answer{}
 	// A tool claims facts when a call of it in the case says what it
@@ -317,7 +323,7 @@ func runDecisionCase(t *testing.T, defaults map[string]corpusMatcher, tc decisio
 		if _, dup := answers[key]; dup {
 			t.Fatalf("two calls of %s with %s: a case's calls need distinct arguments", c.Tool, c.args(t))
 		}
-		answers[key] = answer{c.Subjects, c.SubjectsError, c.Confined, c.Facts}
+		answers[key] = answer{c.Subjects, c.SubjectsError, c.Confined, c.Facts, c.Constraints, c.ConstraintsError}
 		claims[c.Tool] = claims[c.Tool] || c.Facts != nil
 	}
 
@@ -415,6 +421,19 @@ func runDecisionCase(t *testing.T, defaults map[string]corpusMatcher, tc decisio
 	if tc.Aliases != nil {
 		opts = append(opts, WithAliases(tc.Aliases))
 	}
+	// The constraint source is the host's; the corpus writes out what it
+	// answers for each call.
+	opts = append(opts, WithConstraints(func(_ context.Context, info agentturn.ToolCallInfo) ([]Subject, error) {
+		a := answers[info.Call.Name+"\x00"+string(info.Args)]
+		if a.cerr != "" {
+			return nil, errors.New(a.cerr)
+		}
+		var out []Subject
+		for _, s := range a.constraints {
+			out = append(out, Subject{Args: s.Args, Text: s.Text, Tool: s.Tool, Constrain: s.Constrain})
+		}
+		return out, nil
+	}))
 	e, err := Build(p, matchers, opts...)
 	if tc.BuildError != "" {
 		want, ok := buildErrors[tc.BuildError]

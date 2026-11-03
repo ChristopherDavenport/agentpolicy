@@ -230,6 +230,21 @@
       ]
     },
     {
+      "name": "a constraint source's subjects hold every call and never allow one",
+      "policy": {"allow": "tainted send fetch trusted", "ask": "tainted", "default": "deny"},
+      "calls": [
+        {"tool": "send", "args": {"to": "a"}, "want": {"action": "allow", "rule": "send", "reason": "allowed by send"}},
+        {"tool": "send", "args": {"to": "b"}, "constraints": [{"tool": "tainted", "args": {}, "text": "untrusted content is in context"}],
+         "want": {"action": "defer", "rule": "tainted", "reason": "approval required by tainted", "subject": "untrusted content is in context"}},
+        {"tool": "fetch", "args": {"url": "x"}, "constraints": [{"tool": "tainted", "args": {"x": 1}, "text": "t", "constrain": false}],
+         "want": {"action": "defer", "rule": "tainted", "reason": "approval required by tainted", "subject": "t"}},
+        {"tool": "other", "args": {}, "constraints": [{"tool": "trusted", "args": {}, "text": "a trusted source"}],
+         "want": {"action": "block", "reason": "no rule allows other: denied by default"}},
+        {"tool": "fetch", "args": {"url": "y"}, "constraints_error": "taint store unreachable",
+         "want": {"action": "block", "reason": "fetch call could not be evaluated: taint store unreachable"}}
+      ]
+    },
+    {
       "name": "a tool-name glob denies and removes the tool",
       "policy": {"deny": "mcp__github__*", "ask": "mcp__*", "default": "allow"},
       "calls": [

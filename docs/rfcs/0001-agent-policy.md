@@ -1423,7 +1423,12 @@ for nothing named; and `facts`, present when the tool claims facts for
 the call: `calls`, an array of `{"tool"?, "args", "text"?}`, absent for
 the call itself; `rewrite`; `hint`; and `error`, the claim's error
 text. A tool claims when any call of it in the case has `facts`, and
-its calls without the member claim the call itself. The calls of one case have distinct arguments per
+its calls without the member claim the call itself. A call MAY also
+have `constraints`, an array of `{"args", "text"?, "tool"?,
+"constrain"?}`, what the host's constraint source returns for it, none
+when absent, each a constraint whatever its `constrain` says; or
+`constraints_error`, the source's error text. The calls of one case
+have distinct arguments per
 tool, so a harness can find a call's answers from what the splitter
 and the tool are handed. The tool a harness offers the engine for a
 sibling is the one it offers for the call.
@@ -1490,7 +1495,7 @@ listed in the changelog as one.
   claim's rewrite is decided again and is what the call runs with; one
   claim per call per batch, read by the hold and the decision alike
   ([Claims](#claims)). A binding MAY turn reading off. The corpus gains
-  `facts` on a call and `args` in `want`. Draft 0.2 did not read
+  `facts` and `constraints` on a call and `args` in `want`. Draft 0.2 did not read
   claims.
 - A turn a terminating tool result ends is final, and the outputs of
   the results that end the run are its answer, which a guard over the

@@ -42,7 +42,7 @@ versions may break the API.
 - Changed: an input guard's verdict names the turn whose model call
   it checked, read from agentturn v0.0.35's `TurnFromContext`, where
   `Verdict.Turn` was 0.
-- Added: an input guard can quarantine items (#90).
+- Added, breaking: an input guard can quarantine items (#90).
   `guard.Verdict.Quarantine` names items of the input, as the guard was
   handed them; `Chain.BeforeModelCall` quarantines them with agentturn
   v0.0.35's `agentturn.Quarantine` before the request is sent, so this
@@ -55,7 +55,8 @@ versions may break the API.
   by pointer alone, quarantining beside other guards, or quarantining
   outside a run, fails the run, and is reported as the guard's block
   with the reason `quarantine refused: <cause>`. `agentpolicy.Verdict`
-  gains `Quarantined`, and the record a `quarantined` member naming
+  gains `Quarantined`, so a `Verdict` can no longer be compared with
+  `==` (breaking), and the record a `quarantined` member naming
   each item by reference, `{type, id, call_id}`, never its content, so
   a quarantined text is redacted with the entry that holds it.
 - Added: `guard.Chain.Scope` and `guard.Chain.Parallel` (#88). Under
@@ -71,10 +72,12 @@ versions may break the API.
   `Deny`, `Secrets` and `classify.Guard` say they never rewrite;
   `Redact` says it does. A product's run-ID memory and one-guard
   wrapper for these go.
-- Fixed: a guard over the answer judges the answer a terminating tool
-  gives (#78). `guard.Output` gains `Results`, the turn's tool results,
-  and `Final` is set when a result ends the run (`Terminate`), not only
-  when the model called no tools; `Output.Answer()` returns the outputs
+- Changed, breaking: a guard over the answer judges the answer a
+  terminating tool gives (#78). `guard.Output` gains `Results`, the
+  turn's tool results, and `Final` is now also set when a result ends
+  the run (`Terminate`), not only when the model called no tools, so a
+  guard that read `Final` as "the model called no tools" is handed
+  terminating turns too; `Output.Answer()` returns the outputs
   of the results that end the run as function call outputs. `Deny`,
   `Secrets`, `Redact` (which blocks there as `Secrets` does) and `Limit`
   read the answer among the output's items, and `classify` judges it
@@ -112,6 +115,8 @@ versions may break the API.
   grant scope, and holds every tool to it, one with no splitter, such
   as one an MCP server added later, included: `ask tainted` then holds
   for all of them. RFC 0001 draft 0.3, Constraint sources.
+  The corpus gains `constraints` and `constraints_error` on a call,
+  what the host's source returns.
 - Fixed: a hook given to `WithHooks` runs once per call of a batch
   (#87). The engine reads a call's siblings, hooks included, to decide
   the hold, and decided each again when the loop handed it, so in a
