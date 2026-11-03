@@ -25,10 +25,62 @@ func TestMatchesTool(t *testing.T) {
 		{"*", "anything", true},
 		{"ls *", "lsof", false},
 		{"ls*", "lsof", true},
+		// MatchesTool is the full glob, the deny list's and the offer's;
+		// AllowsTool leaves out a name whose rest begins with "_".
+		{"mcp__gh__*", "mcp__gh__create_pr", true},
+		{"mcp__gh__*", "mcp__gh___x", true},
+		{"mcp__gh*", "mcp__gh___x", true},
 	}
 	for _, tc := range tests {
 		if got := (Rule{Tool: tc.rule}).MatchesTool(tc.tool); got != tc.want {
 			t.Errorf("Rule{%q}.MatchesTool(%q) = %v, want %v", tc.rule, tc.tool, got, tc.want)
+		}
+	}
+}
+
+// In the allow list a server glob names one server's tools, not those
+// of a server whose name only begins the same way; elsewhere it is the
+// full glob, so a deny never lets such a tool through.
+func TestAllowsTool(t *testing.T) {
+	tests := []struct {
+		rule, tool string
+		want       bool
+	}{
+		{"mcp__gh__*", "mcp__gh__create_pr", true},
+		{"mcp__gh__*", "mcp__gh___x", false},
+		{"bash", "bash", true},
+		{"mcp__*", "mcp__gh___x", true},
+	}
+	for _, tc := range tests {
+		if got := (Rule{Tool: tc.rule}).AllowsTool(tc.tool); got != tc.want {
+			t.Errorf("Rule{%q}.AllowsTool(%q) = %v, want %v", tc.rule, tc.tool, got, tc.want)
+		}
+	}
+}
+
+// A server glob is mcp__S__* for one server S, and only that.
+func TestServerGlob(t *testing.T) {
+	tests := []struct {
+		tool string
+		want bool
+	}{
+		{"mcp__gh__*", true},
+		{"mcp__my-server__*", true},
+		{"mcp__*", false},
+		{"mcp__gh*", false},
+		{"mcp____*", false},
+		{"mcp__a__b__*", false},
+		{"mcp__g*h__*", false},
+		{"mcp__gh__x*", false},
+		{"mcp__gh___*", false},
+		{"mcp___gh__*", false},
+		{"mcp__gh__", false},
+		{"mcp__gh", false},
+		{"B*", false},
+	}
+	for _, tc := range tests {
+		if got := (Rule{Tool: tc.tool}).ServerGlob(); got != tc.want {
+			t.Errorf("Rule{%q}.ServerGlob() = %v, want %v", tc.tool, got, tc.want)
 		}
 	}
 }

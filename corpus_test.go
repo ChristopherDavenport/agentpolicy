@@ -178,20 +178,40 @@ type corpusSubject struct {
 	Constrain bool            `json:"constrain"`
 }
 
+// corpusFacts is what the call's tool claims the call would touch:
+// calls absent is the call itself, and empty is nothing the tool can
+// state.
+type corpusFacts struct {
+	Calls *[]struct {
+		Tool string          `json:"tool"`
+		Args json.RawMessage `json:"args"`
+		Text string          `json:"text"`
+	} `json:"calls"`
+	Rewrite json.RawMessage `json:"rewrite"`
+	Hint    bool            `json:"hint"`
+	Error   string          `json:"error"`
+}
+
 type corpusCall struct {
 	Tool          string           `json:"tool"`
 	Args          json.RawMessage  `json:"args"`
 	Confined      *string          `json:"confined"`
 	Subjects      *[]corpusSubject `json:"subjects"`
 	SubjectsError string           `json:"subjects_error"`
-	Want          struct {
-		Action   string `json:"action"`
-		Held     bool   `json:"held"`
-		Rule     string `json:"rule"`
-		Source   string `json:"source"`
-		Reason   string `json:"reason"`
-		Subject  string `json:"subject"`
-		Confined string `json:"confined"`
+	Facts         *corpusFacts     `json:"facts"`
+	// Constraints is what the host's constraint source returns for the
+	// call, and ConstraintsError its error; absent, it returns none.
+	Constraints      []corpusSubject `json:"constraints"`
+	ConstraintsError string          `json:"constraints_error"`
+	Want             struct {
+		Action   string          `json:"action"`
+		Held     bool            `json:"held"`
+		Rule     string          `json:"rule"`
+		Source   string          `json:"source"`
+		Reason   string          `json:"reason"`
+		Subject  string          `json:"subject"`
+		Confined string          `json:"confined"`
+		Args     json.RawMessage `json:"args"`
 	} `json:"want"`
 }
 
@@ -287,17 +307,24 @@ func runDecisionCase(t *testing.T, defaults map[string]corpusMatcher, tc decisio
 	// writes out what they answer for each call, found by its
 	// arguments.
 	type answer struct {
-		subjects *[]corpusSubject
-		err      string
-		confined *string
+		subjects    *[]corpusSubject
+		err         string
+		confined    *string
+		facts       *corpusFacts
+		constraints []corpusSubject
+		cerr        string
 	}
 	answers := map[string]answer{}
+	// A tool claims facts when a call of it in the case says what it
+	// claims; its other calls claim the call itself.
+	claims := map[string]bool{}
 	for _, c := range all {
 		key := c.Tool + "\x00" + c.args(t)
 		if _, dup := answers[key]; dup {
 			t.Fatalf("two calls of %s with %s: a case's calls need distinct arguments", c.Tool, c.args(t))
 		}
-		answers[key] = answer{c.Subjects, c.SubjectsError, c.Confined}
+		answers[key] = answer{c.Subjects, c.SubjectsError, c.Confined, c.Facts, c.Constraints, c.ConstraintsError}
+		claims[c.Tool] = claims[c.Tool] || c.Facts != nil
 	}
 
 	specs := tc.Matchers
@@ -332,13 +359,33 @@ func runDecisionCase(t *testing.T, defaults map[string]corpusMatcher, tc decisio
 			return tool
 		}
 		run := func(context.Context, struct{}) (string, error) { return "", nil }
-		tool := agenttool.New(name, name, run, agenttool.WithConfined(func(_ context.Context, args json.RawMessage) (bool, string) {
+		opts := []agenttool.Option{agenttool.WithConfined(func(_ context.Context, args json.RawMessage) (bool, string) {
 			a := answers[name+"\x00"+string(args)]
 			if a.confined == nil {
 				return false, ""
 			}
 			return true, *a.confined
-		}))
+		})}
+		if claims[name] {
+			opts = append(opts, agenttool.WithFacts(func(_ context.Context, args json.RawMessage) (agenttool.Facts, error) {
+				f := answers[name+"\x00"+string(args)].facts
+				if f == nil {
+					return agenttool.Facts{}, nil
+				}
+				if f.Error != "" {
+					return agenttool.Facts{}, errors.New(f.Error)
+				}
+				out := agenttool.Facts{Rewrite: f.Rewrite, Hint: f.Hint}
+				if f.Calls != nil {
+					out.Calls = []agenttool.FactCall{}
+					for _, c := range *f.Calls {
+						out.Calls = append(out.Calls, agenttool.FactCall{Tool: c.Tool, Args: c.Args, Text: c.Text})
+					}
+				}
+				return out, nil
+			}))
+		}
+		tool := agenttool.New(name, name, run, opts...)
 		tools[name] = tool
 		return tool
 	}
@@ -374,6 +421,19 @@ func runDecisionCase(t *testing.T, defaults map[string]corpusMatcher, tc decisio
 	if tc.Aliases != nil {
 		opts = append(opts, WithAliases(tc.Aliases))
 	}
+	// The constraint source is the host's; the corpus writes out what it
+	// answers for each call.
+	opts = append(opts, WithConstraints(func(_ context.Context, info agentturn.ToolCallInfo) ([]Subject, error) {
+		a := answers[info.Call.Name+"\x00"+string(info.Args)]
+		if a.cerr != "" {
+			return nil, errors.New(a.cerr)
+		}
+		var out []Subject
+		for _, s := range a.constraints {
+			out = append(out, Subject{Args: s.Args, Text: s.Text, Tool: s.Tool, Constrain: s.Constrain})
+		}
+		return out, nil
+	}))
 	e, err := Build(p, matchers, opts...)
 	if tc.BuildError != "" {
 		want, ok := buildErrors[tc.BuildError]
@@ -456,6 +516,9 @@ func runDecisionCase(t *testing.T, defaults map[string]corpusMatcher, tc decisio
 			if d.Action != v.Action || d.Reason != v.Reason || d.By != ByPolicy {
 				t.Errorf("%s %s: decision %+v does not carry the verdict %+v", c.Tool, fcs[i].Arguments, d, v)
 			}
+			if !jsonEqual(d.Args, w.Args) {
+				t.Errorf("%s %s: the call runs with %s, want %s", c.Tool, fcs[i].Arguments, d.Args, w.Args)
+			}
 			if v.RunID != "run_1" || v.Turn != turn || v.CallID != fcs[i].CallID || v.Tool != c.Tool || v.By != ByPolicy {
 				t.Errorf("%s %s: verdict names %q %d %q %q %q", c.Tool, fcs[i].Arguments, v.RunID, v.Turn, v.CallID, v.Tool, v.By)
 			}
@@ -486,4 +549,17 @@ func runDecisionCase(t *testing.T, defaults map[string]corpusMatcher, tc decisio
 			t.Errorf("Filter(%q) = %q, want %q", tc.Offer.Tools, got, tc.Offer.Want)
 		}
 	}
+}
+
+// jsonEqual reports whether two JSON values are equal as values, an
+// absent one equal only to another.
+func jsonEqual(a, b json.RawMessage) bool {
+	if len(a) == 0 || len(b) == 0 {
+		return len(a) == len(b)
+	}
+	var x, y any
+	if json.Unmarshal(a, &x) != nil || json.Unmarshal(b, &y) != nil {
+		return false
+	}
+	return reflect.DeepEqual(x, y)
 }

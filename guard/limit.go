@@ -12,7 +12,7 @@ import (
 // which is what a server sees: a request carrying a hundred kilobytes
 // of AGENTS.md and one short message is a hundred kilobytes.
 func Limit(maxBytes int) Guard {
-	return New("limit", func(_ context.Context, subject any) (Verdict, error) {
+	return ReadOnly(New("limit", func(_ context.Context, subject any) (Verdict, error) {
 		items, ok := items(subject)
 		if !ok {
 			return allow, nil
@@ -26,5 +26,5 @@ func Limit(maxBytes int) Guard {
 			return block(fmt.Sprintf("%s is %d bytes, over the %d byte limit", noun(subject), size, maxBytes)), nil
 		}
 		return allow, nil
-	})
+	}))
 }

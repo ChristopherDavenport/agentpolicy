@@ -20,11 +20,14 @@ import (
 // the batch. It then decides each call from them, by the rule a release
 // at the run's end follows ([Engine.Release]):
 //
-//   - a call the person was asked about is decided as they answered,
-//     by human: allowed, with what they said reaching the model after
-//     the batch's outputs, or refused with the rule and what they said.
-//     The answer stands for the call however its own decision reads it,
-//     unless the policy denies the call, which no answer overrides;
+//   - a call that was asked about is decided as the answer says, by
+//     the decider the answer names (agenttool.Answer.By), ByHuman when
+//     it names none: allowed, with what the answerer said reaching the
+//     model after the batch's outputs, or refused with the rule and
+//     what they said. The answer stands for the call however its own
+//     decision reads it, unless the policy denies the call, which no
+//     answer overrides. An answer naming a decider the session format
+//     does not know is no answer, and the call is deferred as below;
 //   - a call the policy allowed and the ask held beside it is released
 //     once every call of its batch that asked is answered, accepted or
 //     declined, since a plain decline refuses its own call alone; it is
@@ -241,13 +244,12 @@ func (e *Engine) askBatchFor(ctx context.Context, a active, info agentturn.ToolC
 			continue
 		}
 		sib := agentturn.ToolCallInfo{RunID: info.RunID, Turn: info.Turn, Call: c, Tool: e.sibling(ctx, c.Name), Args: callArgs(c), Batch: info.Batch, Index: i}
-		var v Verdict
-		out, failed, err := e.evaluate(ctx, a, sib, &v)
+		r, read := e.readSibling(ctx, a, info, batchKey(info, a.gen, a.scope), i)
 		switch {
-		case err != nil || failed:
+		case !read:
 			asks[i] = true
-		case v.Action == agentturn.Defer:
-			asks[i], answers[i] = true, askCall(ctx, sib, v, out)
+		case r.verdict.Action == agentturn.Defer:
+			asks[i], answers[i] = true, askCall(ctx, sib, r.verdict, r.out)
 		}
 	}
 

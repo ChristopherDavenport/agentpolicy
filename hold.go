@@ -49,6 +49,7 @@ func (e *Engine) Forget(runID string) {
 	delete(e.deferred, runID)
 	delete(e.answering, runID)
 	e.dropAsked(runID)
+	e.dropBatches(runID)
 }
 
 // Runs returns the runs the engine is holding deferred calls for, so a
@@ -347,6 +348,7 @@ func (e *Engine) Resumed(ctx context.Context, end *agentturn.RunEnd, answers []a
 		e.moveCalls(end.RunID, next.RunID, still)
 	}
 	e.dropAsked(end.RunID)
+	e.dropBatches(end.RunID)
 	e.mu.Unlock()
 	for _, approved := range reviewed {
 		e.note(approved)

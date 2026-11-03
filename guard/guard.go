@@ -43,8 +43,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
+	"slices"
 
 	"github.com/ChristopherDavenport/agentpolicy"
+	"github.com/ChristopherDavenport/agenttool"
 	"github.com/ChristopherDavenport/agentturn"
 	"github.com/ChristopherDavenport/openresponses"
 )
@@ -74,12 +77,59 @@ type Input struct {
 // arguments, a reasoning summary.
 type Output struct {
 	Response *openresponses.Response
-	// Final is set when the model called no tools, so the response is
-	// the run's answer unless a queued follow-up keeps it going, as
-	// agentturn.TurnInfo.Final says. A guard over the answer passes a
-	// turn that is not one rather than judging, and paying for, a turn
-	// that produced nothing but tool calls.
+	// Results are the turn's tool results in the model's order, as
+	// agentturn.TurnInfo.ToolResults carries them; empty when the model
+	// called no tools.
+	Results []agenttool.Result
+	// Final is set when the turn is the run's answer: the model called
+	// no tools, as agentturn.TurnInfo.Final says, and the response is
+	// the answer unless a queued follow-up keeps the run going; or one
+	// of its results ends the run, its Terminate set, as the tool
+	// answering for the model, and the outputs of the results that end
+	// the run are the answer, [Output.Answer]. A guard over the answer
+	// passes a turn that is not one rather than judging, and paying
+	// for, a turn that produced nothing but tool calls.
 	Final bool
+}
+
+// Answer returns the outputs of the results that end the run, each as
+// a function call output with the call ID of the call it answers, the
+// function calls of the response taken in order: the run's answer when
+// a terminating tool answered for the model, which both fronts serve
+// as the answer. It is nil for a turn no result ends. A guard over the
+// answer judges these as it judges a final message, and the reference
+// guards read them among the output's items.
+func (o Output) Answer() openresponses.Items {
+	var calls []*openresponses.FunctionCall
+	if o.Response != nil {
+		for _, item := range o.Response.Output {
+			if c, ok := item.(*openresponses.FunctionCall); ok {
+				calls = append(calls, c)
+			}
+		}
+	}
+	var out openresponses.Items
+	for i, r := range o.Results {
+		if !r.Terminate {
+			continue
+		}
+		id := ""
+		if i < len(calls) {
+			id = calls[i].CallID
+		}
+		out = append(out, &openresponses.FunctionCallOutput{CallID: id, Output: r.Output})
+	}
+	return out
+}
+
+// terminates reports whether any of results ends the run.
+func terminates(results []agenttool.Result) bool {
+	for _, r := range results {
+		if r.Terminate {
+			return true
+		}
+	}
+	return false
 }
 
 // Message is the subject of a check on one assistant message as the
@@ -107,6 +157,18 @@ type Verdict struct {
 	// rewrites the items. nil keeps them, and "" sends none. It is
 	// ignored for a Message, an Output and on a Block.
 	Instructions *string
+	// Quarantine, for an Input, names items of the input to quarantine
+	// for the rest of the conversation, under agentturn.Quarantine:
+	// every request from this one on leaves each out, or carries a
+	// function call output as agentturn.QuarantinedOutput, and the
+	// guards after this one see the input without them. It is an allow,
+	// not a rewrite: the transcript and the record keep the items, and a
+	// verdict that sets it with Items or Instructions fails the check.
+	// Only items the loop built the request from can be named, as the
+	// guard was handed them, by pointer identity; one an earlier guard's
+	// rewrite made, or one held by value, fails the check closed. It is
+	// ignored for a Message, an Output and on a Block.
+	Quarantine openresponses.Items
 }
 
 // Guard checks one subject, an [Input], a [Message] or an [Output]. A
@@ -116,7 +178,9 @@ type Guard interface {
 	Check(ctx context.Context, subject any) (Verdict, error)
 }
 
-// New builds a Guard from a name and a function.
+// New builds a Guard from a name and a function. It says nothing of
+// whether it rewrites its subject, so a parallel [Chain] checks it in
+// sequence; [ReadOnly] marks one that never does.
 func New(name string, check func(ctx context.Context, subject any) (Verdict, error)) Guard {
 	return &funcGuard{name: name, check: check}
 }
@@ -190,6 +254,172 @@ type Chain struct {
 	// message and the fronts report a content filter. Placeholder is
 	// not used.
 	Stop bool
+	// Scope says which model calls BeforeModelCall checks: every one,
+	// the default, or only the first of a run ([FirstTurn]). The output
+	// hooks check every message and every turn whatever it says.
+	Scope Scope
+	// Parallel checks the guards that say they do not rewrite
+	// ([Rewriting], [ReadOnly]) at the same time, each run of them
+	// together, while every other guard is checked in sequence, over the
+	// subject the guards before it left, as without it. The outcome and
+	// the verdicts reported are those of checking in order: each guard's
+	// verdict is reported in chain order, the first block in chain order
+	// stands and the guards after it are not reported, and a guard still
+	// running when an earlier one blocks or fails is cancelled through
+	// its context. A guard checked beside others that rewrites anyway
+	// fails the check. It is how two model-backed judges cost the
+	// latency of one.
+	Parallel bool
+}
+
+// Scope is which model calls a chain's BeforeModelCall checks.
+type Scope int
+
+const (
+	// EveryCall checks the input of every model call.
+	EveryCall Scope = iota
+	// FirstTurn checks the input of the first model call of a run, the
+	// turn agentturn.TurnFromContext gives being 1 (or 0, outside a
+	// turn), and not in a run a handoff started, one whose
+	// agentturn.TriggerFromContext is of kind "handoff": what the run
+	// was started with is checked once, as the Agents SDK runs its
+	// input guardrails on the starting agent's first turn. Later turns
+	// add tool outputs and the model's own items, which a chain that
+	// must judge them checks on every call.
+	FirstTurn
+)
+
+// firstTurn reports whether ctx is a hook's on the first model call of
+// a run no handoff started.
+func firstTurn(ctx context.Context) bool {
+	return agentturn.TurnFromContext(ctx) <= 1 && agentturn.TriggerFromContext(ctx).Kind != "handoff"
+}
+
+// Rewriting is implemented by a guard that says whether it may change
+// its subject: rewrite an input's items or instructions or a message,
+// or quarantine input items. A [Chain] that sets Parallel checks a
+// guard that says it does not at the same time as its neighbours, and
+// any other in sequence. The reference guards say what they do: Limit,
+// Deny and Secrets do not rewrite, Redact does.
+type Rewriting interface {
+	Rewrites() bool
+}
+
+// ReadOnly returns g saying it never rewrites its subject, so a
+// parallel [Chain] checks it beside the guards around it that say so
+// too. A guard so marked that rewrites when checked beside others fails
+// the check.
+func ReadOnly(g Guard) Guard { return readOnly{g} }
+
+type readOnly struct{ Guard }
+
+func (readOnly) Rewrites() bool { return false }
+
+// rewriter is a guard saying it may rewrite.
+type rewriter struct{ Guard }
+
+func (rewriter) Rewrites() bool { return true }
+
+// alongside reports whether a parallel chain may check g beside other
+// guards: it says it never rewrites.
+func alongside(g Guard) bool {
+	r, ok := g.(Rewriting)
+	return ok && !r.Rewrites()
+}
+
+// changes reports whether a verdict changes its subject.
+func changes(v Verdict) bool {
+	return v.Action == agentturn.Allow && (v.Items != nil || v.Instructions != nil || len(v.Quarantine) > 0)
+}
+
+// quarantine quarantines the items v names, as [Verdict.Quarantine]
+// says, when each is one of built, the items the loop built the
+// request from, and v rewrites nothing; beside says the guard was
+// checked beside others, where it may not. The error is the refusal's
+// cause.
+func quarantine(ctx context.Context, v Verdict, built openresponses.Items, beside bool) error {
+	if beside {
+		return errors.New("a guard checked beside others quarantined")
+	}
+	if v.Items != nil || v.Instructions != nil {
+		return errors.New("a quarantine is not a rewrite")
+	}
+	for _, item := range v.Quarantine {
+		if !slices.ContainsFunc(built, func(b openresponses.Item) bool { return sameItem(b, item) }) {
+			return errors.New("an item the loop did not build the request from")
+		}
+	}
+	return agentturn.Quarantine(ctx, v.Quarantine...)
+}
+
+// sameItem reports whether two items are one, by pointer identity: an
+// item held by value is never the same as any, since == on one whose
+// field holds a value that cannot be compared panics, so it cannot be
+// quarantined.
+func sameItem(a, b openresponses.Item) bool {
+	if a == nil || b == nil {
+		return false
+	}
+	ta := reflect.TypeOf(a)
+	return ta == reflect.TypeOf(b) && ta.Kind() == reflect.Pointer && a == b
+}
+
+// checked is one guard's answer.
+type checked struct {
+	v   Verdict
+	err error
+}
+
+// checks checks the chain's guards and hands each answer to step in
+// chain order, with whether the guard was checked beside others; step
+// returns true to end the check, with what the hook returns. Each guard
+// is given subject() as it starts. In sequence, a guard starts once
+// step has taken the answer before it; under Parallel, a run of guards
+// that say they do not rewrite starts together over one subject, and
+// once step ends the check the rest of the run is cancelled.
+func (c Chain) checks(ctx context.Context, subject func() any, step func(g Guard, a checked, beside bool) (bool, error)) error {
+	for i := 0; i < len(c.Guards); {
+		j := i + 1
+		if c.Parallel && alongside(c.Guards[i]) {
+			for j < len(c.Guards) && alongside(c.Guards[j]) {
+				j++
+			}
+		}
+		if j-i == 1 {
+			v, err := c.Guards[i].Check(ctx, subject())
+			if done, err := step(c.Guards[i], checked{v, err}, false); done {
+				return err
+			}
+			i = j
+			continue
+		}
+		run, cancel := context.WithCancel(ctx)
+		s := subject()
+		answers := make([]chan checked, j-i)
+		for k := range answers {
+			answers[k] = make(chan checked, 1)
+			go func(g Guard, out chan<- checked) {
+				v, err := g.Check(run, s)
+				out <- checked{v, err}
+			}(c.Guards[i+k], answers[k])
+		}
+		for k := range answers {
+			a := <-answers[k]
+			if done, err := step(c.Guards[i+k], a, true); done {
+				cancel()
+				return err
+			}
+		}
+		cancel()
+		i = j
+	}
+	return nil
+}
+
+// together is the error of a guard checked beside others that changed
+// its subject.
+func together(g Guard) error {
+	return fmt.Errorf("agentpolicy/guard: %s: rewrote a subject it was checked on beside other guards", g.Name())
 }
 
 // BeforeModelCall returns the hook value for agentturn.Config. A Block
@@ -201,13 +431,38 @@ type Chain struct {
 // error.
 func (c Chain) BeforeModelCall() func(context.Context, *openresponses.Request) error {
 	return func(ctx context.Context, req *openresponses.Request) error {
-		runID := agentturn.RunIDFromContext(ctx)
-		for _, g := range c.Guards {
-			v, err := g.Check(ctx, Input{Items: req.Input, Instructions: req.Instructions})
+		if c.Scope == FirstTurn && !firstTurn(ctx) {
+			return nil
+		}
+		runID, turn := agentturn.RunIDFromContext(ctx), agentturn.TurnFromContext(ctx)
+		// The items the loop built the request from, the only ones a
+		// guard may quarantine.
+		built := slices.Clone(req.Input)
+		subject := func() any { return Input{Items: req.Input, Instructions: req.Instructions} }
+		return c.checks(ctx, subject, func(g Guard, a checked, beside bool) (bool, error) {
+			v, err := a.v, a.err
 			if err != nil {
-				return c.fail(ctx, agentpolicy.Verdict{RunID: runID, Guard: g.Name()}, err)
+				return true, c.fail(ctx, agentpolicy.Verdict{RunID: runID, Turn: turn, Guard: g.Name()}, err)
 			}
-			c.observe(ctx, agentpolicy.Verdict{RunID: runID, Guard: g.Name(), Action: v.Action, Reason: v.Reason})
+			held := v.Action == agentturn.Allow && len(v.Quarantine) > 0
+			if beside && changes(v) && !held {
+				return true, together(g)
+			}
+			if held {
+				if err := quarantine(ctx, v, built, beside); err != nil {
+					// The refusal is the guard's verdict, a block, and
+					// fails the run: the items it named reach the model
+					// otherwise.
+					reason := "quarantine refused: " + err.Error()
+					c.observe(ctx, agentpolicy.Verdict{RunID: runID, Turn: turn, Guard: g.Name(), Action: agentturn.Block, Reason: reason, Quarantined: slices.Clone(v.Quarantine)})
+					return true, fmt.Errorf("agentpolicy/guard: %s: %s", g.Name(), reason)
+				}
+			}
+			verdict := agentpolicy.Verdict{RunID: runID, Turn: turn, Guard: g.Name(), Action: v.Action, Reason: v.Reason}
+			if held {
+				verdict.Quarantined = slices.Clone(v.Quarantine)
+			}
+			c.observe(ctx, verdict)
 			switch v.Action {
 			case agentturn.Allow:
 				if v.Items != nil {
@@ -216,13 +471,18 @@ func (c Chain) BeforeModelCall() func(context.Context, *openresponses.Request) e
 				if v.Instructions != nil {
 					req.Instructions = *v.Instructions
 				}
+				if held {
+					// The guards after see the input as the request will
+					// carry it.
+					req.Input = agentturn.QuarantineFromContext(ctx).Apply(req.Input)
+				}
+				return false, nil
 			case agentturn.Block:
-				return &BlockedError{Guard: g.Name(), Subject: "input", Reason: v.Reason}
+				return true, &BlockedError{Guard: g.Name(), Subject: "input", Reason: v.Reason}
 			default:
-				return fmt.Errorf("agentpolicy/guard: %s: Defer is not valid for content", g.Name())
+				return true, fmt.Errorf("agentpolicy/guard: %s: Defer is not valid for content", g.Name())
 			}
-		}
-		return nil
+		})
 	}
 }
 
@@ -242,25 +502,30 @@ func (c Chain) BeforeModelCall() func(context.Context, *openresponses.Request) e
 func (c Chain) OutputGuard() func(context.Context, agentturn.OutputInfo) (*openresponses.Message, error) {
 	return func(ctx context.Context, info agentturn.OutputInfo) (*openresponses.Message, error) {
 		msg, replaced := info.Message, false
-		for _, g := range c.Guards {
-			v, err := g.Check(ctx, Message{Message: msg})
+		var placeholder *openresponses.Message
+		err := c.checks(ctx, func() any { return Message{Message: msg} }, func(g Guard, a checked, beside bool) (bool, error) {
+			v, err := a.v, a.err
 			if err != nil {
-				return nil, c.fail(ctx, agentpolicy.Verdict{RunID: info.RunID, Turn: info.Turn, Guard: g.Name()}, err)
+				return true, c.fail(ctx, agentpolicy.Verdict{RunID: info.RunID, Turn: info.Turn, Guard: g.Name()}, err)
+			}
+			if beside && changes(v) {
+				return true, together(g)
 			}
 			c.observe(ctx, agentpolicy.Verdict{RunID: info.RunID, Turn: info.Turn, Guard: g.Name(), Action: v.Action, Reason: v.Reason})
 			switch v.Action {
 			case agentturn.Allow:
 				if v.Items == nil {
-					continue
+					return false, nil
 				}
 				m, ok := message(v.Items)
 				if !ok {
-					return nil, fmt.Errorf("agentpolicy/guard: %s: a rewrite of a message must be one message", g.Name())
+					return true, fmt.Errorf("agentpolicy/guard: %s: a rewrite of a message must be one message", g.Name())
 				}
 				msg, replaced = m, true
+				return false, nil
 			case agentturn.Block:
 				if c.Stop {
-					return nil, &BlockedError{Guard: g.Name(), Subject: "message", Reason: v.Reason}
+					return true, &BlockedError{Guard: g.Name(), Subject: "message", Reason: v.Reason}
 				}
 				build := c.Placeholder
 				if build == nil {
@@ -269,12 +534,18 @@ func (c Chain) OutputGuard() func(context.Context, agentturn.OutputInfo) (*openr
 				// The placeholder is built from the message as the chain
 				// left it, not as the model produced it: a guard before
 				// this one may have redacted what this one must not see.
-				return build(msg, g.Name(), v.Reason), nil
+				placeholder = build(msg, g.Name(), v.Reason)
+				return true, nil
 			default:
-				return nil, fmt.Errorf("agentpolicy/guard: %s: Defer is not valid for content", g.Name())
+				return true, fmt.Errorf("agentpolicy/guard: %s: Defer is not valid for content", g.Name())
 			}
-		}
-		if replaced {
+		})
+		switch {
+		case err != nil:
+			return nil, err
+		case placeholder != nil:
+			return placeholder, nil
+		case replaced:
 			return msg, nil
 		}
 		return nil, nil
@@ -302,21 +573,25 @@ func Withheld(withheld *openresponses.Message, guard, reason string) *openrespon
 // defers fails the run with its error.
 func (c Chain) ShouldStopAfterTurn() func(context.Context, agentturn.TurnInfo) (bool, error) {
 	return func(ctx context.Context, info agentturn.TurnInfo) (bool, error) {
-		for _, g := range c.Guards {
-			v, err := g.Check(ctx, Output{Response: info.Response, Final: info.Final})
+		out := Output{Response: info.Response, Results: info.ToolResults, Final: info.Final || terminates(info.ToolResults)}
+		stop := false
+		err := c.checks(ctx, func() any { return out }, func(g Guard, a checked, _ bool) (bool, error) {
+			v, err := a.v, a.err
 			if err != nil {
-				return false, c.fail(ctx, agentpolicy.Verdict{RunID: info.RunID, Turn: info.Turn, Guard: g.Name()}, err)
+				return true, c.fail(ctx, agentpolicy.Verdict{RunID: info.RunID, Turn: info.Turn, Guard: g.Name()}, err)
 			}
 			c.observe(ctx, agentpolicy.Verdict{RunID: info.RunID, Turn: info.Turn, Guard: g.Name(), Action: v.Action, Reason: v.Reason})
 			switch v.Action {
 			case agentturn.Allow:
+				return false, nil
 			case agentturn.Block:
+				stop = true
 				return true, &BlockedError{Guard: g.Name(), Subject: "output", Reason: v.Reason}
 			default:
-				return false, fmt.Errorf("agentpolicy/guard: %s: Defer is not valid for content", g.Name())
+				return true, fmt.Errorf("agentpolicy/guard: %s: Defer is not valid for content", g.Name())
 			}
-		}
-		return false, nil
+		})
+		return stop, err
 	}
 }
 
@@ -370,7 +645,9 @@ func block(reason string) Verdict {
 }
 
 // items returns the items a subject carries: the input, the message,
-// or the response's output.
+// or the response's output followed by the answer a terminating tool
+// gave, so a guard over the output reads the run's answer however the
+// run gave it.
 func items(subject any) (openresponses.Items, bool) {
 	switch s := subject.(type) {
 	case Input:
@@ -381,10 +658,14 @@ func items(subject any) (openresponses.Items, bool) {
 		}
 		return openresponses.Items{s.Message}, true
 	case Output:
-		if s.Response == nil {
-			return nil, true
+		var out openresponses.Items
+		if s.Response != nil {
+			out = s.Response.Output
 		}
-		return s.Response.Output, true
+		if answer := s.Answer(); answer != nil {
+			out = append(append(openresponses.Items(nil), out...), answer...)
+		}
+		return out, true
 	}
 	return nil, false
 }

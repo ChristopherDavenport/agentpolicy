@@ -119,6 +119,142 @@
       "build_error": "tool_glob"
     },
     {
+      "name": "a server glob is honoured in the allow list",
+      "policy": {"allow": "mcp__gh__*", "deny": "mcp__gh__delete", "default": "ask"},
+      "calls": [
+        {"tool": "mcp__gh__create_pr", "args": {}, "want": {"action": "allow", "rule": "mcp__gh__*", "reason": "allowed by mcp__gh__*"}},
+        {"tool": "mcp__ghx__a", "args": {}, "want": {"action": "defer", "reason": "no rule allows mcp__ghx__a: approval required by default"}},
+        {"tool": "mcp__gh___a", "args": {}, "want": {"action": "defer", "reason": "no rule allows mcp__gh___a: approval required by default"}},
+        {"tool": "mcp__gh__delete", "args": {}, "want": {"action": "block", "rule": "mcp__gh__delete", "reason": "denied by mcp__gh__delete"}}
+      ]
+    },
+    {
+      "name": "a server glob in the deny list denies a name its rest begins with _, and in the allow list does not allow it",
+      "policy": {"allow": "mcp__ok__*", "deny": "mcp__gh__*", "default": "ask"},
+      "calls": [
+        {"tool": "mcp__gh___x", "args": {}, "want": {"action": "block", "rule": "mcp__gh__*", "reason": "denied by mcp__gh__*"}},
+        {"tool": "mcp__ok___x", "args": {}, "want": {"action": "defer", "reason": "no rule allows mcp__ok___x: approval required by default"}},
+        {"tool": "mcp__ok__y", "args": {}, "want": {"action": "allow", "rule": "mcp__ok__*", "reason": "allowed by mcp__ok__*"}}
+      ],
+      "offer": {"tools": ["mcp__gh___x", "mcp__ok___x"], "want": ["mcp__ok___x"]}
+    },
+    {
+      "name": "a glob over several servers is refused in the allow list",
+      "policy": {"allow": "mcp__gh*", "default": "ask"},
+      "build_error": "tool_glob"
+    },
+    {
+      "name": "a server glob with an empty server is refused in the allow list",
+      "policy": {"allow": "mcp____*", "default": "ask"},
+      "build_error": "tool_glob"
+    },
+    {
+      "name": "a server glob whose server holds __ is refused in the allow list",
+      "policy": {"allow": "mcp__a__b__*", "default": "ask"},
+      "build_error": "tool_glob"
+    },
+    {
+      "name": "a server glob whose server ends in _ is refused in the allow list",
+      "policy": {"allow": "mcp__gh___*", "default": "ask"},
+      "build_error": "tool_glob"
+    },
+    {
+      "name": "a server glob takes no specifier",
+      "policy": {"allow": "mcp__gh__*(x)", "default": "ask"},
+      "build_error": "tool_glob"
+    },
+    {
+      "name": "a grant set's server glob is refused only by a rule naming every tool it names",
+      "policy": {
+        "sources": [
+          {"name": "managed", "rank": 3, "trusted": true, "deny": "mcp__gh__delete", "ask": "mcp__lin*"}
+        ],
+        "default": "ask"
+      },
+      "grants": [
+        {"source": {"name": "skill:gh", "rank": 1, "trusted": true}, "allow": "mcp__gh__* mcp__linear__* mcp__*",
+         "granted": ["mcp__gh__*"],
+         "refused": [
+           {"rule": "mcp__linear__*", "reason": "mcp__lin* from managed outranks the grant"},
+           {"rule": "mcp__*", "reason": "agentpolicy: tool-name glob: mcp__* is not honoured in the allow list"}
+         ]}
+      ],
+      "calls": [
+        {"tool": "mcp__gh__create_pr", "args": {}, "want": {"action": "allow", "rule": "mcp__gh__*", "source": "skill:gh", "reason": "allowed by mcp__gh__*"}},
+        {"tool": "mcp__gh__delete", "args": {}, "want": {"action": "block", "rule": "mcp__gh__delete", "source": "managed", "reason": "denied by mcp__gh__delete"}},
+        {"tool": "mcp__linear__list", "args": {}, "want": {"action": "defer", "rule": "mcp__lin*", "source": "managed", "reason": "approval required by mcp__lin*"}}
+      ]
+    },
+    {
+      "name": "a claim splits a call whose tool has no splitter, and a claimed call of another tool borrows none of its allows",
+      "policy": {"allow": "read(src:*) shell", "deny": "read(.env)", "default": "ask"},
+      "calls": [
+        {"tool": "shell", "args": {"command": "cat .env"}, "facts": {"calls": [{"tool": "read", "args": {"path": ".env"}, "text": "read .env"}]},
+         "want": {"action": "block", "rule": "read(.env)", "reason": "denied by read(.env) on \"read .env\"; nothing in this command ran", "subject": "read .env"}},
+        {"tool": "shell", "args": {"command": "cat src/a.go && ls"}, "facts": {"calls": [{"tool": "read", "args": {"path": "src/a.go"}, "text": "read src/a.go"}, {"tool": "shell", "args": {"command": "ls"}, "text": "ls"}]},
+         "want": {"action": "defer", "reason": "no rule allows claim of read by shell: approval required by default", "subject": "read src/a.go"}},
+        {"tool": "shell", "args": {"command": "ls src"}, "facts": {"calls": [{"args": {"command": "ls src"}, "text": "ls src"}]},
+         "want": {"action": "allow", "rule": "shell", "reason": "allowed by shell", "subject": "ls src"}},
+        {"tool": "shell", "args": {"command": "true"}, "facts": {},
+         "want": {"action": "allow", "rule": "shell", "reason": "allowed by shell"}}
+      ]
+    },
+    {
+      "name": "a claim of nothing, or an error, blocks the call",
+      "policy": {"allow": "shell", "default": "allow"},
+      "calls": [
+        {"tool": "shell", "args": {"command": "eval x"}, "facts": {"calls": []},
+         "want": {"action": "block", "reason": "shell call could not be evaluated: facts claim returned no calls"}},
+        {"tool": "shell", "args": {"command": "broken"}, "facts": {"error": "executor unreachable"},
+         "want": {"action": "block", "reason": "shell call could not be evaluated: executor unreachable"}}
+      ]
+    },
+    {
+      "name": "hints are constraints after the call itself",
+      "policy": {"allow": "read shell", "ask": "read(.env)", "default": "ask"},
+      "calls": [
+        {"tool": "shell", "args": {"command": "peek .env"}, "facts": {"hint": true, "calls": [{"tool": "read", "args": {"path": ".env"}, "text": "read .env"}]},
+         "want": {"action": "defer", "rule": "read(.env)", "reason": "approval required by read(.env)", "subject": "read .env"}},
+        {"tool": "shell", "args": {"command": "peek README"}, "facts": {"hint": true, "calls": [{"tool": "read", "args": {"path": "README"}, "text": "read README"}]},
+         "want": {"action": "allow", "rule": "shell", "reason": "allowed by shell"}},
+        {"tool": "web", "args": {"url": "x"}, "facts": {"hint": true, "calls": [{"tool": "read", "args": {"path": "src/x"}, "text": "read src/x"}]},
+         "want": {"action": "defer", "reason": "no rule allows web: approval required by default"}}
+      ]
+    },
+    {
+      "name": "a claim's rewrite is what the call runs with, and a hint's is not",
+      "policy": {"allow": "shell", "default": "ask"},
+      "calls": [
+        {"tool": "shell", "args": {"command": "make"}, "facts": {"rewrite": {"command": "make", "plan": "p1"}},
+         "want": {"action": "allow", "rule": "shell", "reason": "allowed by shell", "args": {"command": "make", "plan": "p1"}}},
+        {"tool": "shell", "args": {"command": "make all"}, "facts": {"hint": true, "rewrite": {"command": "rm -rf /"}},
+         "want": {"action": "allow", "rule": "shell", "reason": "allowed by shell"}}
+      ]
+    },
+    {
+      "name": "a claim's rewrite is decided with its own confinement",
+      "policy": {"allow": "read", "ask": "shell", "default": "ask"},
+      "calls": [
+        {"tool": "shell", "args": {"command": "make"}, "confined": "box", "facts": {"rewrite": {"command": "make", "sandbox": "off"}},
+         "want": {"action": "defer", "rule": "shell", "reason": "approval required by shell", "args": {"command": "make", "sandbox": "off"}}}
+      ]
+    },
+    {
+      "name": "a constraint source's subjects hold every call and never allow one",
+      "policy": {"allow": "tainted send fetch trusted", "ask": "tainted", "default": "deny"},
+      "calls": [
+        {"tool": "send", "args": {"to": "a"}, "want": {"action": "allow", "rule": "send", "reason": "allowed by send"}},
+        {"tool": "send", "args": {"to": "b"}, "constraints": [{"tool": "tainted", "args": {}, "text": "untrusted content is in context"}],
+         "want": {"action": "defer", "rule": "tainted", "reason": "approval required by tainted", "subject": "untrusted content is in context"}},
+        {"tool": "fetch", "args": {"url": "x"}, "constraints": [{"tool": "tainted", "args": {"x": 1}, "text": "t", "constrain": false}],
+         "want": {"action": "defer", "rule": "tainted", "reason": "approval required by tainted", "subject": "t"}},
+        {"tool": "other", "args": {}, "constraints": [{"tool": "trusted", "args": {}, "text": "a trusted source"}],
+         "want": {"action": "block", "reason": "no rule allows other: denied by default"}},
+        {"tool": "fetch", "args": {"url": "y"}, "constraints_error": "taint store unreachable",
+         "want": {"action": "block", "reason": "fetch call could not be evaluated: taint store unreachable"}}
+      ]
+    },
+    {
       "name": "a tool-name glob denies and removes the tool",
       "policy": {"deny": "mcp__github__*", "ask": "mcp__*", "default": "allow"},
       "calls": [

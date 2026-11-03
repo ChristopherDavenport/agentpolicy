@@ -1,6 +1,6 @@
 # RFC 0001: Agent Policy
 
-Status: draft 0.2
+Status: draft 0.3
 Author: Christopher Davenport
 Discussion: to be opened against this repository. The Go module at its
 root is the reference binding. agentturn RFC 0001 is the loop whose
@@ -117,6 +117,8 @@ RFC 2119.
   matches on its own; it cancels a match of another rule.
 - **Tool-name glob**: a rule whose tool name contains `*`, naming every
   tool whose name it matches.
+- **Server glob**: the tool-name glob `mcp__S__*` naming every tool of
+  one MCP server `S`, the one glob an allow list honours.
 - **List**: the deny, ask or allow rules of a policy.
 - **Policy**: three lists, a default, the sources the rules came from,
   and the allow rules withheld from untrusted sources.
@@ -205,6 +207,20 @@ stands for any run of characters, the empty run included, at any
 position; every other character stands for itself. `mcp__*` names
 every tool of every MCP server.
 
+A **server glob** is a tool-name glob `mcp__S__*`, where `S` is not
+empty, contains neither `*` nor `__`, and neither begins nor ends with
+`_`. In the allow list it names every tool whose name begins `mcp__S__`
+and whose rest does not begin with `_`, which is every tool of the MCP
+server `S` under the `mcp__<server>__<tool>` naming the reference
+agents use, and no tool of a server `S_`, whose tools begin
+`mcp__S___`. In the deny and ask lists, and for the offer, it is the
+full glob and names every name that begins `mcp__S__`, so the
+exclusion narrows only what an allow grants and never lets a tool
+through a rule that restricts. A host MUST refuse a server name that
+begins or ends with `_`, so a tool name never reads as two servers'. A host whose
+settings write a server as `mcp__S`, as the reference agent's do, reads
+it as `mcp__S__*`.
+
 A rule MAY carry a **note**, a sentence saying why it exists. The note
 is not part of the grammar: a parser leaves it empty, and a host's
 settings reader fills it from a comment or a field beside the rule.
@@ -280,9 +296,75 @@ A splitter that fails blocks the call, with its error in the reason. A
 splitter that returns no subjects is a failure too, since a call with
 no subjects would be allowed by every rule.
 
+### Claims
+
+agenttool RFC 0001 lets a tool claim, per call, what the call would
+touch: its **facts**, calls in tool-call terms, a rewrite, and whether
+they are hints from a source the host does not trust. A policy layer is
+the reader it names. A call whose tool claims facts, for which the host
+registered no splitter, is split by the claim:
+
+- each claimed call of the called tool, naming it or no tool, is an
+  ordinary subject with the claim's text;
+- a claimed call naming another tool `T` borrows none of `T`'s allow
+  rules: it is decided as an unknown tool, an ordinary subject of the
+  tool `claim of T by N`, `N` the called tool, which no rule's tool
+  name can be since it holds spaces, so the default decides it; and it
+  is put after that subject as a constraint under `T`, so `T`'s deny
+  and ask rules still hold it. A tool that claims to read `.env` is
+  denied by `deny read(.env)`, and is not allowed by `allow read`;
+- absent calls are the call itself;
+- an empty list, or an error, blocks the call as a failed splitter
+  does, `E` being `facts claim returned no calls` for the empty list;
+- facts that are hints are constraints, put after the call itself, so
+  they can make the call stricter and never decide it; an empty hint
+  list, or a hint's error, blocks it as a claim's does;
+- a claim's rewrite, never a hint's, is what the call runs with. It is
+  decided as a hook's rewrite is, on the claim's subjects with the
+  rewrite's confinement: the stricter of the two actions stands, and on
+  an equal one the rewrite's rule and reason. The hooks are handed the
+  rewrite, and a held call is released with it.
+
+A hint's text is written by a source the host does not trust and can
+become the verdict's subject, which a front shows the person it asks:
+a front SHOULD show a subject as the text of a claim, not as the
+harness's own words.
+
+An engine MUST read one claim per call per batch, and the hold and the
+call's own decision MUST read the same claim: a claim is kept for its
+batch by the call's position, its arguments and the tool that made it.
+A claim that failed is not kept, as a reading that failed is not. A
+hook's rewrite is a call with other arguments, whose claim is read in
+its own right and whose rewrite is not taken. A registered splitter is
+the host's override and the claim is not read for its tool. A binding
+MAY let the host turn claim reading off.
+
+### Constraint sources
+
+A constraint subject is how a host holds one tool's calls to another
+tool's asks and denies; a **constraint source** is how it holds every
+call to them, a tool it wrote no splitter for included, such as one an
+MCP server adds later. A host MAY supply constraint sources: functions
+from a call, under the decision's context, to subjects. The engine
+calls each one for every call it decides or reads as a sibling, after
+the call's own split, with the arguments being decided, a hook's
+rewrite included, and adds what it returns as constraints, whatever a
+subject says of itself. A source that fails blocks the call as a failed
+splitter does, with the reason `N call could not be evaluated: E`. A
+source's subjects can block or defer a call and never allow it. Their
+readings are cached and kept with the batch as a splitter's are.
+
+The state a source reads is the host's, kept under the grant scope of
+the decision's context: "untrusted content is in context" is a subject
+`{"tool": "tainted"}` the host returns once a call whose output is
+untrusted has run, which `ask tainted` then asks about for every tool.
+agenttool RFC 0001's flow property, a tool's labels on what it reads
+and whether it sends, is the per-tool fact a host derives such state
+from, for a tool added later as for one it built.
+
 A splitter is given the context of the decision that asked: a
 decision's, a preview's, or, when the batch hold reads a sibling, that
-of the decision being held. A splitter that asks something remote,
+of the decision being held. So is a constraint source. A splitter that asks something remote,
 such as the executor a tool runs on, is cancelled with the decision
 and keeps its deadline. A splitter that fails because that context is done
 has failed: the call is blocked.
@@ -348,7 +430,7 @@ engine. It MUST refuse, with these error kinds:
 | --- | --- | --- |
 | `no_default` | the default is unset | `agentpolicy: policy default is not set; use Allow(), Deny() or Ask()` |
 | `no_matcher` | a rule has a specifier, a carve-out's included, and its tool has no matcher | `agentpolicy: no matcher for the rule's tool: R` |
-| `tool_glob` | a tool-name glob is in the allow list | `agentpolicy: tool-name glob: R is not honoured in the allow list` |
+| `tool_glob` | a tool-name glob other than a server glob is in the allow list | `agentpolicy: tool-name glob: R is not honoured in the allow list` |
 | `tool_glob` | a tool-name glob has a specifier | `agentpolicy: tool-name glob: R takes no specifier` |
 | `invalid_rule` | a rule has no tool name, or the alias table is refused | `agentpolicy: rule "R": missing tool name` for the first |
 
@@ -364,9 +446,14 @@ checked. The default MUST be set explicitly: a deny list written on its
 own never allows everything else by accident.
 
 A tool-name glob is honoured in the deny and ask lists, where the
-reference agents honour one. It is refused in the allow list, where the
-reference refuses it too, and with a specifier, since a glob names no
-matcher to read the specifier with.
+reference agents honour one. In the allow list a server glob is
+honoured, as the reference agent allows every tool of one server, and
+every other tool-name glob is refused: one server's namespace is a
+bounded grant, while `mcp__*` or `B*` allows tools nobody has named. A
+glob with a specifier is refused in every list, a server glob's
+included, since a glob names no matcher to read the specifier with;
+when a server glob in the allow list has a specifier, the error is the
+specifier's.
 
 ## Deciding a subject
 
@@ -380,7 +467,9 @@ apply, the subject's arguments, and the call's confinement.
 A rule **fires** for a tool `T` and arguments `A`, within the list `L`
 it belongs to, when all of these hold:
 
-1. its tool name is `T`, or is a tool-name glob that matches `T`;
+1. its tool name is `T`, or is a tool-name glob that matches `T`, a
+   server glob in an allow list matching as [the grammar](#the-grammar)
+   says;
 2. it is not a carve-out;
 3. it is bare, or its tool's matcher matches its specifier against `A`;
 4. no carve-out in `L` whose tool name is the rule's tool name, and
@@ -460,13 +549,14 @@ off, so every ask rule asks.
 
 A call is decided in four steps.
 
-1. **Split.** The call's subjects are its splitter's, or the call
-   itself. A splitter that fails, or returns no subjects, blocks the
+1. **Split.** The call's subjects are its splitter's, its tool's
+   claim's (see [Claims](#claims)), or the call itself. A splitter that fails, or returns no subjects, blocks the
    call with no rule and the reason `N call could not be evaluated:
    E`, where `N` is the tool name and `E` the error, `splitter returned
    no subjects` for none. When every subject the splitter returns is a
    constraint, the call itself is put before them as an ordinary
-   subject.
+   subject. The constraint sources' subjects are added after, as
+   constraints, and a source that fails blocks the call the same way.
 2. **Fold the subjects.** Each subject is decided as the previous
    section says, and a constraint with no verdict is passed over. The
    most restrictive verdict stands, block over defer
@@ -488,7 +578,8 @@ A call is decided in four steps.
 
 The decision the loop receives carries the verdict's action and
 reason, and names the policy as its decider unless a hook that made
-the action stricter named another. A block's reason is the text the
+the action stricter, or an answering hook that allowed the call, named
+another. A block's reason is the text the
 model reads as the call's output.
 
 The same policy and the same call in the same batch MUST give the same
@@ -505,21 +596,59 @@ first:
 
 - the strictest action wins, block over defer over allow, and a block
   ends the fold;
-- a hook that makes the action stricter brings its reason and its
-  decider, `policy` when it names none, and the verdict then has no
-  rule and no subject;
+- a hook that makes the action stricter brings its reason, its decider,
+  `policy` when it names none, and its subject, the text of the part of
+  the call it decided on, and the verdict then has no rule;
+- a hook that defers a call the verdict already defers leaves the
+  verdict's action, rule and decider. When it gives a reason that the
+  verdict's reason does not already hold, the reason continues `; ` and
+  the hook's reason, and when the verdict has no subject it takes the
+  hook's. This differs from agentturn RFC 0001's chain fold, which
+  keeps the first reason on an equal action: here the person asked
+  reads why the host's hook asks as well as why the policy does;
 - the first note stands, and terminate is set when any hook sets it;
 - arguments a hook rewrites pass to the hooks after it, are what the
   call runs with, and are decided again, their confinement read from
   them: the stricter of the two actions stands, a verdict the policy
   still owns takes the rewrite's rule and reason, and the verdict's
-  confinement is the rewrite's;
+  confinement is the rewrite's, and the reasons equal deferring hooks
+  added are kept;
 - a hook's error fails the call's decision.
+
+A host MAY also register **answering hooks**, which answer the policy's
+own question rather than ask their own, as the reference agent's
+`PreToolUse` hook skips its prompt by allowing a call. When the fold of
+the policy and the ordinary hooks stands at a defer the policy's own
+verdict raised, by an ask rule or the default, the answering hooks are
+asked in order, and the first allow replaces the defer. The verdict
+then has no rule, the hook's reason and decider (`policy` when it names
+none), and the subject the policy deferred on. The defer is the
+policy's own only when no subject's defer is a constraint's, which
+holds the call to another tool's question, as `ask tainted` over a
+constraint source's subject does, and none is an ask rule's of a
+source that outranks the host's own, whose rank is 0: the host's hook
+answers no more than the host's own grant could. An answering hook
+never lifts a block, a defer an ordinary hook raised or joined, a
+defer a constraint or an outranking source's ask rule raised, or a hold: a
+call it allows is still held when another call of its batch asks, so it
+never runs beside an ask. Anything an answering hook says but an allow
+is no answer, and it rewrites nothing; its error fails the call's
+decision as an ordinary hook's does.
 
 Since the engine decides a call's siblings to decide the hold, a hook
 is called for a sibling before the loop hands it that sibling's own
 call. A hook MUST decide a call the same way however often it is
 asked, and a hook that fails for a sibling reads as asking.
+
+A binding SHOULD call each of the host's hooks at most once per call of
+a batch, since a hook that is a process or a service is a cost, and how
+often it is called is observable. When the engine has read a call as a
+sibling, policy and hooks, and the loop then hands it that call with
+the same ID, arguments and tool, in the same batch under the same rules
+and grant scope, the reading is the call's decision: the hold and the
+call then read one answer, even from a hook whose answer changes. A
+sibling read with no tool, or with another tool than the loop hands, is
+decided again. A reading that failed is not kept, as for the hold.
 
 ### The batch hold
 
@@ -552,7 +681,10 @@ A batch is identified by its run, its turn, every call's ID, name and
 arguments, and the rules in force, the grant scope of the decision's
 context included. A binding MAY cache the siblings' readings for a
 batch, and MUST NOT read a cache across two batches, across a change
-of rules or across two grant scopes. It MUST NOT cache a reading that
+of rules or across two grant scopes. An engine shared by runs keeps
+each batch's readings apart, so one run's batch never evicts
+another's while either is being decided: the hold and the decision of
+a call, and its one claim, are read from its own batch's. It MUST NOT cache a reading that
 failed: the failure may pass, as a cancelled context or a remote
 executor that did not answer does.
 
@@ -656,6 +788,17 @@ through the aliases, and keeps or refuses each:
 | allow | the source is untrusted | `withheld: the source N is not trusted` |
 | allow | a bare deny rule of the policy that no carve-out reaches names its tool | `denied by R: a grant never beats a deny` |
 | allow | a bare ask rule of the policy that no carve-out reaches, from a source that outranks the set, names its tool | `R from S outranks the grant`, or `R outranks the grant` |
+
+A rule names a grant's tool when its tool name is that name, or a
+tool-name glob matching it. A server glob names every tool of its
+server, and a bare deny
+or ask rule refuses it only when the rule's tool name names every tool
+the server glob names: `mcp__*` and `mcp__gh__*` refuse `mcp__gh__*`,
+and `mcp__gh__delete` does not, since it is a question about one call
+that the decision answers, deny before allow. A rule's tool name `G`
+names every tool a server glob `mcp__S__*` names exactly when `G`
+matches the string `mcp__S__*` itself, reading that string's `*` as an
+ordinary character.
 
 Deny rules are considered first, then ask, then allow, each in order.
 A set's deny and ask rules apply at once, trusted or not, since they
@@ -784,9 +927,11 @@ the rules of the moment, so a grant made meanwhile does not ask again.
 It decides the calls by the rule a release follows, one rule in both
 modes:
 
-- a call that was asked about is decided as the person answered, with
-  `human` as the decider, whatever its own decision then reads, unless
-  the policy denies it, which no answer overrides;
+- a call that was asked about is decided as the answer says, with the
+  decider the answer names, `human` when it names none, whatever its
+  own decision then reads, unless the policy denies it, which no answer
+  overrides. An answer naming a decider agentsession RFC 0001 does not
+  know is no answer;
 - a plain decline refuses its own call alone;
 - a call the policy allowed and the batch held is released once every
   asked call of its batch is answered, and refused with `not released:
@@ -797,7 +942,7 @@ In the run, only a hook's terminate hint on the asked call stops the
 batch. A person's answer in the run is accept, decline or cancel, with
 no stop, so a person's decline in the run is always plain. A decision
 made in the run carries the subject and the held mark its deferral
-would have, and the verdict of a person's answer names no rule.
+would have, and the verdict of an answer names no rule.
 
 Nothing is remembered for a call decided this way. A question nobody
 answers, or a call of the batch that could not be read, leaves the
@@ -940,9 +1085,14 @@ A guard checks content. Its **subject** is one of:
   before the transcript, the record or the front keeps it;
 - an **output**: a finished turn's response, its items already in the
   transcript, as the model produced it and not as the output guard's
-  rewrites left it, and whether the turn is **final**, one in which
-  the model called no tools, so the response is the run's answer. A
-  guard over the answer passes a turn that is not final.
+  rewrites left it; the turn's tool results, in the model's order; and
+  whether the turn is **final**. A turn is final when the model called
+  no tools, so the response is the run's answer, or when one of its
+  results ends the run as its tool answering for the model, under
+  agentturn RFC 0001; in the second case the outputs of the results
+  that end the run are the run's **answer**, each the output of the
+  call it answers. A guard over the answer MUST judge those outputs as
+  it judges a final message, and passes a turn that is not final.
 
 A guard answers with an action and a reason, and for an input or a
 message MAY rewrite: replacement items for an input, a replacement
@@ -950,15 +1100,51 @@ message for a message, replacement instructions for an input. Defer
 has no meaning for content and is an error. A guard passes a subject
 it does not know.
 
+An input guard MAY name items of the input to **quarantine**. A
+quarantine is an allow, not a rewrite: the chain MUST quarantine those
+items under agentturn RFC 0001 (The request, step 3) before the request
+is sent, so this request and every later one of the conversation leave
+each out, or carry a function call output as the placeholder that
+section names, while the transcript and the record keep them; and the
+guards after it see the input without them, as the request will carry
+it. Only items the loop built the request from can be quarantined,
+named by identity as the guard was handed them, an item a binding
+holds by value being one it cannot name: a verdict naming an
+item an earlier guard's rewrite made fails the check closed, and so
+does one that both quarantines and rewrites, one from a guard checked
+beside others, or a quarantine the loop cannot keep. A refused
+quarantine is reported as that guard's block, naming the items, with
+the reason `quarantine refused: C`, `C` the cause, and fails the run,
+since the items would otherwise reach the model. A guard that
+quarantines is a guard that rewrites, for a chain that checks guards
+at the same time.
+
 A **chain** runs guards in order, each seeing the subject as the one
 before left it, and reports every guard's verdict exactly once per
 check:
 
 | hook | subject | allow | block | error or defer |
 | --- | --- | --- | --- | --- |
-| before model call | input | a rewrite replaces the request's input or instructions for this call | the run stops as a guard stop, before the model is called | the model call is blocked and the run fails |
+| before model call | input | a rewrite replaces the request's input or instructions for this call; a quarantine leaves the items out of this request and every later one | the run stops as a guard stop, before the model is called | the model call is blocked and the run fails |
 | output guard | message | a rewrite replaces the message for the guards after and for the transcript | the message is withheld behind a placeholder built from the message as the guards before left it, or, when the chain stops on a block, withheld and the run stops as a guard stop; the guards after are not consulted | fails the run |
 | should stop after turn | output | — | the run stops after the turn as a guard stop, and the guards after are not consulted | fails the run |
+
+A chain MAY check an input only on the first turn of a run, as
+agentturn RFC 0001 numbers turns, and not in a run a handoff started,
+one whose trigger is of kind `handoff`: what the run was started with
+is then checked once, and the turns after it are not checked, nor
+reported.
+
+A chain MAY check guards that do not rewrite at the same time. The
+outcome and the verdicts it reports MUST then be those of checking them
+in order: each verdict is reported in chain order, the first block in
+chain order stands, and the guards after it are not reported. A guard
+still running when an earlier one blocks, or fails, is cancelled. A
+guard that rewrites, or that does not say it never does, is checked in
+sequence, over the subject the guards before it left, and the guards
+after it see what it left. A guard checked beside others that rewrites
+anyway fails the check, since the guards beside it judged the subject
+it changed.
 
 A guard's error that is a guard stop, one that wraps agentturn's guard
 error, is not a failure on any hook: the run stops as a guard stop,
@@ -994,9 +1180,13 @@ The reference guards, informative:
 | `secrets` | all | block on the first secret shape found: `secret detected: NAME` |
 | `redact` | input, message | rewrite every secret to `[REDACTED NAME]`: `redacted N secret: NAME` for one and `redacted N secrets: NAMES` for more, the distinct names in the order found joined by `, `; on an output, block as `secrets` does over the items that are not messages, since the messages were its to rewrite on the output guard and the output holds them as the model said them |
 
-The text of an item is a message's text parts, a function call's
-arguments, a function call output's text or text parts, and a
-reasoning item's summary and content.
+The items of an output are its response's output items followed by
+its answer, when a terminating result gave one; the results that do
+not end the run are the next input's, and an input guard reads them
+there. The text of an item is a message's text parts, a function
+call's arguments, a function call output's text or text parts, a tool
+result's output among them, and a reasoning item's summary and
+content.
 
 ## The verdict
 
@@ -1004,16 +1194,17 @@ A verdict is what was decided and why:
 
 | member | meaning |
 | --- | --- |
-| run, turn | the run and the turn it was decided in; empty for a grant, and the turn empty for an input guard's |
+| run, turn | the run and the turn it was decided in, an input guard's the turn whose model call it checked, as agentturn RFC 0001 numbers turns; empty for a grant |
 | call ID, tool | the call decided; a grant names the rule's tool; empty for content |
 | guard | the guard that decided content; empty otherwise |
 | action | allow, block or defer |
-| rule | the rule that fired, the rule a confined call passed over, or the rule granted; none for the default, a hook's stricter action, a guard or a reviewer |
+| rule | the rule that fired, the rule a confined call passed over, or the rule granted; none for the default, a hook's stricter action, an answering hook's allow, a guard or a reviewer |
 | reason | the stable text; for a block of a call, what the model reads |
 | by | the decider: `policy`, `agent` or `human`; empty for a guard's, whose decider is the guard |
 | held | set on a hold, and on the release or refusal that answers it |
-| subject | the text of the subject whose verdict the fold kept; empty for a call no splitter split |
+| subject | the text of the subject whose verdict the fold kept, or of the part a hook decided on; empty for a call no splitter split and no hook named a part of |
 | confined | what confines the call, whatever the action; empty when unconfined or unnamed |
+| quarantined | the items an input guard quarantined, on its allow, or named in a refused quarantine, on its block; empty otherwise |
 
 Every verdict reaches every observer the host registered, exactly
 once, in the order they were registered, and outside any lock the
@@ -1041,6 +1232,7 @@ with `ns` set to `agentpolicy:verdict` and `data` a JSON object:
 | `source_hash` | the rule's source's hash, the digest of the settings file or the skill frontmatter the rule was read from, so a reader says which version of the source a decision or a grant was built from and not only its name |
 | `note` | the rule's note, whatever its source |
 | `reason`, `by`, `held`, `subject`, `confined` | as the verdict names them |
+| `quarantined` | an array naming each quarantined item by reference, `{"type", "id"?, "call_id"?}`, from its Open Responses form; never its content, so its text is redacted with the entry that holds it and is not copied into this one |
 
 Every member but `action` is omitted when the verdict leaves it empty,
 zero or false. A reader MUST ignore members it does not know.
@@ -1077,13 +1269,15 @@ The root module of this repository is the reference binding.
 
 | Contract | Go |
 | --- | --- |
-| rule | `Rule{Tool, Spec, Source, Note}`; `String`, `Bare`, `Glob`, `MatchesTool`, `CarveOut` |
+| rule | `Rule{Tool, Spec, Source, Note}`; `String`, `Bare`, `Glob`, `ServerGlob`, `MatchesTool`, `AllowsTool` (the allow list's reading), `CarveOut` |
 | grammar | `ParseRules(s)`; every error begins `agentpolicy: rule "<token>": ` and ends with the kind's text, `unbalanced parentheses`, `missing tool name`, `empty specifier`, `empty carve-out`, `text after the specifier` |
 | source | `Source{Name, Path, Hash, Trusted, Rank}` |
 | policy | `Policy{Allow, Deny, Ask, Default, Sources, Withheld}`; `Allow()`, `Deny()`, `Ask()`; the zero `Default` is unset; `Policy.WithDefault(d)` |
 | merge | `RuleSet{Source, Allow, Deny, Ask}`, `Merge(sets…)` |
 | matcher | `Matcher func(spec, args) bool`; `PrefixMatcher(field)`, `GlobMatcher(field)` |
 | splitter, subject | `Subjects func(ctx, args) ([]Subject, error)`, `Subject{Args, Tool, Text, Constrain}`; `ToolMatcher{Match, Subjects}` per tool |
+| constraint sources | `WithConstraints(fns…)`, each `func(ctx, agentturn.ToolCallInfo) ([]Subject, error)` |
+| claims | read by default through `agenttool.FactsOf` on the call's tool; `WithoutFacts()` turns reading off, `WithFacts()` back on |
 | aliases | `WithAliases(map[string][]string)` |
 | build | `Build(policy, matchers, opts…)`; `ErrNoDefault`, `ErrNoMatcher`, `ErrToolGlob` for the kinds, and a plain error for `invalid_rule` |
 | engine | `Engine`; `Policy`, `PolicyOf(source)`, `Sources`, `Withheld`, `SetPolicy` |
@@ -1091,22 +1285,22 @@ The root module of this repository is the reference binding.
 | confinement | `agenttool.ConfinedBy` by default; `WithConfinement(fn)`, `nil` to turn it off |
 | sibling tools | `WithTools(lookup)`, `WithToolsFor(lookup)` for one given the decision's context |
 | model-backed output | `classify.WithEveryTurn()` to judge a turn that is not final |
-| hooks | `WithHooks(fns…)` |
+| hooks | `WithHooks(fns…)`; answering hooks `WithAnsweringHooks(fns…)`; a hook's subject is `agentturn.ToolDecision.Subject` |
 | offering tools | `Engine.Removes(tool)`, `Engine.Filter(tools)`, `Engine.ToolProvider(base)` for `agentturn.Config.ToolProvider` |
 | grants | `Engine.Grant`, `Engine.GrantOver`; `Engine.GrantSet` → granted and `[]Refusal{Rule, Reason}`, `Engine.Revoke`, `Engine.Grants`; the scope: `ContextWithGrantScope(ctx, scope)`, `GrantScopeFromContext(ctx)`, `Engine.GrantsFor(ctx)`, `Engine.RevokeScope(ctx)` |
 | deferred calls | `Engine.Deferred`, `Engine.Runs`, `Engine.Forget` |
 | release | `Engine.Release(ctx, end, answers…)`; `ErrUnanswered`; `Engine.Resumed(ctx, end, answers, next)` with the end the resume returned; `Engine.ForgetAnswers(runID)` |
-| asking in the run | `WithAskInRun()`, through the elicitor on the hook's context (`agentturn.Ask`) |
+| asking in the run | `WithAskInRun()`, through the elicitor on the hook's context (`agentturn.Ask`); the decider is `agenttool.Answer.By` |
 | reviewer | `Reviewer`, `ReviewerFunc`, `Review{Outcome, Reason, Args, Note, By}`, `Outcome` (`Refused`, `Approved`, `TimedOut`); `Engine.Answers(ctx, r, end)`, whose refusals carry the verdict's reason as `agentturn.Answer.Reason`; a call that may have run is `agentturn.PendingCall.MayHaveRun` |
 | cut-off calls | `WithNeverStarted(fn)`; the tool from the pending call or `WithTools`; the output a call has where it ran from `agentturn.PendingCall.Ran` and `RanWhere`; `agentturn.PendingUndispatched` is approved for the resume, `agentturn.PendingRejected` answered as refused, in `PendingCall.Refused`'s words when it has them |
 | nested calls | `agentturn.ToolCallInfo.Parent` non-empty: decided and reported, no deferral remembered |
 | denial bound | `DenialBound{Consecutive, Total, Window}`, `DefaultDenialBound`, `WithDenialBound`, `ErrDenialBound`, `Engine.ResetReviews` |
 | decider | `ByPolicy`, `ByAgent`, `ByHuman` |
-| verdict | `Verdict{RunID, Turn, CallID, Tool, Guard, Action, Rule, Reason, By, Held, Subject, Confined}`; `WithObserver(fn)`, which adds an observer |
+| verdict | `Verdict{RunID, Turn, CallID, Tool, Guard, Action, Rule, Reason, By, Held, Subject, Confined, Quarantined}`; `WithObserver(fn)`, which adds an observer |
 | record | `VerdictNS = "agentpolicy:verdict"`; `Verdict.Record()` → namespace and bytes |
 | presets | `Tools{Read, Edit, Execute}`; `Suggest`, `AutoEdit`, `FullAuto` |
-| guard | `guard.Guard{Name, Check}`, `guard.New`; `guard.Input{Items, Instructions}`, `guard.Message`, `guard.Output{Response, Final}`; `guard.Verdict{Action, Reason, Items, Instructions}` |
-| chain | `guard.Chain{Guards, Observer, Placeholder, Stop}`; `BeforeModelCall`, `OutputGuard`, `ShouldStopAfterTurn`; `guard.Withheld` |
+| guard | `guard.Guard{Name, Check}`, `guard.New`; `guard.Input{Items, Instructions}`, `guard.Message`, `guard.Output{Response, Results, Final}` and `Output.Answer()`; `guard.Verdict{Action, Reason, Items, Instructions, Quarantine}`, the quarantine kept with `agentturn.Quarantine` |
+| chain | `guard.Chain{Guards, Observer, Placeholder, Stop, Scope, Parallel}`; `BeforeModelCall`, `OutputGuard`, `ShouldStopAfterTurn`; `guard.Withheld`; the scope `guard.EveryCall`, `guard.FirstTurn`, read from `agentturn.TurnFromContext` and `agentturn.TriggerFromContext`; a guard that says whether it rewrites, `guard.Rewriting`, `guard.ReadOnly(g)` |
 | guard stop | `guard.BlockedError{Guard, Subject, Reason}`, which wraps `agentturn.ErrGuard` |
 | reference guards | `guard.Limit`, `guard.Deny`, `guard.Secrets`, `guard.Redact`, `guard.Pattern`, `guard.DefaultSecrets` |
 | model-backed | `classify.New` for a guard, `classify.NewReviewer` for a reviewer |
@@ -1149,10 +1343,16 @@ parser is one.
 could never fire and a tool-name glob it will not honour; decides
 every subject by the precedence as an algorithm, whatever the order of
 the lists; holds a constraint to its tool's deny and ask rules alone
-and decides a call of constraints alone with the call itself; folds a
+and decides a call of constraints alone with the call itself; splits a
+call by its tool's claim when the host registered no splitter, holds a
+hint to a constraint, and reads one claim per call per batch; adds a
+constraint source's subjects as constraints; folds a
 call's subjects to the most restrictive; blocks a
-call whose splitter fails; reads confinement from the called tool and
-reads an unanswered tool as unconfined; holds every call it allows
+call whose splitter, claim or constraint source fails; reads confinement from the called tool and
+reads an unanswered tool as unconfined; folds the host's hooks as
+[Hooks](#hooks) says, a stricter hook's subject and an equal deferring
+hook's reason included, and lets an answering hook lift only the
+policy's own ask, never a constraint's or an outranking source's; holds every call it allows
 when another of its batch asks, and never runs one beside an ask;
 gives the reason texts this document states; reports every verdict to
 every observer exactly once; remembers a deferred call under its own
@@ -1161,7 +1361,14 @@ for every case of `testdata/policy/decisions.json` builds, grants,
 decides and offers as the case says.
 
 **A conforming guard chain** runs its guards in order over the subject
-the one before left; never defers content; stops the run as a guard
+the one before left, or, checking guards that do not rewrite at the
+same time, gives the outcome and reports the verdicts that order gives;
+checks an input only on a run's first turn when it is so scoped;
+judges a terminating tool's answer as a final message; quarantines
+the items an input guard names, only those the loop built the request
+from, before the request is sent, with the guards after seeing the
+input without them, and refuses any other quarantine closed; never defers
+content; stops the run as a guard
 stop on a blocked input or output and withholds a blocked message; and
 reports every guard's verdict exactly once.
 
@@ -1215,16 +1422,27 @@ A call has `tool` and `args`. The splitter and the confinement are the
 host's, so the corpus writes out what they answer for the call:
 `subjects`, an array of `{"args", "text"?, "tool"?, "constrain"?}`
 the splitter returns, one subject of the call's own arguments when absent;
-`subjects_error`, the splitter's error text; and `confined`, present
+`subjects_error`, the splitter's error text; `confined`, present
 when the tool says the call runs confined, with what confines it, `""`
-for nothing named. The calls of one case have distinct arguments per
+for nothing named; and `facts`, present when the tool claims facts for
+the call: `calls`, an array of `{"tool"?, "args", "text"?}`, absent for
+the call itself; `rewrite`; `hint`; and `error`, the claim's error
+text. A tool claims when any call of it in the case has `facts`, and
+its calls without the member claim the call itself. A call MAY also
+have `constraints`, an array of `{"args", "text"?, "tool"?,
+"constrain"?}`, what the host's constraint source returns for it, none
+when absent, each a constraint whatever its `constrain` says; or
+`constraints_error`, the source's error text. The calls of one case
+have distinct arguments per
 tool, so a harness can find a call's answers from what the splitter
 and the tool are handed. The tool a harness offers the engine for a
 sibling is the one it offers for the call.
 
 `want` is the verdict: `action`, `"allow"`, `"block"` or `"defer"`;
 `held`; `rule` in string form and `source`, its source's name; the
-exact `reason`; `subject`; and `confined`. An absent member is empty.
+exact `reason`; `subject`; `confined`; and `args`, the arguments the
+decision says the call runs with, absent for the model's. An absent
+member is empty.
 The decision the loop receives carries the same action and reason and
 the decider `policy`, and deciding the same call again gives the same
 decision.
@@ -1242,10 +1460,72 @@ model reads it; a rule's removal, or a change that makes a conforming
 engine non-conforming, is a breaking change to the module and is
 listed in the changelog as one.
 
+## Changes since 0.2
+
+- An answer given in the run is decided by the decider it names,
+  `human` when it names none, and an answer naming a decider
+  agentsession RFC 0001 does not know is no answer, following agenttool
+  RFC 0001 draft 0.9 and agentturn RFC 0001 draft 0.4 ([Asking in the
+  run](#asking-in-the-run)). Draft 0.2 named `human` for every answer.
+- A server glob, `mcp__S__*`, is honoured in the allow list (#85).
+  Draft 0.2 refused every tool-name glob there and said the reference
+  agent did too, which was wrong: Claude Code allows `mcp__<server>` and
+  `mcp__<server>__*`. Every other glob in an allow list is still
+  `tool_glob`. A server name neither begins nor ends with `_`, and a
+  server glob in the allow list does not match a name whose rest after
+  `mcp__S__` begins with `_`; in the deny and ask lists it does. A grant set's server glob is refused only by a bare deny,
+  or an outranking bare ask rule, that names every tool it names
+  ([Grant sets](#grant-sets)).
+- A hook is called at most once per call of a batch: a sibling's
+  reading is the call's decision when the loop hands the same call with
+  the same tool ([Hooks](#hooks), #87). Draft 0.2 let the engine call a
+  hook twice for every call of a batch the policy allows but the first.
+- The hook fold keeps a hook's part (#80): a hook that makes the action
+  stricter brings its subject, where draft 0.2 left the verdict with
+  none, and a hook that defers a call the verdict already defers adds
+  its reason after `; `, and its subject when the verdict has none,
+  where draft 0.2 dropped both. This is stated as differing from
+  agentturn's chain fold.
+- Answering hooks (#86): a host MAY register hooks whose allow answers
+  the policy's own ask, never a deny, an ordinary hook's ask, a
+  constraint's ask, an outranking source's ask rule, or a hold.
+- Constraint sources (#89): a host MAY supply functions from a call to
+  subjects, added to every call's as constraints after its split, so a
+  data-flow rule holds for a tool with no splitter
+  ([Constraint sources](#constraint-sources)). Draft 0.2 took subjects
+  only from the called tool's splitter.
+- Claims (#81): a call whose tool claims facts, with no splitter, is
+  split by the claim; a claimed call naming another tool is decided as
+  an unknown tool and held to that tool's deny and ask as a constraint; hints are constraints after the call itself; a
+  claim's rewrite is decided again and is what the call runs with; one
+  claim per call per batch, read by the hold and the decision alike
+  ([Claims](#claims)). A binding MAY turn reading off. The corpus gains
+  `facts` and `constraints` on a call and `args` in `want`. Draft 0.2 did not read
+  claims.
+- A turn a terminating tool result ends is final, and the outputs of
+  the results that end the run are its answer, which a guard over the
+  answer judges as a final message (#78). The output subject carries
+  the turn's tool results. Draft 0.2 called final only a turn with no
+  calls, so a terminating tool's answer reached the caller unjudged.
+- An input guard's verdict names its turn, where draft 0.2 left it
+  empty: agentturn RFC 0001 draft 0.4 carries the turn to every hook.
+- A chain MAY check an input only on a run's first turn, and MAY check
+  guards that do not rewrite at the same time, giving the outcome and
+  the verdicts of checking in order (#88). Conformance says so.
+- An input guard MAY quarantine items of the input (#90): an allow,
+  not a rewrite, kept under agentturn RFC 0001's quarantine before the
+  request is sent, with the guards after it seeing the input without
+  them; only items the loop built the request from, and a refused
+  quarantine is the guard's block; the verdict gains `quarantined`, and
+  its record names the items by reference.
+
 ## Prior art
 
 - **Claude Code**'s permission rules are the grammar's source: `Bash`,
   `Bash(git status:*)`, allow, deny and ask lists with deny first,
+  `mcp__<server>` and `mcp__<server>__*` in an allow list for every tool
+  of one MCP server, which is the server glob, and no other glob over
+  tool names in an allow list,
   settings files from an organisation, a project and a user that merge
   rather than override, a trust prompt before a project's rules apply,
   and a skill's `allowed-tools` as rules active while the skill runs.

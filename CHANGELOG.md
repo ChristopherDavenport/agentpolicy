@@ -5,6 +5,148 @@ All user-visible changes to this library. The format follows
 uses [Semantic Versioning](https://semver.org/); before v1.0.0 minor
 versions may break the API.
 
+## Unreleased
+
+- Changed: RFC 0001 is draft 0.3, with a "Changes since 0.2" section
+  listing each rule below.
+- Dependencies: agentturn v0.0.24 to v0.0.35, agenttool v0.0.22 to
+  v0.0.28 and openresponses v0.0.14 to v0.0.18. No API of this module
+  changes with them.
+- Changed: under `WithAskInRun`, an answer given in the run is decided
+  by the decider it names, `agenttool.Answer.By`, and by `human` when
+  it names none, where every answer was `human`'s. A reviewer front
+  that answers as a model (`agent`) is recorded as one. An answer that
+  names a decider the session format does not know is no answer, as
+  agentturn v0.0.35's `Ask` refuses it: the call is deferred to the
+  run's end. RFC 0001 draft 0.3, Asking in the run.
+- Changed: the `WithHooks` fold keeps a hook's part of the decision
+  (#80). A hook that makes the action stricter brings its
+  `ToolDecision.Subject` to the verdict and the decision, where the
+  subject was cleared. A hook that defers a call the policy already
+  defers adds its reason after `; `, so the person asked reads both,
+  `no rule allows bash: approval required by default; git touches the
+  remote`, and its subject when the verdict has none; the action, rule
+  and decider stay the policy's. A product that appended a hook's
+  reason to the question itself drops that. The reason text the
+  question shows changes; what the model reads for a block does not.
+- Added: `WithAnsweringHooks(fns...)` (#86). When the policy's own ask
+  rule or default defers a call and no `WithHooks` hook deferred it,
+  the answering hooks are asked in order and the first allow answers
+  the ask: the call is allowed, with no rule, the hook's reason and
+  decider, and the subject the policy deferred on. It never lifts a
+  deny, an ordinary hook's ask, an ask a constraint raised (`ask
+  tainted` over a `WithConstraints` subject), an ask rule of a source
+  that outranks the host's own (rank above 0), or a hold: a call it allows is still
+  held when its batch asks. It does what a product's run end, resume
+  and "approved by policy" record did, and records what was decided.
+- Changed: an input guard's verdict names the turn whose model call
+  it checked, read from agentturn v0.0.35's `TurnFromContext`, where
+  `Verdict.Turn` was 0.
+- Added, breaking: an input guard can quarantine items (#90).
+  `guard.Verdict.Quarantine` names items of the input, as the guard was
+  handed them; `Chain.BeforeModelCall` quarantines them with agentturn
+  v0.0.35's `agentturn.Quarantine` before the request is sent, so this
+  request and every later one leave each out (a function call output
+  is sent as `agentturn.QuarantinedOutput`), and the guards after it
+  see the input so. It is an allow: the transcript and the record keep
+  the items. Naming an item the loop did not build the request from,
+  such as one an earlier guard's rewrite made, quarantining and
+  rewriting at once, naming an item held by value, which is compared
+  by pointer alone, quarantining beside other guards, or quarantining
+  outside a run, fails the run, and is reported as the guard's block
+  with the reason `quarantine refused: <cause>`. `agentpolicy.Verdict`
+  gains `Quarantined`, so a `Verdict` can no longer be compared with
+  `==` (breaking), and the record a `quarantined` member naming
+  each item by reference, `{type, id, call_id}`, never its content, so
+  a quarantined text is redacted with the entry that holds it.
+- Added: `guard.Chain.Scope` and `guard.Chain.Parallel` (#88). Under
+  `Scope: guard.FirstTurn`, `BeforeModelCall` checks the input of a
+  run's first model call alone, the turn read from agentturn v0.0.35's
+  `TurnFromContext`, and not in a run a `handoff` trigger started, so
+  two judges over a ten-turn run make two judge calls. Under
+  `Parallel`, guards that say they never rewrite (`guard.Rewriting`,
+  `guard.ReadOnly(g)`) are checked at the same time, and the chain
+  reports what checking them in order reports: verdicts in chain
+  order, the first block standing, the guards after it unreported and
+  cancelled. A guard that may rewrite is checked in sequence. `Limit`,
+  `Deny`, `Secrets` and `classify.Guard` say they never rewrite;
+  `Redact` says it does. A product's run-ID memory and one-guard
+  wrapper for these go.
+- Changed, breaking: a guard over the answer judges the answer a
+  terminating tool gives (#78). `guard.Output` gains `Results`, the
+  turn's tool results, and `Final` is now also set when a result ends
+  the run (`Terminate`), not only when the model called no tools, so a
+  guard that read `Final` as "the model called no tools" is handed
+  terminating turns too; `Output.Answer()` returns the outputs
+  of the results that end the run as function call outputs. `Deny`,
+  `Secrets`, `Redact` (which blocks there as `Secrets` does) and `Limit`
+  read the answer among the output's items, and `classify` judges it
+  with the turn, so a closing note a terminating tool formats from a
+  customer's record is judged before either front serves it. A Block
+  stops the run as a guard stop, as for a final message; withholding
+  the answer from `RunEnd.Items` is agentturn#275's. `Limit` over a
+  terminating turn counts the answer.
+- Changed, breaking: the engine reads a tool's facts claim
+  (`agenttool.Factual`) for a call whose tool has no `Subjects`
+  splitter, by default (#81). Each claimed call of the called tool is a
+  subject of it. A claimed call naming another tool borrows none of
+  its allows: it is decided as an unknown tool, `claim of <other> by
+  <tool>`, by the default, and held to the tool it names as a
+  constraint, so `deny read(.env)` blocks a claiming tool an MCP server
+  added later that says it reads `.env`, and `allow read` does not
+  allow it; absent calls are the
+  call itself; a claim of no calls, or an error, blocks the call with
+  `<tool> call could not be evaluated: <error>`, `facts claim returned
+  no calls` for none. Facts that are hints (`Facts.Hint`) are
+  constraints after the call itself and never allow. A claim's
+  `Rewrite` is decided again with its own confinement, the stricter
+  action standing, and is the decision's `Args`, handed to the hooks
+  and released with a held call. A claim is asked once per call per
+  batch, the hold and the decision reading the same one. A registered
+  splitter still wins. `WithoutFacts()` turns reading off, as before;
+  `WithFacts()` turns it back on. A host whose claiming tools ran on
+  their own arguments decides them on their claims now.
+- Added: `WithConstraints(fns...)`, constraint sources (#89). Each is
+  called for every call the engine decides or reads as a sibling, after
+  the call's own split, and its subjects are added as constraints,
+  whatever `Subject.Constrain` says, so they can block or defer a call
+  and never allow it. A source that fails blocks the call as a failed
+  splitter does. A host keeps conversation state, a taint under its
+  grant scope, and holds every tool to it, one with no splitter, such
+  as one an MCP server added later, included: `ask tainted` then holds
+  for all of them. RFC 0001 draft 0.3, Constraint sources.
+  The corpus gains `constraints` and `constraints_error` on a call,
+  what the host's source returns.
+- Fixed: a hook given to `WithHooks` runs once per call of a batch
+  (#87). The engine reads a call's siblings, hooks included, to decide
+  the hold, and decided each again when the loop handed it, so in a
+  batch the policy allows every call but the first ran its hooks twice,
+  2N-1 times for N calls. The sibling's reading, its verdict and the
+  hooks' note, `Terminate` and rewrite, is now kept for the batch and
+  is the call's decision when the loop hands the same call, arguments
+  and tool under the same rules and scope; a sibling read with no tool,
+  `WithTools` naming none, is decided again. `WithAskInRun` reads the
+  batch from the same readings. The readings are kept per batch, where
+  the engine kept the last batch's alone, so runs sharing an engine no
+  longer evict each other's mid-batch; a batch is dropped when its
+  run's next batch starts, on `Forget` or `Resumed`, and the oldest of
+  more than 256 fully decided batches are dropped. RFC 0001 draft 0.3, Hooks.
+- Added: a server glob, `mcp__S__*`, builds in the allow list and
+  allows every tool of the one MCP server `S`, including one the server
+  adds later (#85). `Rule.ServerGlob` reports the shape: `S` is not
+  empty and holds neither `*` nor `__`, and neither begins nor ends
+  with `_`. In the allow list a server glob does not match a tool whose
+  name continues `_` after `mcp__S__`, so `allow mcp__gh__*` allows no
+  tool of a server `gh_` (`Rule.AllowsTool`); in the deny and ask lists
+  and for the offer it is the full glob, so `deny mcp__gh__*` still
+  denies and removes `mcp__gh___x`. A host refuses such server names. Every other
+  tool-name glob in the allow list, `mcp__*` or `mcp__gh*`, is still
+  `ErrToolGlob`, and a glob with a specifier still is too. A grant
+  set's server glob is refused only by a bare deny, or an outranking
+  bare ask, whose glob names every tool of the server; a deny of one of
+  its tools still beats it at the decision. RFC 0001 draft 0.3 also
+  corrects its prior art: Claude Code allows `mcp__<server>__*`.
+
 ## v0.0.17 - 2026-10-11
 
 - Fixed: whether a batch with a call that cannot be evaluated holds no

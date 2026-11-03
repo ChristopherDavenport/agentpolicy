@@ -109,9 +109,31 @@ func TestGuardCheck(t *testing.T) {
 	if len(req.Input) != 1 || req.Input[0].(*openresponses.Message).Text() != "input:\nuser: {\"reason\": \"x\"}\n" {
 		t.Errorf("input = %+v", req.Input)
 	}
+	// The answer a terminating tool gave is the run's answer, judged
+	// with its turn (#78).
+	closing := guard.Output{
+		Response: &openresponses.Response{Output: openresponses.Items{&openresponses.FunctionCall{CallID: "c1", Name: "close_case", Arguments: `{"reason":"refund done"}`}}},
+		Results:  []agenttool.Result{{Output: openresponses.FunctionCallOutputData{Text: `{"allow": false, "reason": "the note holds an SSN"}`}, Terminate: true}},
+		Final:    true,
+	}
+	if v, err := g.Check(ctx, closing); err != nil || v.Action != agentturn.Block || v.Reason != "the note holds an SSN" {
+		t.Errorf("a terminating answer: %+v, %v", v, err)
+	}
+	if got := model.last.Input[0].(*openresponses.Message).Text(); got != "output:\nfunction_call close_case: {\"reason\":\"refund done\"}\nfunction_call_output c1: {\"allow\": false, \"reason\": \"the note holds an SSN\"}\n" {
+		t.Errorf("the judge read %q", got)
+	}
 }
 
 func ptr[T any](v T) *T { return &v }
+
+// A classifier never rewrites, so a parallel chain checks it beside
+// another judge (#88).
+func TestGuardSaysItDoesNotRewrite(t *testing.T) {
+	var g guard.Guard = New(&echo.Adapter{}, "m", "rubric")
+	if r, ok := g.(guard.Rewriting); !ok || r.Rewrites() {
+		t.Error("the classifier does not say it reads only")
+	}
+}
 
 func TestRender(t *testing.T) {
 	items := openresponses.Items{

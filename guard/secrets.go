@@ -40,7 +40,7 @@ var DefaultSecrets = []Pattern{
 // With no patterns it uses [DefaultSecrets].
 func Secrets(patterns ...Pattern) Guard {
 	patterns = orDefault(patterns)
-	return New("secrets", func(_ context.Context, subject any) (Verdict, error) {
+	return ReadOnly(New("secrets", func(_ context.Context, subject any) (Verdict, error) {
 		items, ok := items(subject)
 		if !ok {
 			return allow, nil
@@ -52,7 +52,7 @@ func Secrets(patterns ...Pattern) Guard {
 			return block("secret detected: " + name), nil
 		}
 		return allow, nil
-	})
+	}))
 }
 
 // Redact rewrites the input before a model call, its instructions with
@@ -68,7 +68,7 @@ func Secrets(patterns ...Pattern) Guard {
 // [DefaultSecrets].
 func Redact(patterns ...Pattern) Guard {
 	patterns = orDefault(patterns)
-	return New("redact", func(_ context.Context, subject any) (Verdict, error) {
+	return rewriter{New("redact", func(_ context.Context, subject any) (Verdict, error) {
 		switch s := subject.(type) {
 		case Input, Message:
 			items, _ := items(s)
@@ -115,7 +115,7 @@ func Redact(patterns ...Pattern) Guard {
 			}
 		}
 		return allow, nil
-	})
+	})}
 }
 
 // withoutMessages returns the items that are not assistant or other

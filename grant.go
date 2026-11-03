@@ -94,12 +94,15 @@ func (g grant) rules() int { return len(g.set.Allow) + len(g.set.Deny) + len(g.s
 // restrict. A grant never beats a deny.
 //
 // A rule is refused, and not activated, when it could never fire (no
-// matcher, a carve-out, a tool-name glob in an allow list), when its
-// source is untrusted, when a deny rule with no specifier names its
-// tool, and when an ask rule with no specifier from a source that
-// outranks the set names its tool, which is the rank check
-// [Engine.GrantOver] makes. An ask rule with a specifier is left to
-// the decision, where the rank test is made against the subject.
+// matcher, a carve-out, a tool-name glob in an allow list that is not
+// a server glob), when its source is untrusted, when a deny rule with
+// no specifier names its tool, and when an ask rule with no specifier
+// from a source that outranks the set names its tool, which is the
+// rank check [Engine.GrantOver] makes. For a server glob, "names its
+// tool" means names every tool the glob names: "mcp__*" refuses
+// "mcp__gh__*", and "mcp__gh__delete" leaves it to the decision. An
+// ask rule with a specifier is left to the decision, where the rank
+// test is made against the subject.
 //
 // Every rule is stamped with the set's source, as [Merge] stamps one,
 // so the verdict that fires names where the permission came from.
@@ -372,6 +375,9 @@ type active struct {
 	// cache is keyed on both.
 	scope string
 	gen   uint64
+	// batch names the batch a decision is in, for the claims kept for
+	// it; "" outside Decide, so a preview or a review keeps nothing.
+	batch string
 }
 
 // active snapshots the rules of the moment for a decision under ctx.
@@ -428,7 +434,7 @@ func (e *Engine) shadowedBy(a active, ask Rule, tool string, args json.RawMessag
 		if g.Source.Name == ask.Source.Name || g.Source.Rank < ask.Source.Rank {
 			continue
 		}
-		if r, ok := e.match(g.Allow, tool, args); ok {
+		if r, ok := e.match(g.Allow, tool, args, true); ok {
 			return r, true
 		}
 	}

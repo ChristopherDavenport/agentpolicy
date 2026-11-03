@@ -1,11 +1,13 @@
 package agentpolicy
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"maps"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -26,9 +28,9 @@ var (
 	// the rule.
 	ErrNoMatcher = errors.New("agentpolicy: no matcher for the rule's tool")
 	// ErrToolGlob is returned for a rule whose tool name is a glob that
-	// the engine will not honour: one in the allow list, where the
-	// reference refuses it too, and one with a specifier, which names
-	// no matcher. The error names the rule.
+	// the engine will not honour: one in the allow list other than a
+	// server glob, "mcp__S__*" ([Rule.ServerGlob]), and one with a
+	// specifier, which names no matcher. The error names the rule.
 	ErrToolGlob = errors.New("agentpolicy: tool-name glob")
 )
 
@@ -85,6 +87,11 @@ type Verdict struct {
 	// empty for a call that is not confined and for a tool that says it
 	// is and names nothing.
 	Confined string
+	// Quarantined is the items an input guard quarantined
+	// (guard.Verdict.Quarantine), on its allow, or named in a quarantine
+	// that was refused, on the block that reports it; nil otherwise.
+	// The record names each by reference, never by its content.
+	Quarantined openresponses.Items
 }
 
 // Option configures an [Engine].
@@ -214,9 +221,15 @@ func WithToolsFor(lookup func(ctx context.Context, name string) (agenttool.Tool,
 // The fold is agentturn.ChainBeforeToolCall's, with the engine's
 // decision first: the strictest action wins, Block over Defer over
 // Allow, a block ends the fold, and a hook that makes the action
-// stricter brings its reason and its decider, By, with ByPolicy for an
-// empty one; the verdict then has no Rule and no Subject. The first
-// note stands, Terminate is set when any hook sets it, and arguments a
+// stricter brings its reason, its decider, By, with ByPolicy for an
+// empty one, and its Subject; the verdict then has no Rule. A hook that
+// defers a call the verdict already defers leaves its action, rule and
+// decider, and adds what it says: a reason the verdict's does not
+// already hold continues it after "; ", and its Subject is the
+// verdict's when the verdict has none, so the person asked reads the
+// hook's why beside the rule's. That differs from
+// agentturn.ChainBeforeToolCall, which keeps the first reason of equal
+// actions. The first note stands, Terminate is set when any hook sets it, and arguments a
 // hook rewrites are passed to the hooks after it and are what the call
 // runs with, a held call's included when [Engine.Release] releases it.
 // Rewritten arguments are decided again, their confinement read from
@@ -233,7 +246,11 @@ func WithToolsFor(lookup func(ctx context.Context, name string) (agenttool.Tool,
 // batch position and the tool [WithTools] names. A hook must therefore
 // decide a call the same way however often it is asked, and one that
 // fails for a sibling reads as asking, so the call is held, and is
-// asked again for that sibling by the next call of the batch. Each
+// asked again for that sibling by the next call of the batch. A
+// sibling's reading is kept for the batch, and is the call's own
+// decision when the loop hands the same call with the same tool, so
+// each hook runs once per call of a batch; a sibling read with no tool,
+// [WithTools] naming none, or another tool, is decided again. Each
 // WithHooks adds its hooks after those already given; a nil hook adds
 // nothing.
 func WithHooks(fns ...func(context.Context, agentturn.ToolCallInfo) (*agentturn.ToolDecision, error)) Option {
@@ -241,6 +258,112 @@ func WithHooks(fns ...func(context.Context, agentturn.ToolCallInfo) (*agentturn.
 		for _, fn := range fns {
 			if fn != nil {
 				e.hooks = append(e.hooks, fn)
+			}
+		}
+	}
+}
+
+// WithFacts has the engine split a call by its tool's facts claim,
+// agenttool.Factual, when the host registered no [Subjects] splitter
+// for the tool, which is the default; it undoes [WithoutFacts]. Each
+// claimed call of the called tool is an ordinary subject with the
+// claim's text. A claimed call naming another tool borrows none of
+// that tool's allows: it is decided as an unknown tool, "claim of
+// <other> by <tool>", so the default decides it, and held to the tool
+// it names as a constraint, so a tool an MCP server adds later that
+// claims, accurately, to read .env is denied by read(.env) without a
+// splitter written for it, while allow read does not allow it. Absent calls
+// are the call itself; a claim of no calls, or an error, blocks the
+// call as a failed splitter does, with the reason "<tool> call could
+// not be evaluated: <error>".
+//
+// Facts that are hints (agenttool.Facts.Hint), from a source the host
+// does not trust, are constraints put after the call itself: they can
+// make the call stricter and never decide it, and their rewrite is
+// never taken. A claim's rewrite is what the call runs with: it is
+// decided again as a hook's rewrite is, on the claim's subjects with
+// its own confinement, the stricter action standing, and it is the
+// decision's Args, handed to the [WithHooks] hooks, and what a held
+// call is released with. A claim is asked under the decision's context
+// and kept for its batch, so the hold and the call's own decision read
+// one claim, asked once per call per batch for the tool [WithTools]
+// names; a claim that failed is asked again. A registered splitter is
+// the host's override, and the claim is not read for its tool.
+func WithFacts() Option {
+	return func(e *Engine) { e.noFacts = false }
+}
+
+// WithoutFacts turns claim reading off: a call whose tool has no
+// [Subjects] splitter is the one subject of its own arguments, whatever
+// its tool claims, as before claims were read.
+func WithoutFacts() Option {
+	return func(e *Engine) { e.noFacts = true }
+}
+
+// WithConstraints registers constraint sources: functions from a call,
+// under the decision's context, to subjects the call is held to besides
+// its own. The engine calls each for every call it decides or reads as
+// a sibling, after the call's own split (its splitter's subjects, or
+// the call itself), with the arguments being decided, a hook's rewrite
+// included, and adds what it returns as constraints, whatever
+// Subject.Constrain says: each is held to its tool's deny and ask rules
+// alone, so a source can block or defer a call and never allow it.
+//
+// It is how a host holds every call to state it keeps about the
+// conversation, a tool added later included, which no per-tool
+// [Subjects] splitter can: "untrusted content is in context" as a
+// subject {Tool: "tainted"} under ask tainted, kept by the host under
+// [GrantScopeFromContext] and set from what a tool's agenttool.Flow says
+// it reads. The library ships the seam; the host keeps the state.
+//
+// A source that fails blocks the call as a failed splitter does, with
+// the reason "<tool> call could not be evaluated: <error>", and a
+// sibling it fails for reads as asking. Its subjects are part of the
+// call's reading, kept for the batch as a splitter's are, so a source
+// is asked at most once per call of a batch when the reading is reused
+// (see [WithHooks]). Each WithConstraints adds its sources after those
+// already given; a nil source adds nothing.
+func WithConstraints(fns ...func(context.Context, agentturn.ToolCallInfo) ([]Subject, error)) Option {
+	return func(e *Engine) {
+		for _, fn := range fns {
+			if fn != nil {
+				e.constraints = append(e.constraints, fn)
+			}
+		}
+	}
+}
+
+// WithAnsweringHooks registers hooks that may answer the policy's own
+// ask, as the reference agent's PreToolUse hook skips its permission
+// prompt by allowing a call. When the fold of the policy and the
+// [WithHooks] hooks stands at a defer the policy raised, by an ask rule
+// or the default, the answering hooks are asked in order, and the first
+// that allows the call replaces the defer: the verdict then has no
+// Rule, the hook's reason and decider, By, ByPolicy for an empty one,
+// and keeps the Subject the policy deferred on. Its Note is the
+// decision's when no hook gave one.
+//
+// An answering hook answers and never rewrites: its Args and Terminate
+// are ignored, and so is anything but an allow, so it can only lift an
+// ask. It is not asked about a call the fold blocks, nor about one an
+// ordinary hook deferred, whether that hook raised the defer or
+// deferred a call the policy already deferred, since the host's own
+// hooks asking is not the policy's question to answer. Nor is it asked
+// when a constraint defers the call, as ask tainted does over a
+// [WithConstraints] subject, which holds the call to another tool's
+// question, or when an ask rule of a source that outranks the host's
+// own, rank above 0, defers it, as a managed settings file's does: the
+// host's hook answers no more than the host's own grant could. A call
+// it allows is still held when another call of its batch asks, as any
+// allowed call is: it never runs beside an ask. Its error fails the call's
+// decision as a [WithHooks] hook's does, and it is called for a sibling
+// as one is. Each WithAnsweringHooks adds its hooks after those already
+// given; a nil hook adds nothing.
+func WithAnsweringHooks(fns ...func(context.Context, agentturn.ToolCallInfo) (*agentturn.ToolDecision, error)) Option {
+	return func(e *Engine) {
+		for _, fn := range fns {
+			if fn != nil {
+				e.answerers = append(e.answerers, fn)
 			}
 		}
 	}
@@ -261,10 +384,15 @@ type Engine struct {
 	bound     DenialBound
 	confine   func(context.Context, agenttool.Tool, json.RawMessage) (bool, string)
 	lookup    func(context.Context, string) (agenttool.Tool, bool)
-	// hooks are folded into every decision after the policy's, and
-	// neverStarted reads the record for a cut-off call. Both are set
-	// at Build and never written after.
-	hooks        []func(context.Context, agentturn.ToolCallInfo) (*agentturn.ToolDecision, error)
+	// hooks are folded into every decision after the policy's,
+	// answerers may answer the policy's own ask after them, and
+	// neverStarted reads the record for a cut-off call. All are set at
+	// Build and never written after.
+	hooks       []func(context.Context, agentturn.ToolCallInfo) (*agentturn.ToolDecision, error)
+	answerers   []func(context.Context, agentturn.ToolCallInfo) (*agentturn.ToolDecision, error)
+	constraints []func(context.Context, agentturn.ToolCallInfo) ([]Subject, error)
+	// noFacts is [WithoutFacts], set at Build and never written after.
+	noFacts      bool
 	neverStarted func(context.Context, string, string) bool
 	// askInRun is [WithAskInRun], set at Build and never written after.
 	askInRun bool
@@ -279,9 +407,17 @@ type Engine struct {
 	grants   []grant
 	withheld map[grantKey][]Rule
 	gen      uint64
-	// batch is the last batch's verdicts, so the product's splitter
-	// runs once per call of a batch rather than once per pair.
-	batch batchCache
+	// batches are the readings of each batch being decided, by batch
+	// key, so the product's splitter, hooks and claims run once per call
+	// of a batch rather than once per pair, whatever other runs sharing
+	// the engine decide meanwhile. A batch is dropped when a later batch
+	// of its run starts and when its run is forgotten or resumed; once
+	// the hook has decided its every call it is done, and done batches
+	// beyond the last [keptBatches] are dropped too, oldest first, so
+	// runs that end without a Forget do not grow it. done is their
+	// order.
+	batches map[string]*batchCache
+	done    []string
 	// deferred remembers the calls deferred in each run, asked and
 	// held, keyed by run and then by call, so Answers can hand the
 	// reviewer what the hook saw and Release can answer the held ones.
@@ -431,8 +567,9 @@ func checkPolicy(p Policy, matchers map[string]ToolMatcher) error {
 
 // checkRule refuses a rule with no tool, one with a specifier for a
 // tool that has no matcher, and a tool-name glob the engine will not
-// honour: one in the allow list, and one with a specifier, since the
-// glob names no matcher to read the specifier with. A rule that cannot
+// honour: one in the allow list that is not a server glob, and one
+// with a specifier, since the glob names no matcher to read the
+// specifier with. A rule that cannot
 // work fails where every other unusable rule fails, at Build, rather
 // than building and never firing.
 func checkRule(r Rule, matchers map[string]ToolMatcher, list string) error {
@@ -441,7 +578,7 @@ func checkRule(r Rule, matchers map[string]ToolMatcher, list string) error {
 	}
 	if r.Glob() {
 		switch {
-		case list == "allow":
+		case list == "allow" && !r.ServerGlob():
 			return fmt.Errorf("%w: %s is not honoured in the allow list", ErrToolGlob, r)
 		case r.Spec != "":
 			return fmt.Errorf("%w: %s takes no specifier", ErrToolGlob, r)
@@ -530,7 +667,8 @@ func (e *Engine) Policy() Policy {
 // give. A product that cannot re-derive a policy writes rules that
 // cover the tools it has not seen instead: a bare name, or a tool-name
 // glob in the deny or ask list, "mcp__*", governs a tool that appears
-// later, where an allow rule needs the tool's own name.
+// later, and so does a server glob in the allow list, "mcp__gh__*",
+// where any other allow rule needs the tool's own name.
 //
 // The policy in force changes for the next call decided, not for the
 // calls already decided: a run that ended on an ask is answered under
@@ -650,7 +788,8 @@ func (e *Engine) BeforeToolCall() func(context.Context, agentturn.ToolCallInfo) 
 // siblings Decide held waiting on a question nobody is asked.
 //
 // The decision names the policy as its decider, or the hook that made
-// it stricter. The verdict reaches
+// it stricter, or the [WithAnsweringHooks] hook that allowed it. The
+// verdict reaches
 // the observer before Decide returns, and the same policy and the same
 // call in the same batch always give the same verdict.
 //
@@ -676,17 +815,35 @@ func (e *Engine) Decide(ctx context.Context, info agentturn.ToolCallInfo) (*agen
 	v := Verdict{RunID: info.RunID, Turn: info.Turn, CallID: callID, Tool: name, By: ByPolicy}
 
 	a := e.active(ctx)
+	a.batch = e.batchOf(info, a)
+	if a.batch != "" {
+		defer e.batchDecided(a.batch, position(info), len(info.Batch))
+	}
 
-	out, failed, err := e.evaluate(ctx, a, info, &v)
-	if err != nil {
-		return nil, err
+	// A call the engine already read as a sibling, with the tool the
+	// loop now hands it, is decided by that reading: the hooks are not
+	// asked again, and the hold and the call read one answer.
+	out, failed := agentturn.ToolDecision{}, false
+	if r, ok := e.siblingReading(info, a); ok {
+		out = r.out
+		v.Action, v.Rule, v.Reason, v.Subject, v.Confined, v.By = r.verdict.Action, r.verdict.Rule, r.verdict.Reason, r.verdict.Subject, r.verdict.Confined, r.verdict.By
+	} else {
+		var err error
+		out, failed, err = e.evaluate(ctx, a, info, &v)
+		if err != nil {
+			return nil, err
+		}
 	}
 	d := deferredCall{info: info, args: out.Args}
 	if out.Args != nil {
 		// The verdict is about the rewrite, so a reviewer is shown it.
 		d.info.Args = out.Args
 	}
-	held := e.batchAsks(ctx, a, info, v.Action, failed)
+	var mine *reading
+	if !failed {
+		mine = &reading{tool: info.Tool, args: info.Args, own: true, out: out, verdict: v}
+	}
+	held := e.batchAsks(ctx, a, info, v.Action, failed, mine)
 	if e.askInRun && info.Parent == "" {
 		if decided, ok := e.askedInRun(ctx, a, info, &v, out, held); ok {
 			e.observe(ctx, v)
@@ -760,11 +917,18 @@ func (e *Engine) evaluate(ctx context.Context, a active, info agentturn.ToolCall
 	if info.Call != nil {
 		name = info.Call.Name
 	}
-	c := e.confinement(ctx, info.Tool, info.Args)
-	var failed bool
-	v.Action, v.Rule, v.Reason, v.Subject, failed = e.decide(ctx, a, name, c, info.Args)
-	v.Confined = c.by
-	out, rewriteFailed, err := e.foldHooks(ctx, a, name, info, v)
+	d := e.decide(ctx, a, info, e.confinement(ctx, info.Tool, info.Args), true)
+	v.Action, v.Rule, v.Reason, v.Subject, v.Confined = d.act, d.rule, d.reason, d.subject, d.c.by
+	failed, rewrite := d.failed, d.rewrite
+	if rewrite != nil {
+		// The claim's rewrite is what the call runs with: the hooks are
+		// handed it, as they are a hook's rewrite.
+		info.Args = rewrite
+	}
+	out, rewriteFailed, err := e.foldHooks(ctx, a, name, info, v, d.pinned)
+	if out.Args == nil {
+		out.Args = rewrite
+	}
 	return out, failed || rewriteFailed, err
 }
 
@@ -776,9 +940,15 @@ func (e *Engine) evaluate(ctx context.Context, a active, info agentturn.ToolCall
 // still the policy's takes the rewrite's rule and reason, so it
 // describes the arguments the call runs with. failed reports that the
 // verdict is the block of a rewrite whose subjects could not be
-// evaluated.
-func (e *Engine) foldHooks(ctx context.Context, a active, name string, info agentturn.ToolCallInfo, v *Verdict) (out agentturn.ToolDecision, failed bool, err error) {
-	policy := true
+// evaluated. pinned is the policy's word that its defer is not its own
+// to answer (see [decided]), which no answering hook lifts.
+func (e *Engine) foldHooks(ctx context.Context, a active, name string, info agentturn.ToolCallInfo, v *Verdict, pinned bool) (out agentturn.ToolDecision, failed bool, err error) {
+	// policy is whether the verdict is still the policy's; asked whether
+	// an ordinary hook deferred the call, which no answering hook lifts;
+	// added the reasons hooks added to an equal defer, kept across a
+	// rewrite's decision.
+	policy, asked := true, false
+	var added []string
 	for _, fn := range e.hooks {
 		if v.Action == agentturn.Block {
 			break
@@ -790,12 +960,21 @@ func (e *Engine) foldHooks(ctx context.Context, a active, name string, info agen
 		if d == nil {
 			continue
 		}
-		if restrictiveness(d.Action) > restrictiveness(v.Action) {
-			v.Action, v.Reason, v.Rule, v.Subject, v.By = d.Action, d.Reason, nil, "", d.By
+		switch r, cur := restrictiveness(d.Action), restrictiveness(v.Action); {
+		case r > cur:
+			v.Action, v.Reason, v.Rule, v.Subject, v.By = d.Action, d.Reason, nil, d.Subject, d.By
 			if v.By == "" {
 				v.By = ByPolicy
 			}
-			policy = false
+			policy, asked, added = false, d.Action == agentturn.Defer, nil
+		case r == cur && d.Action == agentturn.Defer:
+			asked = true
+			if addReason(v, d.Reason) {
+				added = append(added, d.Reason)
+			}
+			if v.Subject == "" {
+				v.Subject = d.Subject
+			}
 		}
 		if out.Note == "" {
 			out.Note = d.Note
@@ -804,15 +983,58 @@ func (e *Engine) foldHooks(ctx context.Context, a active, name string, info agen
 		if d.Args != nil {
 			out.Args, info.Args = d.Args, d.Args
 			c := e.confinement(ctx, info.Tool, d.Args)
-			act, rule, reason, subject, bad := e.decide(ctx, a, name, c, d.Args)
-			if r, cur := restrictiveness(act), restrictiveness(v.Action); r > cur || policy && r == cur {
-				v.Action, v.Rule, v.Reason, v.Subject, v.By = act, rule, reason, subject, ByPolicy
-				policy, failed = true, bad
+			again := e.decide(ctx, a, info, c, false)
+			pinned = pinned || again.pinned
+			if r, cur := restrictiveness(again.act), restrictiveness(v.Action); r > cur || policy && r == cur {
+				keep := v.Subject
+				v.Action, v.Rule, v.Reason, v.Subject, v.By = again.act, again.rule, again.reason, again.subject, ByPolicy
+				policy, failed = true, again.failed
+				if r == cur && v.Action == agentturn.Defer {
+					// The hooks that deferred with the policy still did.
+					for _, why := range added {
+						addReason(v, why)
+					}
+					if v.Subject == "" {
+						v.Subject = keep
+					}
+				} else {
+					asked, added = false, nil
+				}
 			}
 			v.Confined = c.by
 		}
 	}
+	if v.Action == agentturn.Defer && policy && !asked && !pinned {
+		for _, fn := range e.answerers {
+			d, err := fn(ctx, info)
+			if err != nil {
+				return agentturn.ToolDecision{}, false, err
+			}
+			if d == nil || d.Action != agentturn.Allow {
+				continue
+			}
+			v.Action, v.Rule, v.Reason, v.By = agentturn.Allow, nil, d.Reason, d.By
+			if v.By == "" {
+				v.By = ByPolicy
+			}
+			if out.Note == "" {
+				out.Note = d.Note
+			}
+			break
+		}
+	}
 	return out, failed, nil
+}
+
+// addReason continues v's reason with a hook's, after "; ", when it
+// says something the reason does not already hold, and reports whether
+// it did.
+func addReason(v *Verdict, why string) bool {
+	if why == "" || strings.Contains(v.Reason, why) {
+		return false
+	}
+	v.Reason += "; " + why
+	return true
 }
 
 // confinement is what a call's tool says of where it runs.
@@ -833,28 +1055,153 @@ func (e *Engine) confinement(ctx context.Context, tool agenttool.Tool, args json
 	return confinement{ok: true, by: by}
 }
 
-// decide evaluates one call as Decide does, without recording it. ctx
-// is the decision's, handed to the tool's splitter. failed reports a
-// block because the splitter failed, rather than one a rule made.
-func (e *Engine) decide(ctx context.Context, a active, name string, c confinement, args json.RawMessage) (act agentturn.ToolAction, rule *Rule, reason, subject string, failed bool) {
-	subjects, err := e.split(ctx, name, args)
-	if err != nil {
-		return agentturn.Block, nil, name + " call could not be evaluated: " + err.Error(), "", true
+// decide evaluates one call, info's with info.Args, as Decide does,
+// without recording it. ctx is the decision's, handed to the tool's
+// splitter, its facts claim and the constraint sources. failed reports
+// a block because the subjects could not be read, rather than one a
+// rule made.
+//
+// With claimed set, a facts claim's rewrite is taken: the call is
+// decided again on the claim's subjects with the rewrite's confinement,
+// as a hook's rewrite is decided again, the stricter action standing
+// and the rewrite's rule and reason on an equal one, and the rewrite
+// and its confinement are returned. Without it, a claim's rewrite is
+// ignored, since the arguments being decided are already a hook's.
+func (e *Engine) decide(ctx context.Context, a active, info agentturn.ToolCallInfo, c confinement, claimed bool) decided {
+	name := ""
+	if info.Call != nil {
+		name = info.Call.Name
 	}
-	act, rule, reason, subject = e.fold(a, name, c, subjects)
-	return act, rule, reason, subject, false
+	subjects, rewrite, err := e.split(ctx, a, info)
+	if err == nil {
+		subjects, err = e.constrain(ctx, info, subjects)
+	}
+	if err != nil {
+		return decided{act: agentturn.Block, reason: name + " call could not be evaluated: " + err.Error(), failed: true, c: c}
+	}
+	d := e.fold(a, name, c, subjects)
+	d.c = c
+	if !claimed || rewrite == nil {
+		return d
+	}
+	rc := e.confinement(ctx, info.Tool, rewrite)
+	r := e.fold(a, name, rc, subjects)
+	if restrictiveness(r.act) >= restrictiveness(d.act) {
+		d.act, d.rule, d.reason, d.subject = r.act, r.rule, r.reason, r.subject
+	}
+	d.pinned = d.pinned || r.pinned
+	d.rewrite, d.c = rewrite, rc
+	return d
+}
+
+// decided is the policy's verdict on one call's subjects: its action,
+// rule, reason and subject; whether it is a block because the subjects
+// could not be read; a facts claim's rewrite taken and the confinement
+// of what runs. pinned says some subject's defer is not the policy's
+// own to answer: a constraint's, which holds the call to another
+// tool's question, or an ask rule's of a source that outranks the
+// host's own, whose rank is 0, so no answering hook lifts the defer
+// whatever subject the verdict names.
+type decided struct {
+	act     agentturn.ToolAction
+	rule    *Rule
+	reason  string
+	subject string
+	failed  bool
+	pinned  bool
+	rewrite json.RawMessage
+	c       confinement
 }
 
 // batchCache is whether each call of one batch asks, by its position
-// in the batch, kept for the rest of that batch's decisions. key names
-// the batch, its run and turn, every call's ID, name and arguments,
-// and the rules it was decided under, the grant scope included, so a
-// batch is never read against another's calls, even one whose provider
-// numbers its calls the same way, against a policy that has changed
-// since, or against another scope's grants.
+// in the batch, kept for the rest of that batch's decisions, and the
+// reading each sibling was given, policy and hooks. key names the
+// batch, its run and turn, every call's ID, name and arguments, and the
+// rules it was decided under, the grant scope included, so a batch is
+// never read against another's calls, even one whose provider numbers
+// its calls the same way, against a policy that has changed since, or
+// against another scope's grants.
 type batchCache struct {
-	key  string
-	asks map[int]bool
+	run      string
+	asks     map[int]bool
+	readings map[int]reading
+	claims   map[claimKey]claimed
+	// decided is the positions the hook has decided; the batch is done
+	// once it holds them all.
+	decided map[int]bool
+	done    bool
+}
+
+// keptBatches is how many done batches an engine keeps, so a call
+// decided again in its batch after the batch was decided reads it as
+// before, without the readings of every run that ended outliving it.
+const keptBatches = 256
+
+// reading is what the engine made of one call of a batch, policy and
+// hooks folded: the verdict, the decision's note, Terminate and
+// rewritten arguments, and the tool and arguments it was read with.
+// own is set for the reading of the call the loop handed the hook,
+// with its own tool; it is unset for a sibling's. A reading that
+// failed is never kept.
+type reading struct {
+	tool    agenttool.Tool
+	args    json.RawMessage
+	own     bool
+	out     agentturn.ToolDecision
+	verdict Verdict
+}
+
+// siblingReading returns the reading the engine made of info's call as
+// a sibling, when it is the call's decision: the same batch under the
+// same rules and grant scope, which the batch key holds, and the same
+// arguments and tool. A sibling read with no tool, or another tool
+// than the loop hands, is decided again, as is a nested call, which
+// has no batch of siblings to have been read in.
+func (e *Engine) siblingReading(info agentturn.ToolCallInfo, a active) (reading, bool) {
+	if len(info.Batch) < 2 || info.Call == nil || info.Parent != "" {
+		return reading{}, false
+	}
+	self := position(info)
+	if self < 0 {
+		return reading{}, false
+	}
+	key := batchKey(info, a.gen, a.scope)
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	b := e.batches[key]
+	if b == nil {
+		return reading{}, false
+	}
+	r, ok := b.readings[self]
+	if !ok || r.own || !sameTool(r.tool, info.Tool) || !bytes.Equal(r.args, info.Args) {
+		return reading{}, false
+	}
+	return r, true
+}
+
+// batchOf names the batch info's call is decided in for the caches,
+// or "" for a call with no siblings, a nested call or one not in its
+// batch.
+func (e *Engine) batchOf(info agentturn.ToolCallInfo, a active) string {
+	if len(info.Batch) < 2 || info.Call == nil || info.Parent != "" || position(info) < 0 {
+		return ""
+	}
+	return batchKey(info, a.gen, a.scope)
+}
+
+// sameTool reports whether two tools are one, by pointer identity: a
+// tool held by value is never the same as any, since == on one whose
+// field holds a value that cannot be compared panics, and no tool is
+// never the same either. A tool read as another is decided again.
+func sameTool(a, b agenttool.Tool) bool {
+	if a == nil || b == nil {
+		return false
+	}
+	ta := reflect.TypeOf(a)
+	if ta != reflect.TypeOf(b) || ta.Kind() != reflect.Pointer {
+		return false
+	}
+	return a == b
 }
 
 // batchAsks reports whether a call the policy allowed is held: whether
@@ -880,24 +1227,29 @@ type batchCache struct {
 // (failed), is kept as asking: read first as a sibling it held the
 // calls before it, so it holds the calls after it too, and whether the
 // batch holds does not depend on the order of its calls.
-func (e *Engine) batchAsks(ctx context.Context, a active, info agentturn.ToolCallInfo, own agentturn.ToolAction, failed bool) bool {
+//
+// The readings are kept too, mine for the call's own when it did not
+// fail, so the loop's own decision of a sibling read here is that
+// reading ([Engine.siblingReading]) and the hooks run once per call.
+func (e *Engine) batchAsks(ctx context.Context, a active, info agentturn.ToolCallInfo, own agentturn.ToolAction, failed bool, mine *reading) bool {
 	if len(info.Batch) < 2 || info.Call == nil {
 		return false
 	}
 	self := position(info)
 	key := batchKey(info, a.gen, a.scope)
 	e.mu.Lock()
-	if e.batch.key != key {
-		e.batch = batchCache{key: key, asks: make(map[int]bool, len(info.Batch))}
-	}
+	b := e.batchFor(key, info.RunID, len(info.Batch))
 	if self >= 0 {
-		e.batch.asks[self] = e.batch.asks[self] || own == agentturn.Defer || failed
+		b.asks[self] = b.asks[self] || own == agentturn.Defer || failed
+		if _, read := b.readings[self]; mine != nil && !read && info.Parent == "" {
+			b.readings[self] = *mine
+		}
 	}
 	if own != agentturn.Allow {
 		e.mu.Unlock()
 		return false
 	}
-	known := maps.Clone(e.batch.asks)
+	known := maps.Clone(b.asks)
 	e.mu.Unlock()
 
 	asks, decided := false, map[int]bool{}
@@ -907,9 +1259,10 @@ func (e *Engine) batchAsks(ctx context.Context, a active, info agentturn.ToolCal
 		}
 		ask, ok := known[i]
 		if !ok {
-			var keep bool
-			ask, keep = e.siblingAsks(ctx, a, info, i)
-			if keep {
+			// A sibling that could not be read asks, and is not kept.
+			r, read := e.readSibling(ctx, a, info, key, i)
+			ask = !read || r.verdict.Action == agentturn.Defer
+			if read {
 				decided[i] = ask
 			}
 		}
@@ -917,9 +1270,9 @@ func (e *Engine) batchAsks(ctx context.Context, a active, info agentturn.ToolCal
 	}
 	if len(decided) > 0 {
 		e.mu.Lock()
-		if e.batch.key == key {
+		if b := e.batches[key]; b != nil {
 			for i, ask := range decided {
-				e.batch.asks[i] = e.batch.asks[i] || ask
+				b.asks[i] = b.asks[i] || ask
 			}
 		}
 		e.mu.Unlock()
@@ -927,22 +1280,92 @@ func (e *Engine) batchAsks(ctx context.Context, a active, info agentturn.ToolCal
 	return asks
 }
 
-// siblingAsks reports whether the call at position i of info's batch
-// asks, decided as Decide would decide it, the hooks included, with the
-// tool [WithTools] names. A sibling that could not be read, a hook
-// having failed or its subjects not evaluated, reads as asking, and
-// keep is false so the reading is not kept for the batch. A sibling a
-// rule blocks does not ask, and is kept.
-func (e *Engine) siblingAsks(ctx context.Context, a active, info agentturn.ToolCallInfo, i int) (ask, keep bool) {
-	c := info.Batch[i]
-	args := callArgs(c)
-	sib := agentturn.ToolCallInfo{RunID: info.RunID, Turn: info.Turn, Call: c, Tool: e.sibling(ctx, c.Name), Args: args, Batch: info.Batch, Index: i}
-	v := Verdict{}
-	_, failed, err := e.evaluate(ctx, a, sib, &v)
-	if err != nil || failed {
-		return true, false
+// batchFor returns the cache of the batch key names, of the run run,
+// making it when there is none. A run decides one batch at a time, so a
+// new batch of a run drops the run's others, even one whose last call
+// the hook was never handed, as a turn that was cut off leaves. The
+// caller holds e.mu.
+func (e *Engine) batchFor(key, run string, n int) *batchCache {
+	if b := e.batches[key]; b != nil {
+		return b
 	}
-	return v.Action == agentturn.Defer, true
+	e.dropBatches(run)
+	b := &batchCache{run: run, asks: make(map[int]bool, n), readings: make(map[int]reading, n), claims: make(map[claimKey]claimed, n), decided: make(map[int]bool, n)}
+	if e.batches == nil {
+		e.batches = make(map[string]*batchCache)
+	}
+	e.batches[key] = b
+	return b
+}
+
+// dropBatches drops the batches of the run runID. The caller holds
+// e.mu.
+func (e *Engine) dropBatches(runID string) {
+	for k, b := range e.batches {
+		if b.run == runID {
+			delete(e.batches, k)
+		}
+	}
+}
+
+// batchDecided notes that the hook decided the call at position self of
+// the batch key names, of n calls. Once every call of it has been
+// decided the batch is done, and the oldest done batches beyond
+// [keptBatches] are dropped.
+func (e *Engine) batchDecided(key string, self, n int) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	b := e.batches[key]
+	if b == nil || b.done {
+		return
+	}
+	b.decided[self] = true
+	if len(b.decided) < n {
+		return
+	}
+	b.done = true
+	e.done = append(e.done, key)
+	for len(e.done) > keptBatches {
+		old := e.done[0]
+		e.done = e.done[1:]
+		if b := e.batches[old]; b != nil && b.done {
+			delete(e.batches, old)
+		}
+	}
+}
+
+// readSibling returns the reading of the call at position i of info's
+// batch, key naming the batch: the one kept for it, its own decision's
+// or an earlier sibling reading's, or else one made now as Decide would
+// decide it, the hooks included, with the tool [WithTools] names, and
+// kept. ok is false for a sibling that could not be read, a hook having
+// failed or its subjects not evaluated, which is not kept, since the
+// failure may pass. A sibling a rule blocks is read, and kept.
+func (e *Engine) readSibling(ctx context.Context, a active, info agentturn.ToolCallInfo, key string, i int) (r reading, ok bool) {
+	e.mu.Lock()
+	if b := e.batches[key]; b != nil {
+		if r, ok := b.readings[i]; ok {
+			e.mu.Unlock()
+			return r, true
+		}
+	}
+	e.mu.Unlock()
+	c := info.Batch[i]
+	sib := agentturn.ToolCallInfo{RunID: info.RunID, Turn: info.Turn, Call: c, Tool: e.sibling(ctx, c.Name), Args: callArgs(c), Batch: info.Batch, Index: i}
+	v := Verdict{RunID: info.RunID, Turn: info.Turn, CallID: c.CallID, Tool: c.Name, By: ByPolicy}
+	out, failed, err := e.evaluate(ctx, a, sib, &v)
+	if err != nil || failed {
+		return reading{}, false
+	}
+	r = reading{tool: sib.Tool, args: sib.Args, out: out, verdict: v}
+	e.mu.Lock()
+	if b := e.batchFor(key, info.RunID, len(info.Batch)); b != nil {
+		if _, kept := b.readings[i]; !kept {
+			b.readings[i] = r
+		}
+	}
+	e.mu.Unlock()
+	return r, true
 }
 
 // position returns the index of info's own call in its batch: Index
@@ -999,26 +1422,152 @@ func callArgs(c *openresponses.FunctionCall) json.RawMessage {
 	return json.RawMessage(c.Arguments)
 }
 
-// split returns the subjects of a call: the splitter's, or the call
-// itself, the splitter called with ctx. A splitter that returns nothing
-// is an error, since a call with no subjects would be allowed by every
-// rule. A splitter that returns only constraints has the call itself
-// put before them, since constraints never allow and the call needs a
+// split returns the subjects of info's call with info.Args: the
+// splitter's, the splitter called with ctx; else, for a tool that
+// claims facts and claim reading is on, the claim's, with the claim's
+// rewrite; else the call itself. A splitter that returns nothing is an
+// error, since a call with no subjects would be allowed by every rule.
+// A splitter that returns only constraints has the call itself put
+// before them, since constraints never allow and the call needs a
 // subject that can.
-func (e *Engine) split(ctx context.Context, name string, args json.RawMessage) ([]Subject, error) {
+func (e *Engine) split(ctx context.Context, a active, info agentturn.ToolCallInfo) ([]Subject, json.RawMessage, error) {
+	name, args := "", info.Args
+	if info.Call != nil {
+		name = info.Call.Name
+	}
 	m := e.matchers[name]
 	if m.Subjects == nil {
-		return []Subject{{Args: args}}, nil
+		if e.noFacts || info.Tool == nil || !agenttool.IsFactual(info.Tool) {
+			return []Subject{{Args: args}}, nil, nil
+		}
+		f, err := e.claim(ctx, a, info)
+		if err != nil {
+			return nil, nil, err
+		}
+		return claimSubjects(f, name, args)
 	}
 	subjects, err := m.Subjects(ctx, args)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if len(subjects) == 0 {
-		return nil, errors.New("splitter returned no subjects")
+		return nil, nil, errors.New("splitter returned no subjects")
 	}
 	if !slices.ContainsFunc(subjects, func(s Subject) bool { return !s.Constrain }) {
 		subjects = append([]Subject{{Args: args}}, subjects...)
+	}
+	return subjects, nil, nil
+}
+
+// claimSubjects is a facts claim of a call of the tool name as
+// subjects: each claimed call of the called tool, named or not, an
+// ordinary subject under it, and absent calls the call itself, args. A
+// claimed call naming another tool borrows none of that tool's allows:
+// it is an ordinary subject of an unknown tool, [claimedTool], which no
+// rule names, so the default decides it, and a constraint under the
+// tool it names, so that tool's deny and ask rules still hold it. Facts
+// that are hints are constraints after the call itself, so they make
+// the call stricter and never decide it, and their rewrite, which
+// agenttool.FactsOf drops, is not taken. A claim of no calls is an
+// error: there is nothing to decide the call on.
+func claimSubjects(f agenttool.Facts, name string, args json.RawMessage) ([]Subject, json.RawMessage, error) {
+	if f.Calls != nil && len(f.Calls) == 0 {
+		return nil, nil, errors.New("facts claim returned no calls")
+	}
+	if f.Hint {
+		out := []Subject{{Args: args}}
+		for _, c := range f.Calls {
+			out = append(out, Subject{Args: c.Args, Tool: c.Tool, Text: c.Text, Constrain: true})
+		}
+		return out, nil, nil
+	}
+	if f.Calls == nil {
+		return []Subject{{Args: args}}, f.Rewrite, nil
+	}
+	out := make([]Subject, 0, len(f.Calls))
+	for _, c := range f.Calls {
+		if c.Tool == "" || c.Tool == name {
+			out = append(out, Subject{Args: c.Args, Text: c.Text})
+			continue
+		}
+		out = append(out,
+			Subject{Args: c.Args, Tool: claimedTool(name, c.Tool), Text: c.Text},
+			Subject{Args: c.Args, Tool: c.Tool, Text: c.Text, Constrain: true})
+	}
+	return out, f.Rewrite, nil
+}
+
+// claimedTool names the unknown tool a call of tool's claim that names
+// another is decided as: "claim of <other> by <tool>". The spaces keep
+// any rule's tool name from being it, and it begins with neither tool's
+// name, so no server glob in the allow list matches it; a tool-name
+// glob in the deny or ask list may, which only makes it stricter.
+func claimedTool(tool, other string) string {
+	return "claim of " + other + " by " + tool
+}
+
+// claim returns what info's tool claims a call with info.Args would
+// touch. Within a batch Decide is deciding, a.batch naming it, the
+// claim is kept by the call's position, its arguments and its tool, so
+// the hold and the call's own decision read one claim, asked once,
+// even when a reading that holds it failed for another reason and was
+// not kept. A claim that failed is not kept: the failure may pass.
+func (e *Engine) claim(ctx context.Context, a active, info agentturn.ToolCallInfo) (agenttool.Facts, error) {
+	at := -1
+	if a.batch != "" {
+		at = position(info)
+	}
+	k := claimKey{at: at, args: string(info.Args)}
+	if at >= 0 {
+		e.mu.Lock()
+		if b := e.batches[a.batch]; b != nil {
+			if c, ok := b.claims[k]; ok && sameTool(c.tool, info.Tool) {
+				e.mu.Unlock()
+				return c.facts, nil
+			}
+		}
+		e.mu.Unlock()
+	}
+	f, _, err := agenttool.FactsOf(ctx, info.Tool, info.Args)
+	if err != nil {
+		return agenttool.Facts{}, err
+	}
+	if at >= 0 {
+		e.mu.Lock()
+		b := e.batchFor(a.batch, info.RunID, len(info.Batch))
+		if _, kept := b.claims[k]; !kept {
+			b.claims[k] = claimed{tool: info.Tool, facts: f}
+		}
+		e.mu.Unlock()
+	}
+	return f, nil
+}
+
+// claimKey names a claim within a batch: the call's position and the
+// arguments it was asked about, a hook's rewrite being asked apart.
+type claimKey struct {
+	at   int
+	args string
+}
+
+// claimed is a claim kept for a batch, with the tool that made it.
+type claimed struct {
+	tool  agenttool.Tool
+	facts agenttool.Facts
+}
+
+// constrain adds the constraint sources' subjects to a call's, each a
+// constraint whatever it says of itself.
+func (e *Engine) constrain(ctx context.Context, info agentturn.ToolCallInfo, subjects []Subject) ([]Subject, error) {
+	for _, fn := range e.constraints {
+		more, err := fn(ctx, info)
+		if err != nil {
+			return nil, err
+		}
+		for _, s := range more {
+			s.Constrain = true
+			subjects = append(subjects, s)
+		}
 	}
 	return subjects, nil
 }
@@ -1030,12 +1579,13 @@ func (e *Engine) split(ctx context.Context, name string, args json.RawMessage) (
 // names the subject it was for, says nothing in the command ran and
 // names the other subjects, so the model does not report the other
 // half as having succeeded.
-func (e *Engine) fold(a active, name string, c confinement, subjects []Subject) (agentturn.ToolAction, *Rule, string, string) {
+func (e *Engine) fold(a active, name string, c confinement, subjects []Subject) decided {
 	var (
 		action  agentturn.ToolAction
 		rule    *Rule
 		reason  string
 		subject string
+		pinned  bool
 		at      = -1
 	)
 	for i, s := range subjects {
@@ -1053,6 +1603,9 @@ func (e *Engine) fold(a active, name string, c confinement, subjects []Subject) 
 		if !ok {
 			continue
 		}
+		if act == agentturn.Defer && (s.Constrain || r != nil && r.Source.Rank > 0) {
+			pinned = true
+		}
 		if at < 0 || restrictiveness(act) > restrictiveness(action) {
 			action, rule, reason, subject, at = act, r, why, s.Text, i
 		}
@@ -1069,7 +1622,7 @@ func (e *Engine) fold(a active, name string, c confinement, subjects []Subject) 
 			reason += ", including " + series(rest)
 		}
 	}
-	return action, rule, reason, subject
+	return decided{act: action, rule: rule, reason: reason, subject: subject, pinned: pinned}
 }
 
 // series joins items as prose: "a", "a and b", "a, b and c".
@@ -1096,7 +1649,7 @@ func restrictiveness(a agentturn.ToolAction) int {
 // deny or ask rule fires for has no verdict, and ok is false.
 func (e *Engine) decideSubject(a active, tool string, c confinement, args json.RawMessage, constrain bool) (act agentturn.ToolAction, rule *Rule, reason string, ok bool) {
 	p := a.policy
-	if r, ok := e.match(p.Deny, tool, args); ok {
+	if r, ok := e.match(p.Deny, tool, args, false); ok {
 		return agentturn.Block, &r, "denied by " + r.cite(), true
 	}
 	r, skipped, asked := e.matchAsk(a, tool, args, c.ok)
@@ -1109,7 +1662,7 @@ func (e *Engine) decideSubject(a active, tool string, c confinement, args json.R
 	if skipped {
 		return agentturn.Allow, &r, confinedReason(c.by, r), true
 	}
-	if r, ok := e.match(p.Allow, tool, args); ok {
+	if r, ok := e.match(p.Allow, tool, args, true); ok {
 		return agentturn.Allow, &r, "allowed by " + r.cite(), true
 	}
 	action, _ := p.Default.Action()
@@ -1125,19 +1678,21 @@ func (e *Engine) decideSubject(a active, tool string, c confinement, args json.R
 // match returns the first rule of list that matches the subject: the
 // rule names the tool, itself or through a glob, is not a carve-out,
 // is bare or its specifier matches, and no carve-out from the same
-// source cancels it.
-func (e *Engine) match(list []Rule, tool string, args json.RawMessage) (Rule, bool) {
+// source cancels it. allow says list is an allow list, whose server
+// globs read [Rule.AllowsTool].
+func (e *Engine) match(list []Rule, tool string, args json.RawMessage, allow bool) (Rule, bool) {
 	for _, r := range list {
-		if e.fires(list, r, tool, args) {
+		if e.fires(list, r, tool, args, allow) {
 			return r, true
 		}
 	}
 	return Rule{}, false
 }
 
-// fires reports whether one rule of a list matches the subject.
-func (e *Engine) fires(list []Rule, r Rule, tool string, args json.RawMessage) bool {
-	if !r.MatchesTool(tool) {
+// fires reports whether one rule of a list matches the subject, the
+// rule's tool name read as an allow list reads it when allow is set.
+func (e *Engine) fires(list []Rule, r Rule, tool string, args json.RawMessage, allow bool) bool {
+	if names := r.MatchesTool(tool); !names || allow && !r.AllowsTool(tool) {
 		return false
 	}
 	if _, carve := r.CarveOut(); carve {
@@ -1160,7 +1715,7 @@ func (e *Engine) fires(list []Rule, r Rule, tool string, args json.RawMessage) b
 // returned with skipped set, so the verdict names it.
 func (e *Engine) matchAsk(a active, tool string, args json.RawMessage, confined bool) (r Rule, skipped, ok bool) {
 	for _, rule := range a.policy.Ask {
-		if !e.fires(a.policy.Ask, rule, tool, args) {
+		if !e.fires(a.policy.Ask, rule, tool, args, false) {
 			continue
 		}
 		if _, shadowed := e.shadowedBy(a, rule, tool, args); shadowed {

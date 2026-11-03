@@ -3,6 +3,7 @@ package agentpolicy
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
 
 	"github.com/ChristopherDavenport/agentturn"
@@ -265,5 +266,64 @@ func TestConstraintSubjectInABatch(t *testing.T) {
 	}
 	if d.Action != agentturn.Allow || d.Reason != "allowed by bash(ls:*)" {
 		t.Errorf("beside a neutral constraint: %v %q", d.Action, d.Reason)
+	}
+}
+
+// A constraint source holds every call to the host's conversation
+// state, a tool nobody wrote a splitter for included: round 11's A7,
+// where a page read through browse taints the conversation and a
+// send_message a server added later asks under ask tainted. Its
+// subjects are constraints whatever they say, so they never allow, and
+// a source that fails blocks the call.
+func TestConstraintSources(t *testing.T) {
+	tainted := map[string]bool{}
+	var failing error
+	source := func(ctx context.Context, info agentturn.ToolCallInfo) ([]Subject, error) {
+		if failing != nil {
+			return nil, failing
+		}
+		if !tainted[GrantScopeFromContext(ctx)] {
+			return nil, nil
+		}
+		// Constrain is left unset: the engine makes it a constraint.
+		return []Subject{{Tool: "tainted", Args: json.RawMessage(`{}`), Text: "untrusted content is in context"}}, nil
+	}
+	ctx := ContextWithGrantScope(context.Background(), "conversation_1")
+	e, err := Build(Policy{Allow: rules(t, "browse tainted"), Ask: rules(t, "tainted"), Default: Allow()}, nil, WithConstraints(source))
+	if err != nil {
+		t.Fatal(err)
+	}
+	decide := func(id, tool string) *agentturn.ToolDecision {
+		t.Helper()
+		d, err := e.Decide(ctx, call(id, tool, `{"to":"attacker@example.com"}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return d
+	}
+	if d := decide("c1", "browse"); d.Action != agentturn.Allow {
+		t.Fatalf("browse before the taint = %+v", d)
+	}
+	tainted["conversation_1"] = true
+	if d := decide("c2", "send_message"); d.Action != agentturn.Defer || d.Reason != "approval required by tainted" || d.Subject != "untrusted content is in context" {
+		t.Errorf("send_message after the taint = %+v, want it asked by tainted", d)
+	}
+	other := ContextWithGrantScope(context.Background(), "conversation_2")
+	if d, err := e.Decide(other, call("c3", "send_message", `{}`)); err != nil || d.Action != agentturn.Allow {
+		t.Errorf("another conversation's send_message = %+v, %v, want it allowed", d, err)
+	}
+
+	// A constraint never allows: the policy's own default still decides.
+	strict, err := Build(Policy{Allow: rules(t, "tainted"), Default: Ask()}, nil, WithConstraints(source))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d, _ := strict.Decide(ctx, call("c4", "send_message", `{}`)); d.Action != agentturn.Defer || d.Reason != "no rule allows send_message: approval required by default" {
+		t.Errorf("a constraint allowed a call: %+v", d)
+	}
+
+	failing = errors.New("taint store unreachable")
+	if d := decide("c5", "send_message"); d.Action != agentturn.Block || d.Reason != "send_message call could not be evaluated: taint store unreachable" {
+		t.Errorf("a failing source = %+v, want it blocked", d)
 	}
 }

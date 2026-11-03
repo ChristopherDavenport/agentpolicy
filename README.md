@@ -47,8 +47,11 @@ front.
 
 A rule's tool name may be a glob, `mcp__*`, which the deny and ask
 lists honour: a `*` stands for any run of characters, and nothing
-folds case. A glob in the allow list does not build, since a glob
-names no matcher and the reference refuses one too.
+folds case. In the allow list only a server glob builds, `mcp__gh__*`
+for every tool of the one MCP server `gh`, as the reference allows one
+server's tools; any other glob there, `mcp__*` or `B*`, does not, and
+no glob takes a specifier, since a glob names no matcher. A product
+whose settings write a server as `mcp__gh` reads it as `mcp__gh__*`.
 
 Rules a product did not write are spelled with the reference's tool
 names, `Bash`, `Read`, `Edit`, and one of those names may govern
@@ -173,12 +176,24 @@ chained after `Decide` with `agentturn.ChainBeforeToolCall` is outside
 the hold, so the siblings of a call it defers run before anyone
 answers. The engine reads a call's siblings to decide the hold, so a
 hook is also called for a sibling before the loop hands it that
-sibling's own call, and must decide a call the same way each time.
+sibling's own call, and must decide a call the same way each time; the
+sibling's reading is kept and is the call's own decision when the loop
+hands the same call with the same tool, so with `WithTools` each hook
+runs once per call. A hook that defers a call the policy already
+defers adds its reason to the question, `no rule allows bash: approval
+required by default; git touches the remote`, and its
+`ToolDecision.Subject` names the part of the call it asks about.
 
 ```go
 eng, err := agentpolicy.Build(policy, matchers,
 	agentpolicy.WithHooks(meterFetches))
 ```
+
+A hook whose allow should answer the policy's ask, as a reference
+`PreToolUse` hook that allows `go version` skips the prompt, goes to
+`WithAnsweringHooks` instead. It is asked only when the policy's own
+ask rule or default deferred the call, and its allow never lifts a
+deny, a `WithHooks` hook's ask or a hold.
 
 One engine serves every agent: what it defers is remembered under the
 call's own run, so a sub-agent deciding a call while the user reads a
@@ -215,6 +230,22 @@ allow the skill call; that still takes the skill tool's own allow.
 When no deny or ask rule fires for a constraint it adds nothing to the
 fold, and the default does not apply to it. A splitter that returns
 only constraints has the call itself decided before them.
+
+`WithConstraints` adds constraints to every call, a tool with no
+splitter included: a source returns `{Tool: "tainted"}` once the host,
+keyed by `GrantScopeFromContext`, has seen untrusted content enter the
+conversation, and `ask tainted` then asks before any call, a
+`send_message` an MCP server added later among them.
+
+A tool that claims what a call would touch, `agenttool.Factual`, is
+split by its claim when no `Subjects` is registered for it: each
+claimed call of the tool is a subject of it, and one naming another
+tool is held to that tool's deny and ask rules and decided by the
+default, never its allows, so `deny read(.env)` refuses a tool that
+says it reads `.env` and `allow read` does not allow it. A claim of nothing, or an
+error, blocks the call; facts that are hints, from a server the host
+does not trust, are constraints; and a claim's rewrite is what the call
+runs with. `WithoutFacts()` turns claim reading off.
 
 A call its tool says runs confined is not asked about by a bare ask
 rule naming that tool, as both references skip a bare `Bash` ask for
@@ -437,7 +468,10 @@ items are already in the transcript; it does so as a guard stop, with
 a `BlockedError` wrapping `agentturn.ErrGuard` on the run's end, so a
 policy stop is told from a failure. Its subject says whether the turn
 is `Final`, the run's answer rather than a turn of tool calls, so a
-guard over what the user will read skips the rest. The two output
+guard over what the user will read skips the rest; a turn a
+terminating tool ends is final too, and the reference guards and
+`classify` judge its answer, `Output.Answer()`, the tool's output that
+both fronts serve. The two output
 hooks see the same words, so a chain wired to both judges every
 message twice: a rewriting chain belongs on `OutputGuard`, as above,
 and `ShouldStopAfterTurn` is for a check no rewrite can answer, a
@@ -448,6 +482,16 @@ of the model's is kept; over a finished turn `Redact` reads only the
 items the output guard never sees, so it does not stop the run on a
 secret it already removed. `classify.New` builds a guard that asks a
 model with a rubric.
+
+An input guard may also quarantine items rather than rewrite them:
+`Verdict.Quarantine` names items of the input, a tool output carrying
+an injected instruction say, and the chain hands them to
+`agentturn.Quarantine`, so this request and every later one leave them
+out while the transcript keeps them. A chain with `Scope:
+guard.FirstTurn` checks the input on a run's first model call alone,
+and one with `Parallel` checks the guards that say they never rewrite,
+`guard.ReadOnly`, at the same time, reporting what checking them in
+order would.
 
 ## The record
 
