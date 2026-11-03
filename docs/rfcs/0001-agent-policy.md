@@ -1070,13 +1070,27 @@ message for a message, replacement instructions for an input. Defer
 has no meaning for content and is an error. A guard passes a subject
 it does not know.
 
+An input guard MAY name items of the input to **quarantine**. A
+quarantine is an allow, not a rewrite: the chain MUST quarantine those
+items under agentturn RFC 0001 (The request, step 3) before the request
+is sent, so this request and every later one of the conversation leave
+each out, or carry a function call output as the placeholder that
+section names, while the transcript and the record keep them; and the
+guards after it see the input without them, as the request will carry
+it. Only items the loop built the request from can be quarantined,
+named by identity as the guard was handed them: a verdict naming an
+item an earlier guard's rewrite made fails the check closed, and so
+does one that both quarantines and rewrites, or a quarantine the loop
+cannot keep. A guard that quarantines is a guard that rewrites, for a
+chain that checks guards at the same time.
+
 A **chain** runs guards in order, each seeing the subject as the one
 before left it, and reports every guard's verdict exactly once per
 check:
 
 | hook | subject | allow | block | error or defer |
 | --- | --- | --- | --- | --- |
-| before model call | input | a rewrite replaces the request's input or instructions for this call | the run stops as a guard stop, before the model is called | the model call is blocked and the run fails |
+| before model call | input | a rewrite replaces the request's input or instructions for this call; a quarantine leaves the items out of this request and every later one | the run stops as a guard stop, before the model is called | the model call is blocked and the run fails |
 | output guard | message | a rewrite replaces the message for the guards after and for the transcript | the message is withheld behind a placeholder built from the message as the guards before left it, or, when the chain stops on a block, withheld and the run stops as a guard stop; the guards after are not consulted | fails the run |
 | should stop after turn | output | — | the run stops after the turn as a guard stop, and the guards after are not consulted | fails the run |
 
@@ -1155,6 +1169,7 @@ A verdict is what was decided and why:
 | held | set on a hold, and on the release or refusal that answers it |
 | subject | the text of the subject whose verdict the fold kept, or of the part a hook decided on; empty for a call no splitter split and no hook named a part of |
 | confined | what confines the call, whatever the action; empty when unconfined or unnamed |
+| quarantined | the items an input guard quarantined, on its allow; empty otherwise |
 
 Every verdict reaches every observer the host registered, exactly
 once, in the order they were registered, and outside any lock the
@@ -1182,6 +1197,7 @@ with `ns` set to `agentpolicy:verdict` and `data` a JSON object:
 | `source_hash` | the rule's source's hash, the digest of the settings file or the skill frontmatter the rule was read from, so a reader says which version of the source a decision or a grant was built from and not only its name |
 | `note` | the rule's note, whatever its source |
 | `reason`, `by`, `held`, `subject`, `confined` | as the verdict names them |
+| `quarantined` | an array of the items an input guard quarantined, each in its Open Responses JSON encoding |
 
 Every member but `action` is omitted when the verdict leaves it empty,
 zero or false. A reader MUST ignore members it does not know.
@@ -1245,10 +1261,10 @@ The root module of this repository is the reference binding.
 | nested calls | `agentturn.ToolCallInfo.Parent` non-empty: decided and reported, no deferral remembered |
 | denial bound | `DenialBound{Consecutive, Total, Window}`, `DefaultDenialBound`, `WithDenialBound`, `ErrDenialBound`, `Engine.ResetReviews` |
 | decider | `ByPolicy`, `ByAgent`, `ByHuman` |
-| verdict | `Verdict{RunID, Turn, CallID, Tool, Guard, Action, Rule, Reason, By, Held, Subject, Confined}`; `WithObserver(fn)`, which adds an observer |
+| verdict | `Verdict{RunID, Turn, CallID, Tool, Guard, Action, Rule, Reason, By, Held, Subject, Confined, Quarantined}`; `WithObserver(fn)`, which adds an observer |
 | record | `VerdictNS = "agentpolicy:verdict"`; `Verdict.Record()` → namespace and bytes |
 | presets | `Tools{Read, Edit, Execute}`; `Suggest`, `AutoEdit`, `FullAuto` |
-| guard | `guard.Guard{Name, Check}`, `guard.New`; `guard.Input{Items, Instructions}`, `guard.Message`, `guard.Output{Response, Results, Final}` and `Output.Answer()`; `guard.Verdict{Action, Reason, Items, Instructions}` |
+| guard | `guard.Guard{Name, Check}`, `guard.New`; `guard.Input{Items, Instructions}`, `guard.Message`, `guard.Output{Response, Results, Final}` and `Output.Answer()`; `guard.Verdict{Action, Reason, Items, Instructions, Quarantine}`, the quarantine kept with `agentturn.Quarantine` |
 | chain | `guard.Chain{Guards, Observer, Placeholder, Stop, Scope, Parallel}`; `BeforeModelCall`, `OutputGuard`, `ShouldStopAfterTurn`; `guard.Withheld`; the scope `guard.EveryCall`, `guard.FirstTurn`, read from `agentturn.TurnFromContext` and `agentturn.TriggerFromContext`; a guard that says whether it rewrites, `guard.Rewriting`, `guard.ReadOnly(g)` |
 | guard stop | `guard.BlockedError{Guard, Subject, Reason}`, which wraps `agentturn.ErrGuard` |
 | reference guards | `guard.Limit`, `guard.Deny`, `guard.Secrets`, `guard.Redact`, `guard.Pattern`, `guard.DefaultSecrets` |
@@ -1417,6 +1433,11 @@ listed in the changelog as one.
   agentturn's chain fold.
 - Answering hooks (#86): a host MAY register hooks whose allow answers
   the policy's own ask, never a deny, an ordinary hook's ask or a hold.
+- An input guard MAY quarantine items of the input (#90): an allow,
+  not a rewrite, kept under agentturn RFC 0001's quarantine before the
+  request is sent, with the guards after it seeing the input without
+  them; only items the loop built the request from; the verdict and
+  its record gain `quarantined`.
 - A chain MAY check an input only on a run's first turn, and MAY check
   guards that do not rewrite at the same time, giving the outcome and
   the verdicts of checking in order (#88). Conformance says so.

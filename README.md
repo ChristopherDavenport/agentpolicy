@@ -466,7 +466,10 @@ items are already in the transcript; it does so as a guard stop, with
 a `BlockedError` wrapping `agentturn.ErrGuard` on the run's end, so a
 policy stop is told from a failure. Its subject says whether the turn
 is `Final`, the run's answer rather than a turn of tool calls, so a
-guard over what the user will read skips the rest. The two output
+guard over what the user will read skips the rest; a turn a
+terminating tool ends is final too, and the reference guards and
+`classify` judge its answer, `Output.Answer()`, the tool's output that
+both fronts serve. The two output
 hooks see the same words, so a chain wired to both judges every
 message twice: a rewriting chain belongs on `OutputGuard`, as above,
 and `ShouldStopAfterTurn` is for a check no rewrite can answer, a
@@ -477,6 +480,16 @@ of the model's is kept; over a finished turn `Redact` reads only the
 items the output guard never sees, so it does not stop the run on a
 secret it already removed. `classify.New` builds a guard that asks a
 model with a rubric.
+
+An input guard may also quarantine items rather than rewrite them:
+`Verdict.Quarantine` names items of the input, a tool output carrying
+an injected instruction say, and the chain hands them to
+`agentturn.Quarantine`, so this request and every later one leave them
+out while the transcript keeps them. A chain with `Scope:
+guard.FirstTurn` checks the input on a run's first model call alone,
+and one with `Parallel` checks the guards that say they never rewrite,
+`guard.ReadOnly`, at the same time, reporting what checking them in
+order would.
 
 ## The record
 

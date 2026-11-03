@@ -87,6 +87,9 @@ type Verdict struct {
 	// empty for a call that is not confined and for a tool that says it
 	// is and names nothing.
 	Confined string
+	// Quarantined is the items an input guard quarantined
+	// (guard.Verdict.Quarantine), on its allow; nil otherwise.
+	Quarantined openresponses.Items
 }
 
 // Option configures an [Engine].

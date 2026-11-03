@@ -43,6 +43,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
+	"slices"
 
 	"github.com/ChristopherDavenport/agentpolicy"
 	"github.com/ChristopherDavenport/agenttool"
@@ -155,6 +157,18 @@ type Verdict struct {
 	// rewrites the items. nil keeps them, and "" sends none. It is
 	// ignored for a Message, an Output and on a Block.
 	Instructions *string
+	// Quarantine, for an Input, names items of the input to quarantine
+	// for the rest of the conversation, under agentturn.Quarantine:
+	// every request from this one on leaves each out, or carries a
+	// function call output as agentturn.QuarantinedOutput, and the
+	// guards after this one see the input without them. It is an allow,
+	// not a rewrite: the transcript and the record keep the items, and a
+	// verdict that sets it with Items or Instructions fails the check.
+	// Only items the loop built the request from can be named, as the
+	// guard was handed them, by identity; one an earlier guard's rewrite
+	// made fails the check closed. It is ignored for a Message, an
+	// Output and on a Block.
+	Quarantine openresponses.Items
 }
 
 // Guard checks one subject, an [Input], a [Message] or an [Output]. A
@@ -315,7 +329,34 @@ func alongside(g Guard) bool {
 
 // changes reports whether a verdict changes its subject.
 func changes(v Verdict) bool {
-	return v.Action == agentturn.Allow && (v.Items != nil || v.Instructions != nil)
+	return v.Action == agentturn.Allow && (v.Items != nil || v.Instructions != nil || len(v.Quarantine) > 0)
+}
+
+// quarantine quarantines the items v names, as [Verdict.Quarantine]
+// says, when each is one of built, the items the loop built the
+// request from.
+func quarantine(ctx context.Context, g Guard, v Verdict, built openresponses.Items) error {
+	if v.Items != nil || v.Instructions != nil {
+		return fmt.Errorf("agentpolicy/guard: %s: a quarantine is not a rewrite", g.Name())
+	}
+	for _, item := range v.Quarantine {
+		if !slices.ContainsFunc(built, func(b openresponses.Item) bool { return sameItem(b, item) }) {
+			return fmt.Errorf("agentpolicy/guard: %s: quarantines an item the loop did not build the request from", g.Name())
+		}
+	}
+	if err := agentturn.Quarantine(ctx, v.Quarantine...); err != nil {
+		return fmt.Errorf("agentpolicy/guard: %s: %w", g.Name(), err)
+	}
+	return nil
+}
+
+// sameItem reports whether two items are one, by identity.
+func sameItem(a, b openresponses.Item) bool {
+	if a == nil || b == nil {
+		return false
+	}
+	ta := reflect.TypeOf(a)
+	return ta == reflect.TypeOf(b) && ta.Comparable() && a == b
 }
 
 // checked is one guard's answer.
@@ -389,6 +430,9 @@ func (c Chain) BeforeModelCall() func(context.Context, *openresponses.Request) e
 			return nil
 		}
 		runID := agentturn.RunIDFromContext(ctx)
+		// The items the loop built the request from, the only ones a
+		// guard may quarantine.
+		built := slices.Clone(req.Input)
 		subject := func() any { return Input{Items: req.Input, Instructions: req.Instructions} }
 		return c.checks(ctx, subject, func(g Guard, a checked, beside bool) (bool, error) {
 			v, err := a.v, a.err
@@ -398,7 +442,17 @@ func (c Chain) BeforeModelCall() func(context.Context, *openresponses.Request) e
 			if beside && changes(v) {
 				return true, together(g)
 			}
-			c.observe(ctx, agentpolicy.Verdict{RunID: runID, Guard: g.Name(), Action: v.Action, Reason: v.Reason})
+			held := v.Action == agentturn.Allow && len(v.Quarantine) > 0
+			if held {
+				if err := quarantine(ctx, g, v, built); err != nil {
+					return true, err
+				}
+			}
+			verdict := agentpolicy.Verdict{RunID: runID, Guard: g.Name(), Action: v.Action, Reason: v.Reason}
+			if held {
+				verdict.Quarantined = slices.Clone(v.Quarantine)
+			}
+			c.observe(ctx, verdict)
 			switch v.Action {
 			case agentturn.Allow:
 				if v.Items != nil {
@@ -406,6 +460,11 @@ func (c Chain) BeforeModelCall() func(context.Context, *openresponses.Request) e
 				}
 				if v.Instructions != nil {
 					req.Instructions = *v.Instructions
+				}
+				if held {
+					// The guards after see the input as the request will
+					// carry it.
+					req.Input = agentturn.QuarantineFromContext(ctx).Apply(req.Input)
 				}
 				return false, nil
 			case agentturn.Block:
