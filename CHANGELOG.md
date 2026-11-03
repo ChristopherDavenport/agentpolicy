@@ -7,6 +7,8 @@ versions may break the API.
 
 ## Unreleased
 
+- Changed: RFC 0001 is draft 0.3, with a "Changes since 0.2" section
+  listing each rule below.
 - Dependencies: agentturn v0.0.24 to v0.0.35, agenttool v0.0.22 to
   v0.0.28 and openresponses v0.0.14 to v0.0.18. No API of this module
   changes with them.
