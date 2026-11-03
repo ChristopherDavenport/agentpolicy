@@ -25,6 +25,11 @@ func TestMatchesTool(t *testing.T) {
 		{"*", "anything", true},
 		{"ls *", "lsof", false},
 		{"ls*", "lsof", true},
+		// A server glob names one server's tools, not those of a server
+		// whose name only begins the same way.
+		{"mcp__gh__*", "mcp__gh__create_pr", true},
+		{"mcp__gh__*", "mcp__gh___x", false},
+		{"mcp__gh*", "mcp__gh___x", true},
 	}
 	for _, tc := range tests {
 		if got := (Rule{Tool: tc.rule}).MatchesTool(tc.tool); got != tc.want {
@@ -47,6 +52,8 @@ func TestServerGlob(t *testing.T) {
 		{"mcp__a__b__*", false},
 		{"mcp__g*h__*", false},
 		{"mcp__gh__x*", false},
+		{"mcp__gh___*", false},
+		{"mcp___gh__*", false},
 		{"mcp__gh__", false},
 		{"mcp__gh", false},
 		{"B*", false},

@@ -208,9 +208,13 @@ position; every other character stands for itself. `mcp__*` names
 every tool of every MCP server.
 
 A **server glob** is a tool-name glob `mcp__S__*`, where `S` is not
-empty and contains neither `*` nor `__`. It names every tool whose name
-begins `mcp__S__`, which is every tool of the MCP server `S` under the
-`mcp__<server>__<tool>` naming the reference agents use. A host whose
+empty, contains neither `*` nor `__`, and neither begins nor ends with
+`_`. It names every tool whose name begins `mcp__S__` and whose rest
+does not begin with `_`, which is every tool of the MCP server `S`
+under the `mcp__<server>__<tool>` naming the reference agents use, and
+no tool of a server `S_`, whose tools begin `mcp__S___`. A host MUST
+refuse a server name that begins or ends with `_`, so a tool name never
+reads as two servers'. A host whose
 settings write a server as `mcp__S`, as the reference agent's do, reads
 it as `mcp__S__*`.
 
@@ -1428,7 +1432,9 @@ listed in the changelog as one.
   Draft 0.2 refused every tool-name glob there and said the reference
   agent did too, which was wrong: Claude Code allows `mcp__<server>` and
   `mcp__<server>__*`. Every other glob in an allow list is still
-  `tool_glob`. A grant set's server glob is refused only by a bare deny,
+  `tool_glob`. A server name neither begins nor ends with `_`, and a
+  server glob does not match a name whose rest after `mcp__S__` begins
+  with `_`. A grant set's server glob is refused only by a bare deny,
   or an outranking bare ask rule, that names every tool it names
   ([Grant sets](#grant-sets)).
 - A hook is called at most once per call of a batch: a sibling's

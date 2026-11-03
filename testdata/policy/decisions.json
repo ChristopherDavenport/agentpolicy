@@ -124,6 +124,7 @@
       "calls": [
         {"tool": "mcp__gh__create_pr", "args": {}, "want": {"action": "allow", "rule": "mcp__gh__*", "reason": "allowed by mcp__gh__*"}},
         {"tool": "mcp__ghx__a", "args": {}, "want": {"action": "defer", "reason": "no rule allows mcp__ghx__a: approval required by default"}},
+        {"tool": "mcp__gh___a", "args": {}, "want": {"action": "defer", "reason": "no rule allows mcp__gh___a: approval required by default"}},
         {"tool": "mcp__gh__delete", "args": {}, "want": {"action": "block", "rule": "mcp__gh__delete", "reason": "denied by mcp__gh__delete"}}
       ]
     },
@@ -140,6 +141,11 @@
     {
       "name": "a server glob whose server holds __ is refused in the allow list",
       "policy": {"allow": "mcp__a__b__*", "default": "ask"},
+      "build_error": "tool_glob"
+    },
+    {
+      "name": "a server glob whose server ends in _ is refused in the allow list",
+      "policy": {"allow": "mcp__gh___*", "default": "ask"},
       "build_error": "tool_glob"
     },
     {

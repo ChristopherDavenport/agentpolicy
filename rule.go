@@ -94,9 +94,11 @@ func (r Rule) Bare() bool { return r.Spec == "" }
 func (r Rule) Glob() bool { return strings.Contains(r.Tool, "*") }
 
 // ServerGlob reports whether the rule's tool name is a server glob,
-// "mcp__S__*" where S is not empty and holds neither "*" nor "__": it
-// names every tool of the one MCP server S, whose tools are named
-// "mcp__S__<tool>". It is the one glob honoured in the allow list, as
+// "mcp__S__*" where S is not empty, holds neither "*" nor "__", and
+// neither begins nor ends with "_": it names every tool of the one MCP
+// server S, whose tools are named "mcp__S__<tool>", and not those of a
+// server "S_", whose tools begin "mcp__S___". A host refuses a server
+// name that begins or ends with "_", so no tool name is ambiguous. It is the one glob honoured in the allow list, as
 // the reference agent allows every tool of one server, since one
 // server's namespace is a bounded grant where "mcp__*" or "B*" is not.
 // A host whose settings write a server as "mcp__S", as the reference's
@@ -107,7 +109,8 @@ func (r Rule) ServerGlob() bool {
 		return false
 	}
 	server, ok = strings.CutSuffix(server, "__*")
-	return ok && server != "" && !strings.Contains(server, "*") && !strings.Contains(server, "__")
+	return ok && server != "" && !strings.Contains(server, "*") && !strings.Contains(server, "__") &&
+		!strings.HasPrefix(server, "_") && !strings.HasSuffix(server, "_")
 }
 
 // MatchesTool reports whether the rule's tool name names the tool: the
@@ -117,9 +120,17 @@ func (r Rule) ServerGlob() bool {
 // would replace a loud failure with a quiet one. It is the engine's
 // own test, exported so a product that offers the model a tool list
 // does not write a second one that can disagree.
+//
+// A server glob, "mcp__S__*", matches a name that begins "mcp__S__"
+// and whose rest does not begin with "_", so it names server S's tools
+// and never those of a server whose name is S followed by "_".
 func (r Rule) MatchesTool(tool string) bool {
 	if !r.Glob() {
 		return r.Tool == tool
+	}
+	if r.ServerGlob() {
+		rest, ok := strings.CutPrefix(tool, strings.TrimSuffix(r.Tool, "*"))
+		return ok && !strings.HasPrefix(rest, "_")
 	}
 	return globMatch(r.Tool, tool)
 }

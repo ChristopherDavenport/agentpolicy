@@ -111,7 +111,11 @@ versions may break the API.
   batch from the same readings. RFC 0001 draft 0.3, Hooks.
 - Added: a server glob, `mcp__S__*`, builds in the allow list and
   allows every tool of the one MCP server `S`, including one the server
-  adds later (#85). `Rule.ServerGlob` reports the shape. Every other
+  adds later (#85). `Rule.ServerGlob` reports the shape: `S` is not
+  empty and holds neither `*` nor `__`, and neither begins nor ends
+  with `_`. A server glob does not match a tool whose name continues
+  `_` after `mcp__S__`, so `mcp__gh__*` names no tool of a server
+  `gh_`, in any list; a host refuses such server names. Every other
   tool-name glob in the allow list, `mcp__*` or `mcp__gh*`, is still
   `ErrToolGlob`, and a glob with a specifier still is too. A grant
   set's server glob is refused only by a bare deny, or an outranking
