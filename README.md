@@ -239,8 +239,10 @@ conversation, and `ask tainted` then asks before any call, a
 
 A tool that claims what a call would touch, `agenttool.Factual`, is
 split by its claim when no `Subjects` is registered for it: each
-claimed call is a subject under the tool it names, so `deny read(.env)`
-refuses a tool that says it reads `.env`. A claim of nothing, or an
+claimed call of the tool is a subject of it, and one naming another
+tool is held to that tool's deny and ask rules and decided by the
+default, never its allows, so `deny read(.env)` refuses a tool that
+says it reads `.env` and `allow read` does not allow it. A claim of nothing, or an
 error, blocks the call; facts that are hints, from a server the host
 does not trust, are constraints; and a claim's rewrite is what the call
 runs with. `WithoutFacts()` turns claim reading off.

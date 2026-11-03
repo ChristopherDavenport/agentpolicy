@@ -264,10 +264,13 @@ func WithHooks(fns ...func(context.Context, agentturn.ToolCallInfo) (*agentturn.
 // WithFacts has the engine split a call by its tool's facts claim,
 // agenttool.Factual, when the host registered no [Subjects] splitter
 // for the tool, which is the default; it undoes [WithoutFacts]. Each
-// claimed call is an ordinary subject under the tool it names, the
-// called tool when it names none, with the claim's text, so a tool an
-// MCP server adds later that claims, accurately, to read .env is
-// denied by read(.env) without a splitter written for it. Absent calls
+// claimed call of the called tool is an ordinary subject with the
+// claim's text. A claimed call naming another tool borrows none of
+// that tool's allows: it is decided as an unknown tool, "claim of
+// <other> by <tool>", so the default decides it, and held to the tool
+// it names as a constraint, so a tool an MCP server adds later that
+// claims, accurately, to read .env is denied by read(.env) without a
+// splitter written for it, while allow read does not allow it. Absent calls
 // are the call itself; a claim of no calls, or an error, blocks the
 // call as a failed splitter does, with the reason "<tool> call could
 // not be evaluated: <error>".
@@ -1342,7 +1345,7 @@ func (e *Engine) split(ctx context.Context, a active, info agentturn.ToolCallInf
 		if err != nil {
 			return nil, nil, err
 		}
-		return claimSubjects(f, args)
+		return claimSubjects(f, name, args)
 	}
 	subjects, err := m.Subjects(ctx, args)
 	if err != nil {
@@ -1357,14 +1360,18 @@ func (e *Engine) split(ctx context.Context, a active, info agentturn.ToolCallInf
 	return subjects, nil, nil
 }
 
-// claimSubjects is a facts claim as subjects: each claimed call an
-// ordinary subject under the tool it names, the called tool for none,
-// and absent calls the call itself, args. Facts that are hints are
-// constraints after the call itself, so they make the call stricter and
-// never decide it, and their rewrite, which agenttool.FactsOf drops,
-// is not taken. A claim of no calls is an error: there is nothing to
-// decide the call on.
-func claimSubjects(f agenttool.Facts, args json.RawMessage) ([]Subject, json.RawMessage, error) {
+// claimSubjects is a facts claim of a call of the tool name as
+// subjects: each claimed call of the called tool, named or not, an
+// ordinary subject under it, and absent calls the call itself, args. A
+// claimed call naming another tool borrows none of that tool's allows:
+// it is an ordinary subject of an unknown tool, [claimedTool], which no
+// rule names, so the default decides it, and a constraint under the
+// tool it names, so that tool's deny and ask rules still hold it. Facts
+// that are hints are constraints after the call itself, so they make
+// the call stricter and never decide it, and their rewrite, which
+// agenttool.FactsOf drops, is not taken. A claim of no calls is an
+// error: there is nothing to decide the call on.
+func claimSubjects(f agenttool.Facts, name string, args json.RawMessage) ([]Subject, json.RawMessage, error) {
 	if f.Calls != nil && len(f.Calls) == 0 {
 		return nil, nil, errors.New("facts claim returned no calls")
 	}
@@ -1380,9 +1387,24 @@ func claimSubjects(f agenttool.Facts, args json.RawMessage) ([]Subject, json.Raw
 	}
 	out := make([]Subject, 0, len(f.Calls))
 	for _, c := range f.Calls {
-		out = append(out, Subject{Args: c.Args, Tool: c.Tool, Text: c.Text})
+		if c.Tool == "" || c.Tool == name {
+			out = append(out, Subject{Args: c.Args, Text: c.Text})
+			continue
+		}
+		out = append(out,
+			Subject{Args: c.Args, Tool: claimedTool(name, c.Tool), Text: c.Text},
+			Subject{Args: c.Args, Tool: c.Tool, Text: c.Text, Constrain: true})
 	}
 	return out, f.Rewrite, nil
+}
+
+// claimedTool names the unknown tool a call of tool's claim that names
+// another is decided as: "claim of <other> by <tool>". The spaces keep
+// any rule's tool name from being it, and it begins with neither tool's
+// name, so no server glob in the allow list matches it; a tool-name
+// glob in the deny or ask list may, which only makes it stricter.
+func claimedTool(tool, other string) string {
+	return "claim of " + other + " by " + tool
 }
 
 // claim returns what info's tool claims a call with info.Args would

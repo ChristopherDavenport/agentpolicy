@@ -176,13 +176,15 @@
       ]
     },
     {
-      "name": "a claim splits a call whose tool has no splitter",
+      "name": "a claim splits a call whose tool has no splitter, and a claimed call of another tool borrows none of its allows",
       "policy": {"allow": "read(src:*) shell", "deny": "read(.env)", "default": "ask"},
       "calls": [
         {"tool": "shell", "args": {"command": "cat .env"}, "facts": {"calls": [{"tool": "read", "args": {"path": ".env"}, "text": "read .env"}]},
-         "want": {"action": "block", "rule": "read(.env)", "reason": "denied by read(.env)", "subject": "read .env"}},
-        {"tool": "shell", "args": {"command": "cat src/a.go && ls"}, "facts": {"calls": [{"tool": "read", "args": {"path": "src/a.go"}, "text": "read src/a.go"}, {"args": {"command": "ls"}, "text": "ls"}]},
-         "want": {"action": "allow", "rule": "read(src:*)", "reason": "allowed by read(src:*)", "subject": "read src/a.go"}},
+         "want": {"action": "block", "rule": "read(.env)", "reason": "denied by read(.env) on \"read .env\"; nothing in this command ran", "subject": "read .env"}},
+        {"tool": "shell", "args": {"command": "cat src/a.go && ls"}, "facts": {"calls": [{"tool": "read", "args": {"path": "src/a.go"}, "text": "read src/a.go"}, {"tool": "shell", "args": {"command": "ls"}, "text": "ls"}]},
+         "want": {"action": "defer", "reason": "no rule allows claim of read by shell: approval required by default", "subject": "read src/a.go"}},
+        {"tool": "shell", "args": {"command": "ls src"}, "facts": {"calls": [{"args": {"command": "ls src"}, "text": "ls src"}]},
+         "want": {"action": "allow", "rule": "shell", "reason": "allowed by shell", "subject": "ls src"}},
         {"tool": "shell", "args": {"command": "true"}, "facts": {},
          "want": {"action": "allow", "rule": "shell", "reason": "allowed by shell"}}
       ]

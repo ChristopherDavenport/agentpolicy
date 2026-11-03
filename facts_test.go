@@ -37,7 +37,7 @@ func TestAClaimIsReadOncePerCallPerBatch(t *testing.T) {
 					_ = json.Unmarshal(args, &a)
 					asks[a.Path]++
 					p, _ := json.Marshal(map[string]string{"path": a.Path})
-					return agenttool.Facts{Calls: []agenttool.FactCall{{Tool: "read", Args: p, Text: "read " + a.Path}}}, nil
+					return agenttool.Facts{Calls: []agenttool.FactCall{{Args: p, Text: "cat " + a.Path}}}, nil
 				}))
 			failed := false
 			flaky := func(_ context.Context, info agentturn.ToolCallInfo) (*agentturn.ToolDecision, error) {
@@ -48,7 +48,7 @@ func TestAClaimIsReadOncePerCallPerBatch(t *testing.T) {
 				return nil, nil
 			}
 			opts := append([]Option{WithHooks(flaky), WithTools(func(string) (agenttool.Tool, bool) { return shell, true })}, tt.opts...)
-			e, err := Build(Policy{Allow: rules(t, "read shell"), Default: Ask()}, testMatchers, opts...)
+			e, err := Build(Policy{Allow: rules(t, "shell"), Default: Ask()}, testMatchers, opts...)
 			if err != nil {
 				t.Fatal(err)
 			}

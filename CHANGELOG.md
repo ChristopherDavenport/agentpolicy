@@ -76,9 +76,13 @@ versions may break the API.
   terminating turn counts the answer.
 - Changed, breaking: the engine reads a tool's facts claim
   (`agenttool.Factual`) for a call whose tool has no `Subjects`
-  splitter, by default (#81). Each claimed call is a subject under the
-  tool it names, so `deny read(.env)` blocks a claiming tool an MCP
-  server added later that says it reads `.env`; absent calls are the
+  splitter, by default (#81). Each claimed call of the called tool is a
+  subject of it. A claimed call naming another tool borrows none of
+  its allows: it is decided as an unknown tool, `claim of <other> by
+  <tool>`, by the default, and held to the tool it names as a
+  constraint, so `deny read(.env)` blocks a claiming tool an MCP server
+  added later that says it reads `.env`, and `allow read` does not
+  allow it; absent calls are the
   call itself; a claim of no calls, or an error, blocks the call with
   `<tool> call could not be evaluated: <error>`, `facts claim returned
   no calls` for none. Facts that are hints (`Facts.Hint`) are

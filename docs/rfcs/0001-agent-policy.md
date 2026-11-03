@@ -301,8 +301,15 @@ they are hints from a source the host does not trust. A policy layer is
 the reader it names. A call whose tool claims facts, for which the host
 registered no splitter, is split by the claim:
 
-- each claimed call is an ordinary subject under the tool it names, the
-  called tool when it names none, with the claim's text;
+- each claimed call of the called tool, naming it or no tool, is an
+  ordinary subject with the claim's text;
+- a claimed call naming another tool `T` borrows none of `T`'s allow
+  rules: it is decided as an unknown tool, an ordinary subject of the
+  tool `claim of T by N`, `N` the called tool, which no rule's tool
+  name can be since it holds spaces, so the default decides it; and it
+  is put after that subject as a constraint under `T`, so `T`'s deny
+  and ask rules still hold it. A tool that claims to read `.env` is
+  denied by `deny read(.env)`, and is not allowed by `allow read`;
 - absent calls are the call itself;
 - an empty list, or an error, blocks the call as a failed splitter
   does, `E` being `facts claim returned no calls` for the empty list;
@@ -314,6 +321,11 @@ registered no splitter, is split by the claim:
   rewrite's confinement: the stricter of the two actions stands, and on
   an equal one the rewrite's rule and reason. The hooks are handed the
   rewrite, and a held call is released with it.
+
+A hint's text is written by a source the host does not trust and can
+become the verdict's subject, which a front shows the person it asks:
+a front SHOULD show a subject as the text of a claim, not as the
+harness's own words.
 
 An engine MUST read one claim per call per batch, and the hold and the
 call's own decision MUST read the same claim: a claim is kept for its
@@ -1455,7 +1467,8 @@ listed in the changelog as one.
   ([Constraint sources](#constraint-sources)). Draft 0.2 took subjects
   only from the called tool's splitter.
 - Claims (#81): a call whose tool claims facts, with no splitter, is
-  split by the claim; hints are constraints after the call itself; a
+  split by the claim; a claimed call naming another tool is decided as
+  an unknown tool and held to that tool's deny and ask as a constraint; hints are constraints after the call itself; a
   claim's rewrite is decided again and is what the call runs with; one
   claim per call per batch, read by the hold and the decision alike
   ([Claims](#claims)). A binding MAY turn reading off. The corpus gains
