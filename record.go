@@ -136,34 +136,38 @@ type overRecord struct {
 
 // setRecord is a grant set as an activation kept it: its source's rank
 // and trust, its lists as rule strings, and the note of every rule that
-// has one, keyed by the rule's string form. The source's name and hash
+// has one, keyed by its list, "allow", "deny" or "ask", and then by the
+// rule's string form, so one rule in two lists keeps both notes. The source's name and hash
 // are the record's own source and source_hash.
 type setRecord struct {
-	Rank    int               `json:"rank,omitempty"`
-	Trusted bool              `json:"trusted,omitempty"`
-	Allow   []string          `json:"allow,omitempty"`
-	Deny    []string          `json:"deny,omitempty"`
-	Ask     []string          `json:"ask,omitempty"`
-	Notes   map[string]string `json:"notes,omitempty"`
+	Rank    int                          `json:"rank,omitempty"`
+	Trusted bool                         `json:"trusted,omitempty"`
+	Allow   []string                     `json:"allow,omitempty"`
+	Deny    []string                     `json:"deny,omitempty"`
+	Ask     []string                     `json:"ask,omitempty"`
+	Notes   map[string]map[string]string `json:"notes,omitempty"`
 }
 
 // setOf is the record of a kept set.
 func setOf(set RuleSet) *setRecord {
 	rec := &setRecord{Rank: set.Source.Rank, Trusted: set.Source.Trusted}
-	list := func(rules []Rule) []string {
+	list := func(name string, rules []Rule) []string {
 		var out []string
 		for _, r := range rules {
 			out = append(out, r.String())
 			if r.Note != "" {
 				if rec.Notes == nil {
-					rec.Notes = map[string]string{}
+					rec.Notes = map[string]map[string]string{}
 				}
-				rec.Notes[r.String()] = r.Note
+				if rec.Notes[name] == nil {
+					rec.Notes[name] = map[string]string{}
+				}
+				rec.Notes[name][r.String()] = r.Note
 			}
 		}
 		return out
 	}
-	rec.Allow, rec.Deny, rec.Ask = list(set.Allow), list(set.Deny), list(set.Ask)
+	rec.Allow, rec.Deny, rec.Ask = list("allow", set.Allow), list("deny", set.Deny), list("ask", set.Ask)
 	return rec
 }
 

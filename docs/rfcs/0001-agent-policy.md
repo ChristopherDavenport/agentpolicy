@@ -896,7 +896,12 @@ are never reported in the reverse of the order they were made, so a
 reader that replays the record in order ends with the rules in force.
 A binding MAY report a change's verdicts after the call that made it
 returns, while another change's are being reported, and MUST then
-report them after those.
+report them after those. An observer MAY therefore be called on
+another thread than the one that made the change, and with the
+caller's context values, the grant scope among them, detached from
+its cancellation and deadline, so a verdict reported late is not lost
+to a call that has since ended. An observer that fails on one verdict
+MUST NOT keep the rest from any observer.
 
 ## Deferred calls
 
@@ -1294,7 +1299,7 @@ with `ns` set to `agentpolicy:verdict` and `data` a JSON object:
 | `grant` | the kind of a grant or a revocation: `"grant"`, `"grant_over"`, `"activate"`, `"grant_set"`, `"revoke"` or `"revoke_scope"` |
 | `scope` | the grant scope's key a grant set or a revocation was made under |
 | `over` | on a grant over, `{"rule", "source"?}`: the ask rule it answered, in string form, and its source's name |
-| `set` | on an activation, `{"rank"?, "trusted"?, "allow"?, "deny"?, "ask"?, "notes"?}`: the source's rank and trust, each list as rule strings in order, and `notes` mapping a rule's string form to its note; the source's name and hash are the record's `source` and `source_hash`; `{}` for a set that keeps nothing |
+| `set` | on an activation, `{"rank"?, "trusted"?, "allow"?, "deny"?, "ask"?, "notes"?}`: the source's rank and trust, each list as rule strings in order, and `notes` mapping a list's name, `"allow"`, `"deny"` or `"ask"`, to an object mapping a rule's string form to its note, so one rule in two lists keeps both; the source's name and hash are the record's `source` and `source_hash`; `{}` for a set that keeps nothing |
 | `refused` | on an activation, an array of `{"rule", "reason"}`, in order |
 
 Every member but `action` is omitted when the verdict leaves it empty,
@@ -1593,7 +1598,9 @@ listed in the changelog as one.
   granted by the product`, as the grant read; draft 0.3 left the name
   out.
 - The verdicts of rule changes are reported in the order the changes
-  took effect. Draft 0.3 did not say, and the reference reported each
+  took effect, possibly on another thread and after the call returns,
+  with the caller's context detached from its cancellation; an
+  observer's failure does not keep the rest from the observers. Draft 0.3 did not say, and the reference reported each
   after releasing its lock, so a revocation made at once with an
   activation could be recorded before it.
 - The corpus gains `steps` on a decision case, and `scope` and

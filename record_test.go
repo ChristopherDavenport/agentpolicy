@@ -36,7 +36,11 @@ func TestVerdictRecord(t *testing.T) {
 			Set: &RuleSet{Source: Source{Name: "skill:deploy", Hash: "sha256:9f2c", Trusted: true, Rank: 1},
 				Allow: []Rule{{Tool: "bash", Spec: "git:*"}}, Deny: []Rule{{Tool: "web_fetch", Note: "no network"}}},
 			Refused: []Refusal{{Rule: Rule{Tool: "edit"}, Reason: "edit from managed outranks the grant"}}},
-			want: `{"action":"allow","source":"skill:deploy","source_hash":"sha256:9f2c","reason":"activated the rules granted by skill:deploy","by":"policy","grant":"activate","scope":"conv-1","set":{"rank":1,"trusted":true,"allow":["bash(git:*)"],"deny":["web_fetch"],"notes":{"web_fetch":"no network"}},"refused":[{"rule":"edit","reason":"edit from managed outranks the grant"}]}`},
+			want: `{"action":"allow","source":"skill:deploy","source_hash":"sha256:9f2c","reason":"activated the rules granted by skill:deploy","by":"policy","grant":"activate","scope":"conv-1","set":{"rank":1,"trusted":true,"allow":["bash(git:*)"],"deny":["web_fetch"],"notes":{"deny":{"web_fetch":"no network"}}},"refused":[{"rule":"edit","reason":"edit from managed outranks the grant"}]}`},
+		// A rule in two lists keeps the note of each.
+		{name: "an activation with one rule in two lists", v: Verdict{Action: agentturn.Allow, Reason: "activated the rules granted by skill:web", By: ByPolicy, Grant: KindActivate, Source: "skill:web",
+			Set: &RuleSet{Deny: []Rule{{Tool: "web_fetch", Spec: "evil.com:*", Note: "blocked host"}}, Ask: []Rule{{Tool: "web_fetch", Spec: "evil.com:*", Note: "asked host"}}}},
+			want: `{"action":"allow","source":"skill:web","reason":"activated the rules granted by skill:web","by":"policy","grant":"activate","set":{"deny":["web_fetch(evil.com:*)"],"ask":["web_fetch(evil.com:*)"],"notes":{"ask":{"web_fetch(evil.com:*)":"asked host"},"deny":{"web_fetch(evil.com:*)":"blocked host"}}}}`},
 		{name: "an activation that keeps nothing", v: Verdict{Action: agentturn.Allow, Reason: "activated the rules granted by the product", By: ByPolicy, Grant: KindActivate, Set: &RuleSet{}},
 			want: `{"action":"allow","reason":"activated the rules granted by the product","by":"policy","grant":"activate","set":{}}`},
 		{name: "a grant over an ask rule", v: Verdict{Tool: "bash", Action: agentturn.Allow, Rule: &Rule{Tool: "bash", Spec: "git push origin:*", Source: Source{Name: "user", Rank: 1}}, Reason: "granted bash(git push origin:*) over bash(git push:*)", By: ByPolicy, Grant: KindGrantOver, Source: "user",

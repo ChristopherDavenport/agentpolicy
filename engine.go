@@ -167,7 +167,13 @@ type Option func(*Engine)
 // change the rules at the same time. A change made while another's
 // verdicts are being reported, by another goroutine or by an observer,
 // is reported after them by the caller already reporting, and may
-// reach the observers after the call that made it returns.
+// reach the observers after the call that made it returns, on that
+// caller's goroutine. A rule change's verdict therefore comes with a
+// context that keeps the values of the one the change was made with,
+// its grant scope among them, and is detached from its cancellation
+// and deadline. An observer that panics on one does not keep the
+// others from any observer; the panic is raised again once the queue
+// is reported.
 //
 // Each WithObserver adds an observer rather than replacing one, and
 // the observers are called in the order they were given, each with
@@ -1853,7 +1859,13 @@ type journaled struct {
 // enqueue queues the verdicts of a rule change for [Engine.report].
 // The lock is held, the one under which the change took effect, so the
 // queue is in the order the changes took effect.
+//
+// The context is detached from the caller's cancellation, keeping its
+// values: the verdict may be reported after the call returns, on
+// another goroutine, and a recorder handed a cancelled context would
+// drop it.
 func (e *Engine) enqueue(ctx context.Context, vs ...Verdict) {
+	ctx = context.WithoutCancel(ctx)
 	for _, v := range vs {
 		e.journal = append(e.journal, journaled{ctx: ctx, v: v})
 	}
@@ -1866,6 +1878,10 @@ func (e *Engine) enqueue(ctx context.Context, vs ...Verdict) {
 // never reported in the reverse of the order they took effect, and an
 // observer that changes the rules itself queues its change's verdicts
 // behind the one it is observing rather than waiting on itself.
+//
+// An observer that panics does not keep the rest of the queue from the
+// observers: each call is recovered, every queued verdict is reported,
+// and then the first panic is raised again in the reporting caller.
 func (e *Engine) report() {
 	e.mu.Lock()
 	if e.draining {
@@ -1874,29 +1890,36 @@ func (e *Engine) report() {
 	}
 	e.draining = true
 	e.mu.Unlock()
-	finished := false
-	defer func() {
-		// An observer panicked: let the next change report.
-		if !finished {
-			e.mu.Lock()
-			e.draining = false
-			e.mu.Unlock()
-		}
-	}()
+	var panicked any
 	for {
 		e.mu.Lock()
 		batch := e.journal
 		e.journal = nil
 		if len(batch) == 0 {
-			e.draining, finished = false, true
+			e.draining = false
 			e.mu.Unlock()
-			return
+			break
 		}
 		e.mu.Unlock()
 		for _, j := range batch {
-			e.observe(j.ctx, j.v)
+			for _, fn := range e.observers {
+				if r := observeSafely(fn, j.ctx, j.v); r != nil && panicked == nil {
+					panicked = r
+				}
+			}
 		}
 	}
+	if panicked != nil {
+		panic(panicked)
+	}
+}
+
+// observeSafely calls fn and returns what it panicked with, nil when
+// it returned.
+func observeSafely(fn func(context.Context, Verdict), ctx context.Context, v Verdict) (panicked any) {
+	defer func() { panicked = recover() }()
+	fn(ctx, v)
+	return nil
 }
 
 // Grant adds an allow rule for the rest of the process, as "always

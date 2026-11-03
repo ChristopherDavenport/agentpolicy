@@ -28,7 +28,8 @@ versions may break the API.
   its grants and refusals: Allow, `activated the rules granted by N`,
   `Grant` `KindActivate`, with `Verdict.Set`, the set as kept (its
   deny and ask rules included), and `Verdict.Refused`. Its record
-  carries `set`, `{rank, trusted, allow, deny, ask, notes}`, and
+  carries `set`, `{rank, trusted, allow, deny, ask, notes}`, `notes`
+  keyed by list and then by rule, and
   `refused`, `[{rule, reason}]`, and replaces any set of its source
   under its scope, so a reader rebuilds the sets from the record alone.
   An activation that keeps nothing, such as one of deny rules alone,
@@ -46,8 +47,13 @@ versions may break the API.
   made while another's verdicts are being reported, by another
   goroutine or by an observer, is reported after them by the caller
   already reporting, and may reach the observers after the call that
-  made it returns. Before, a revocation made at once with an activation
-  could be reported before it.
+  made it returns, on the reporting caller's goroutine, with a context
+  that keeps the caller's values and is detached from its
+  cancellation (`context.WithoutCancel`). An observer that panics no
+  longer keeps the rest of the queue from the observers: every verdict
+  is reported, then the first panic is raised again. Before, a
+  revocation made at once with an activation could be reported before
+  it.
 - Added: the decisions corpus gains `steps` on a case, grants, grants
   over a call's verdict and revocations made after its calls with the
   records they report, and `scope` and `records` on a grant set.

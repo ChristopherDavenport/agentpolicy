@@ -664,3 +664,69 @@ func TestBatchHoldIsScoped(t *testing.T) {
 		e.Forget("run_1")
 	}
 }
+
+// A rule change's verdict may reach the observers after the call that
+// made it returns, so the context it is reported with keeps the
+// caller's values and drops its cancellation: a recorder handed a
+// cancelled context would lose the record.
+func TestGrantVerdictsOutliveTheCallersContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(ContextWithGrantScope(context.Background(), "conv-1"))
+	cancel()
+	j := &journal{}
+	var errs []error
+	var scopes []string
+	e, err := Build(Policy{Default: Ask()}, testMatchers, WithObserver(func(ctx context.Context, v Verdict) {
+		errs = append(errs, ctx.Err())
+		scopes = append(scopes, GrantScopeFromContext(ctx))
+		j.observe(ctx, v)
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.GrantSet(ctx, RuleSet{Source: Source{Name: "skill:deploy", Trusted: true}, Allow: rules(t, "bash(git:*)")})
+	e.Revoke(ctx, "skill:deploy")
+	if len(errs) != 3 {
+		t.Fatalf("%d verdicts, want 3", len(errs))
+	}
+	for i := range errs {
+		if errs[i] != nil || scopes[i] != "conv-1" {
+			t.Errorf("verdict %d reported with err %v and scope %q, want none and conv-1", i, errs[i], scopes[i])
+		}
+	}
+}
+
+// An observer that panics on one verdict does not keep the rest of the
+// batch from the observers: every verdict is reported, then the panic
+// is raised again, and the next change reports as before.
+func TestGrantVerdictsSurviveAPanickingObserver(t *testing.T) {
+	ctx := context.Background()
+	var got []string
+	e, err := Build(Policy{Default: Ask()}, testMatchers,
+		WithObserver(func(_ context.Context, v Verdict) {
+			if v.Grant == KindActivate {
+				panic("observer failed")
+			}
+		}),
+		WithObserver(func(_ context.Context, v Verdict) { got = append(got, v.Reason) }))
+	if err != nil {
+		t.Fatal(err)
+	}
+	func() {
+		defer func() {
+			if r := recover(); r != "observer failed" {
+				t.Errorf("GrantSet recovered %v, want the observer's panic", r)
+			}
+		}()
+		e.GrantSet(ctx, RuleSet{Source: Source{Name: "skill:deploy", Trusted: true}, Allow: rules(t, "bash(git:*) bash(ls:*)")})
+	}()
+	e.Revoke(ctx, "skill:deploy")
+	want := []string{
+		"activated the rules granted by skill:deploy",
+		"granted bash(git:*) by skill:deploy",
+		"granted bash(ls:*) by skill:deploy",
+		"revoked the rules granted by skill:deploy",
+	}
+	if strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Errorf("verdicts = %q\nwant %q", got, want)
+	}
+}
