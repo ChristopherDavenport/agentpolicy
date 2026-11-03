@@ -17,6 +17,15 @@ versions may break the API.
   names a decider the session format does not know is no answer, as
   agentturn v0.0.35's `Ask` refuses it: the call is deferred to the
   run's end. RFC 0001 draft 0.3, Asking in the run.
+- Added: a server glob, `mcp__S__*`, builds in the allow list and
+  allows every tool of the one MCP server `S`, including one the server
+  adds later (#85). `Rule.ServerGlob` reports the shape. Every other
+  tool-name glob in the allow list, `mcp__*` or `mcp__gh*`, is still
+  `ErrToolGlob`, and a glob with a specifier still is too. A grant
+  set's server glob is refused only by a bare deny, or an outranking
+  bare ask, whose glob names every tool of the server; a deny of one of
+  its tools still beats it at the decision. RFC 0001 draft 0.3 also
+  corrects its prior art: Claude Code allows `mcp__<server>__*`.
 
 ## v0.0.17 - 2026-10-11
 

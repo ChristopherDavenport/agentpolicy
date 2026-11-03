@@ -119,6 +119,57 @@
       "build_error": "tool_glob"
     },
     {
+      "name": "a server glob is honoured in the allow list",
+      "policy": {"allow": "mcp__gh__*", "deny": "mcp__gh__delete", "default": "ask"},
+      "calls": [
+        {"tool": "mcp__gh__create_pr", "args": {}, "want": {"action": "allow", "rule": "mcp__gh__*", "reason": "allowed by mcp__gh__*"}},
+        {"tool": "mcp__ghx__a", "args": {}, "want": {"action": "defer", "reason": "no rule allows mcp__ghx__a: approval required by default"}},
+        {"tool": "mcp__gh__delete", "args": {}, "want": {"action": "block", "rule": "mcp__gh__delete", "reason": "denied by mcp__gh__delete"}}
+      ]
+    },
+    {
+      "name": "a glob over several servers is refused in the allow list",
+      "policy": {"allow": "mcp__gh*", "default": "ask"},
+      "build_error": "tool_glob"
+    },
+    {
+      "name": "a server glob with an empty server is refused in the allow list",
+      "policy": {"allow": "mcp____*", "default": "ask"},
+      "build_error": "tool_glob"
+    },
+    {
+      "name": "a server glob whose server holds __ is refused in the allow list",
+      "policy": {"allow": "mcp__a__b__*", "default": "ask"},
+      "build_error": "tool_glob"
+    },
+    {
+      "name": "a server glob takes no specifier",
+      "policy": {"allow": "mcp__gh__*(x)", "default": "ask"},
+      "build_error": "tool_glob"
+    },
+    {
+      "name": "a grant set's server glob is refused only by a rule naming every tool it names",
+      "policy": {
+        "sources": [
+          {"name": "managed", "rank": 3, "trusted": true, "deny": "mcp__gh__delete", "ask": "mcp__lin*"}
+        ],
+        "default": "ask"
+      },
+      "grants": [
+        {"source": {"name": "skill:gh", "rank": 1, "trusted": true}, "allow": "mcp__gh__* mcp__linear__* mcp__*",
+         "granted": ["mcp__gh__*"],
+         "refused": [
+           {"rule": "mcp__linear__*", "reason": "mcp__lin* from managed outranks the grant"},
+           {"rule": "mcp__*", "reason": "agentpolicy: tool-name glob: mcp__* is not honoured in the allow list"}
+         ]}
+      ],
+      "calls": [
+        {"tool": "mcp__gh__create_pr", "args": {}, "want": {"action": "allow", "rule": "mcp__gh__*", "source": "skill:gh", "reason": "allowed by mcp__gh__*"}},
+        {"tool": "mcp__gh__delete", "args": {}, "want": {"action": "block", "rule": "mcp__gh__delete", "source": "managed", "reason": "denied by mcp__gh__delete"}},
+        {"tool": "mcp__linear__list", "args": {}, "want": {"action": "defer", "rule": "mcp__lin*", "source": "managed", "reason": "approval required by mcp__lin*"}}
+      ]
+    },
+    {
       "name": "a tool-name glob denies and removes the tool",
       "policy": {"deny": "mcp__github__*", "ask": "mcp__*", "default": "allow"},
       "calls": [

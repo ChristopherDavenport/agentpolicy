@@ -33,6 +33,31 @@ func TestMatchesTool(t *testing.T) {
 	}
 }
 
+// A server glob is mcp__S__* for one server S, and only that.
+func TestServerGlob(t *testing.T) {
+	tests := []struct {
+		tool string
+		want bool
+	}{
+		{"mcp__gh__*", true},
+		{"mcp__my-server__*", true},
+		{"mcp__*", false},
+		{"mcp__gh*", false},
+		{"mcp____*", false},
+		{"mcp__a__b__*", false},
+		{"mcp__g*h__*", false},
+		{"mcp__gh__x*", false},
+		{"mcp__gh__", false},
+		{"mcp__gh", false},
+		{"B*", false},
+	}
+	for _, tc := range tests {
+		if got := (Rule{Tool: tc.tool}).ServerGlob(); got != tc.want {
+			t.Errorf("Rule{%q}.ServerGlob() = %v, want %v", tc.tool, got, tc.want)
+		}
+	}
+}
+
 // A tool-name glob in the deny and ask lists fires, where at v0.0.2 it
 // built, was reported by Engine.Policy, was shown by any front that
 // lists the rules, and had no effect on any call.

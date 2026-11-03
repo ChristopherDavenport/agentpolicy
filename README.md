@@ -47,8 +47,11 @@ front.
 
 A rule's tool name may be a glob, `mcp__*`, which the deny and ask
 lists honour: a `*` stands for any run of characters, and nothing
-folds case. A glob in the allow list does not build, since a glob
-names no matcher and the reference refuses one too.
+folds case. In the allow list only a server glob builds, `mcp__gh__*`
+for every tool of the one MCP server `gh`, as the reference allows one
+server's tools; any other glob there, `mcp__*` or `B*`, does not, and
+no glob takes a specifier, since a glob names no matcher. A product
+whose settings write a server as `mcp__gh` reads it as `mcp__gh__*`.
 
 Rules a product did not write are spelled with the reference's tool
 names, `Bash`, `Read`, `Edit`, and one of those names may govern

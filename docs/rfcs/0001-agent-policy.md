@@ -117,6 +117,8 @@ RFC 2119.
   matches on its own; it cancels a match of another rule.
 - **Tool-name glob**: a rule whose tool name contains `*`, naming every
   tool whose name it matches.
+- **Server glob**: the tool-name glob `mcp__S__*` naming every tool of
+  one MCP server `S`, the one glob an allow list honours.
 - **List**: the deny, ask or allow rules of a policy.
 - **Policy**: three lists, a default, the sources the rules came from,
   and the allow rules withheld from untrusted sources.
@@ -204,6 +206,13 @@ A **tool-name glob** is a rule whose tool name contains `*`. `*`
 stands for any run of characters, the empty run included, at any
 position; every other character stands for itself. `mcp__*` names
 every tool of every MCP server.
+
+A **server glob** is a tool-name glob `mcp__S__*`, where `S` is not
+empty and contains neither `*` nor `__`. It names every tool whose name
+begins `mcp__S__`, which is every tool of the MCP server `S` under the
+`mcp__<server>__<tool>` naming the reference agents use. A host whose
+settings write a server as `mcp__S`, as the reference agent's do, reads
+it as `mcp__S__*`.
 
 A rule MAY carry a **note**, a sentence saying why it exists. The note
 is not part of the grammar: a parser leaves it empty, and a host's
@@ -348,7 +357,7 @@ engine. It MUST refuse, with these error kinds:
 | --- | --- | --- |
 | `no_default` | the default is unset | `agentpolicy: policy default is not set; use Allow(), Deny() or Ask()` |
 | `no_matcher` | a rule has a specifier, a carve-out's included, and its tool has no matcher | `agentpolicy: no matcher for the rule's tool: R` |
-| `tool_glob` | a tool-name glob is in the allow list | `agentpolicy: tool-name glob: R is not honoured in the allow list` |
+| `tool_glob` | a tool-name glob other than a server glob is in the allow list | `agentpolicy: tool-name glob: R is not honoured in the allow list` |
 | `tool_glob` | a tool-name glob has a specifier | `agentpolicy: tool-name glob: R takes no specifier` |
 | `invalid_rule` | a rule has no tool name, or the alias table is refused | `agentpolicy: rule "R": missing tool name` for the first |
 
@@ -364,9 +373,14 @@ checked. The default MUST be set explicitly: a deny list written on its
 own never allows everything else by accident.
 
 A tool-name glob is honoured in the deny and ask lists, where the
-reference agents honour one. It is refused in the allow list, where the
-reference refuses it too, and with a specifier, since a glob names no
-matcher to read the specifier with.
+reference agents honour one. In the allow list a server glob is
+honoured, as the reference agent allows every tool of one server, and
+every other tool-name glob is refused: one server's namespace is a
+bounded grant, while `mcp__*` or `B*` allows tools nobody has named. A
+glob with a specifier is refused in every list, a server glob's
+included, since a glob names no matcher to read the specifier with;
+when a server glob in the allow list has a specifier, the error is the
+specifier's.
 
 ## Deciding a subject
 
@@ -656,6 +670,17 @@ through the aliases, and keeps or refuses each:
 | allow | the source is untrusted | `withheld: the source N is not trusted` |
 | allow | a bare deny rule of the policy that no carve-out reaches names its tool | `denied by R: a grant never beats a deny` |
 | allow | a bare ask rule of the policy that no carve-out reaches, from a source that outranks the set, names its tool | `R from S outranks the grant`, or `R outranks the grant` |
+
+A rule names a grant's tool when its tool name is that name, or a
+tool-name glob matching it. A server glob names every tool of its
+server, and a bare deny
+or ask rule refuses it only when the rule's tool name names every tool
+the server glob names: `mcp__*` and `mcp__gh__*` refuse `mcp__gh__*`,
+and `mcp__gh__delete` does not, since it is a question about one call
+that the decision answers, deny before allow. A rule's tool name `G`
+names every tool a server glob `mcp__S__*` names exactly when `G`
+matches the string `mcp__S__*` itself, reading that string's `*` as an
+ordinary character.
 
 Deny rules are considered first, then ask, then allow, each in order.
 A set's deny and ask rules apply at once, trusted or not, since they
@@ -1079,7 +1104,7 @@ The root module of this repository is the reference binding.
 
 | Contract | Go |
 | --- | --- |
-| rule | `Rule{Tool, Spec, Source, Note}`; `String`, `Bare`, `Glob`, `MatchesTool`, `CarveOut` |
+| rule | `Rule{Tool, Spec, Source, Note}`; `String`, `Bare`, `Glob`, `ServerGlob`, `MatchesTool`, `CarveOut` |
 | grammar | `ParseRules(s)`; every error begins `agentpolicy: rule "<token>": ` and ends with the kind's text, `unbalanced parentheses`, `missing tool name`, `empty specifier`, `empty carve-out`, `text after the specifier` |
 | source | `Source{Name, Path, Hash, Trusted, Rank}` |
 | policy | `Policy{Allow, Deny, Ask, Default, Sources, Withheld}`; `Allow()`, `Deny()`, `Ask()`; the zero `Default` is unset; `Policy.WithDefault(d)` |
@@ -1251,11 +1276,21 @@ listed in the changelog as one.
   agentsession RFC 0001 does not know is no answer, following agenttool
   RFC 0001 draft 0.9 and agentturn RFC 0001 draft 0.4 ([Asking in the
   run](#asking-in-the-run)). Draft 0.2 named `human` for every answer.
+- A server glob, `mcp__S__*`, is honoured in the allow list (#85).
+  Draft 0.2 refused every tool-name glob there and said the reference
+  agent did too, which was wrong: Claude Code allows `mcp__<server>` and
+  `mcp__<server>__*`. Every other glob in an allow list is still
+  `tool_glob`. A grant set's server glob is refused only by a bare deny,
+  or an outranking bare ask rule, that names every tool it names
+  ([Grant sets](#grant-sets)).
 
 ## Prior art
 
 - **Claude Code**'s permission rules are the grammar's source: `Bash`,
   `Bash(git status:*)`, allow, deny and ask lists with deny first,
+  `mcp__<server>` and `mcp__<server>__*` in an allow list for every tool
+  of one MCP server, which is the server glob, and no other glob over
+  tool names in an allow list,
   settings files from an organisation, a project and a user that merge
   rather than override, a trust prompt before a project's rules apply,
   and a skill's `allowed-tools` as rules active while the skill runs.

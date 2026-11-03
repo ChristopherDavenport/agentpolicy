@@ -88,9 +88,27 @@ func (r Rule) Bare() bool { return r.Spec == "" }
 // Glob reports whether the rule's tool name is a glob over tool names
 // rather than one tool's own name, "mcp__*" for every tool of every
 // MCP server. A glob is honoured in the deny and ask lists, where both
-// references honour one, and [Build] refuses it in the allow list and
-// refuses it with a specifier, since a glob names no matcher.
+// references honour one. [Build] refuses it with a specifier, since a
+// glob names no matcher, and refuses it in the allow list unless it is
+// a [Rule.ServerGlob].
 func (r Rule) Glob() bool { return strings.Contains(r.Tool, "*") }
+
+// ServerGlob reports whether the rule's tool name is a server glob,
+// "mcp__S__*" where S is not empty and holds neither "*" nor "__": it
+// names every tool of the one MCP server S, whose tools are named
+// "mcp__S__<tool>". It is the one glob honoured in the allow list, as
+// the reference agent allows every tool of one server, since one
+// server's namespace is a bounded grant where "mcp__*" or "B*" is not.
+// A host whose settings write a server as "mcp__S", as the reference's
+// do, reads it as "mcp__S__*".
+func (r Rule) ServerGlob() bool {
+	server, ok := strings.CutPrefix(r.Tool, "mcp__")
+	if !ok {
+		return false
+	}
+	server, ok = strings.CutSuffix(server, "__*")
+	return ok && server != "" && !strings.Contains(server, "*") && !strings.Contains(server, "__")
+}
 
 // MatchesTool reports whether the rule's tool name names the tool: the
 // same name, or a glob that matches it, where "*" stands for any run

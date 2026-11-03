@@ -26,9 +26,9 @@ var (
 	// the rule.
 	ErrNoMatcher = errors.New("agentpolicy: no matcher for the rule's tool")
 	// ErrToolGlob is returned for a rule whose tool name is a glob that
-	// the engine will not honour: one in the allow list, where the
-	// reference refuses it too, and one with a specifier, which names
-	// no matcher. The error names the rule.
+	// the engine will not honour: one in the allow list other than a
+	// server glob, "mcp__S__*" ([Rule.ServerGlob]), and one with a
+	// specifier, which names no matcher. The error names the rule.
 	ErrToolGlob = errors.New("agentpolicy: tool-name glob")
 )
 
@@ -431,8 +431,9 @@ func checkPolicy(p Policy, matchers map[string]ToolMatcher) error {
 
 // checkRule refuses a rule with no tool, one with a specifier for a
 // tool that has no matcher, and a tool-name glob the engine will not
-// honour: one in the allow list, and one with a specifier, since the
-// glob names no matcher to read the specifier with. A rule that cannot
+// honour: one in the allow list that is not a server glob, and one
+// with a specifier, since the glob names no matcher to read the
+// specifier with. A rule that cannot
 // work fails where every other unusable rule fails, at Build, rather
 // than building and never firing.
 func checkRule(r Rule, matchers map[string]ToolMatcher, list string) error {
@@ -441,7 +442,7 @@ func checkRule(r Rule, matchers map[string]ToolMatcher, list string) error {
 	}
 	if r.Glob() {
 		switch {
-		case list == "allow":
+		case list == "allow" && !r.ServerGlob():
 			return fmt.Errorf("%w: %s is not honoured in the allow list", ErrToolGlob, r)
 		case r.Spec != "":
 			return fmt.Errorf("%w: %s takes no specifier", ErrToolGlob, r)
@@ -530,7 +531,8 @@ func (e *Engine) Policy() Policy {
 // give. A product that cannot re-derive a policy writes rules that
 // cover the tools it has not seen instead: a bare name, or a tool-name
 // glob in the deny or ask list, "mcp__*", governs a tool that appears
-// later, where an allow rule needs the tool's own name.
+// later, and so does a server glob in the allow list, "mcp__gh__*",
+// where any other allow rule needs the tool's own name.
 //
 // The policy in force changes for the next call decided, not for the
 // calls already decided: a run that ended on an ask is answered under
