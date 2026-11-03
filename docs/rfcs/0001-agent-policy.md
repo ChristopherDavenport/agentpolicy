@@ -1,6 +1,6 @@
 # RFC 0001: Agent Policy
 
-Status: draft 0.3
+Status: draft 0.4
 Author: Christopher Davenport
 Discussion: to be opened against this repository. The Go module at its
 root is the reference binding. agentturn RFC 0001 is the loop whose
@@ -845,6 +845,28 @@ refusal; block with `revoked the rules granted by N` for a revocation,
 `revoked the rules granted without a scope` for the unscoped scope's.
 The decider is `policy`.
 
+Each of these verdicts also says, apart from its reason, what it did,
+so a reader rebuilds the grants in force from the record without
+re-deciding them and without parsing a reason:
+
+- its **grant** is the kind: `grant` for a grant, and for a grant
+  over a verdict with no rule, which is a plain grant; `grant_over`
+  for a grant over an ask rule; `grant_set` for a grant set's grant
+  and for its refusal alike, told apart by the action; `revoke` for a
+  revocation of a name; and `revoke_scope` for a revocation of a
+  scope;
+- its **source** is the name of the source the grant's rule or the
+  set was made under, which is also the rule's source, or the name a
+  revocation removed, on every kind but `revoke_scope`, and empty for
+  a source with no name, which a reason calls `the product`;
+- its **scope** is the grant scope a set was activated or refused
+  under, or a revocation removed under, and empty for the unscoped
+  scope. A grant and a grant over join the policy, which no scope
+  limits, so they carry no scope whatever their context carries.
+
+A refused grant or grant over changes nothing and is no verdict; a
+revocation that removed no rule is none either.
+
 ## Deferred calls
 
 A deferred call ends the run with the call pending, and the host
@@ -1205,6 +1227,9 @@ A verdict is what was decided and why:
 | subject | the text of the subject whose verdict the fold kept, or of the part a hook decided on; empty for a call no splitter split and no hook named a part of |
 | confined | what confines the call, whatever the action; empty when unconfined or unnamed |
 | quarantined | the items an input guard quarantined, on its allow, or named in a refused quarantine, on its block; empty otherwise |
+| grant | for a grant, a grant set's grant or refusal, or a revocation, its kind as [Grant sets](#grant-sets) gives it: `grant`, `grant_over`, `grant_set`, `revoke` or `revoke_scope`; empty otherwise |
+| source | for a grant or a revocation, the name of the source it was made under or removed; empty for `revoke_scope`, for a source with no name, and for any other verdict, whose rule names its source |
+| scope | the grant scope a grant set was activated or refused under, or a revocation removed under; empty for the unscoped scope, for a grant and a grant over, and for any other verdict |
 
 Every verdict reaches every observer the host registered, exactly
 once, in the order they were registered, and outside any lock the
@@ -1228,14 +1253,31 @@ with `ns` set to `agentpolicy:verdict` and `data` a JSON object:
 | `run_id`, `turn`, `call_id`, `tool`, `guard` | as the verdict names them |
 | `action` | `"allow"`, `"block"` or `"defer"`; always present |
 | `rule` | the rule's string form |
-| `source` | the rule's source's name |
+| `source` | the rule's source's name; on a revocation, which has no rule, the name it removed |
 | `source_hash` | the rule's source's hash, the digest of the settings file or the skill frontmatter the rule was read from, so a reader says which version of the source a decision or a grant was built from and not only its name |
 | `note` | the rule's note, whatever its source |
 | `reason`, `by`, `held`, `subject`, `confined` | as the verdict names them |
 | `quarantined` | an array naming each quarantined item by reference, `{"type", "id"?, "call_id"?}`, from its Open Responses form; never its content, so its text is redacted with the entry that holds it and is not copied into this one |
+| `grant` | the kind of a grant or a revocation: `"grant"`, `"grant_over"`, `"grant_set"`, `"revoke"` or `"revoke_scope"` |
+| `scope` | the grant scope's key a grant set or a revocation was made under |
 
 Every member but `action` is omitted when the verdict leaves it empty,
 zero or false. A reader MUST ignore members it does not know.
+
+A record of a grant, a grant over, a grant set's activation or
+refusal, or a revocation MUST carry `grant`, its kind as [Grant
+sets](#grant-sets) gives it. It MUST carry `source`, the name of the
+source the grant or the set was made under or the revocation removed,
+on every kind but `revoke_scope`, unless that source has no name, so
+an absent `source` on a grant is the host's own. When it was made
+under a grant scope it MUST carry `scope`, the scope's key; a grant
+and a grant over carry none. A reader MUST take the kind, the source
+and the scope from these members and MUST NOT parse `reason` for them.
+A record written under draft 0.3 or before carries none of them, and
+a reader that must read one MAY fall back on the reason texts
+[Grant sets](#grant-sets) fixes; it then has no scope but the session
+the record sits in. Since each is omitted when empty, every other
+record is byte-identical to its draft 0.3 form.
 
 ## Presets
 
@@ -1287,7 +1329,7 @@ The root module of this repository is the reference binding.
 | model-backed output | `classify.WithEveryTurn()` to judge a turn that is not final |
 | hooks | `WithHooks(fns…)`; answering hooks `WithAnsweringHooks(fns…)`; a hook's subject is `agentturn.ToolDecision.Subject` |
 | offering tools | `Engine.Removes(tool)`, `Engine.Filter(tools)`, `Engine.ToolProvider(base)` for `agentturn.Config.ToolProvider` |
-| grants | `Engine.Grant`, `Engine.GrantOver`; `Engine.GrantSet` → granted and `[]Refusal{Rule, Reason}`, `Engine.Revoke`, `Engine.Grants`; the scope: `ContextWithGrantScope(ctx, scope)`, `GrantScopeFromContext(ctx)`, `Engine.GrantsFor(ctx)`, `Engine.RevokeScope(ctx)` |
+| grants | `Engine.Grant`, `Engine.GrantOver`; `Engine.GrantSet` → granted and `[]Refusal{Rule, Reason}`, `Engine.Revoke`, `Engine.Grants`; the scope: `ContextWithGrantScope(ctx, scope)`, `GrantScopeFromContext(ctx)`, `Engine.GrantsFor(ctx)`, `Engine.RevokeScope(ctx)`; the kind: `GrantKind`, `KindGrant`, `KindGrantOver`, `KindGrantSet`, `KindRevoke`, `KindRevokeScope` |
 | deferred calls | `Engine.Deferred`, `Engine.Runs`, `Engine.Forget` |
 | release | `Engine.Release(ctx, end, answers…)`; `ErrUnanswered`; `Engine.Resumed(ctx, end, answers, next)` with the end the resume returned; `Engine.ForgetAnswers(runID)` |
 | asking in the run | `WithAskInRun()`, through the elicitor on the hook's context (`agentturn.Ask`); the decider is `agenttool.Answer.By` |
@@ -1296,7 +1338,7 @@ The root module of this repository is the reference binding.
 | nested calls | `agentturn.ToolCallInfo.Parent` non-empty: decided and reported, no deferral remembered |
 | denial bound | `DenialBound{Consecutive, Total, Window}`, `DefaultDenialBound`, `WithDenialBound`, `ErrDenialBound`, `Engine.ResetReviews` |
 | decider | `ByPolicy`, `ByAgent`, `ByHuman` |
-| verdict | `Verdict{RunID, Turn, CallID, Tool, Guard, Action, Rule, Reason, By, Held, Subject, Confined, Quarantined}`; `WithObserver(fn)`, which adds an observer |
+| verdict | `Verdict{RunID, Turn, CallID, Tool, Guard, Action, Rule, Reason, By, Held, Subject, Confined, Quarantined, Grant, Source, Scope}`; `WithObserver(fn)`, which adds an observer |
 | record | `VerdictNS = "agentpolicy:verdict"`; `Verdict.Record()` → namespace and bytes |
 | presets | `Tools{Read, Edit, Execute}`; `Suggest`, `AutoEdit`, `FullAuto` |
 | guard | `guard.Guard{Name, Check}`, `guard.New`; `guard.Input{Items, Instructions}`, `guard.Message`, `guard.Output{Response, Results, Final}` and `Output.Answer()`; `guard.Verdict{Action, Reason, Items, Instructions, Quarantine}`, the quarantine kept with `agentturn.Quarantine` |
@@ -1355,7 +1397,8 @@ hook's reason included, and lets an answering hook lift only the
 policy's own ask, never a constraint's or an outranking source's; holds every call it allows
 when another of its batch asks, and never runs one beside an ask;
 gives the reason texts this document states; reports every verdict to
-every observer exactly once; remembers a deferred call under its own
+every observer exactly once; names the kind, source and scope of every
+grant and revocation; remembers a deferred call under its own
 run; answers a held call only from the answers to the asked ones; and
 for every case of `testdata/policy/decisions.json` builds, grants,
 decides and offers as the case says.
@@ -1416,7 +1459,23 @@ a splitter. A case has:
   in the turn after the last of `calls`. Call IDs are `call_1`,
   `call_2`, … in batch order, and every call is in run `run_1`;
 - `offer`, `{"tools", "want"}`: the tools, in order, that remain when
-  the removed ones are taken out.
+  the removed ones are taken out;
+- `steps`, grants and revocations made in order after everything
+  above, each with exactly one of `grant`, a rule in the grammar given
+  to a grant; `grant_over`, a rule given to a grant over the verdict of
+  the call of `calls` that `over` numbers from 1; `revoke`, a source
+  name to revoke; or `revoke_scope`, `true`. Beside it: `source`,
+  `{"name", "rank", "trusted"}`, the source a grant's rule is stamped
+  with; `scope`, the grant scope of the context it is made under,
+  unscoped when absent; `removed`, how many rules a revocation
+  removed; `refused`, a grant over's refusal reason; and `records`,
+  the records the step reports, none when absent.
+
+A grant set of `grants` MAY also have `scope`, the grant scope it is
+activated under, and `records`, the records its activation reports,
+which are not checked when absent. A record is compared as a JSON
+value, in order, with the object [the record](#the-record) gives for
+the verdict, every member present.
 
 A call has `tool` and `args`. The splitter and the confinement are the
 host's, so the corpus writes out what they answer for the call:
@@ -1459,6 +1518,25 @@ when a rule is added or changed, a reason text included, since the
 model reads it; a rule's removal, or a change that makes a conforming
 engine non-conforming, is a breaking change to the module and is
 listed in the changelog as one.
+
+## Changes since 0.3
+
+- The verdict of a grant, a grant over, a grant set's grant or
+  refusal, and a revocation carries its kind, `grant`, `grant_over`,
+  `grant_set`, `revoke` or `revoke_scope`, its source's name, on every
+  kind but `revoke_scope`, and the grant scope it was made under, and
+  its record carries them as the members `grant`, `source` and `scope`
+  (agentkit#80). A reader MUST take them from the members and MUST NOT
+  parse the reason, falling back on the reason texts only for a record
+  written before this draft ([Grant sets](#grant-sets), [The
+  record](#the-record)). Draft 0.3 put a revocation's source and scope
+  only in its reason, recorded no grant's scope, and gave a person's
+  grant and a skill's the same members, so a reader that rebuilt the
+  grants of a session parsed three reason prefixes and took the scope
+  from the session the record sat in. Each member is omitted when
+  empty, so every record without one is byte-identical.
+- The corpus gains `steps` on a decision case, and `scope` and
+  `records` on a grant set ([The fixture corpus](#the-fixture-corpus)).
 
 ## Changes since 0.2
 
@@ -1590,8 +1668,10 @@ listed in the changelog as one.
   nor anything a second language has built in. Quoting as a JSON
   string without HTML escaping, which agrees for every printable text,
   is the likely rule for a later draft.
-- **Grants in the corpus.** The corpus covers grant sets; a grant over
-  a verdict, a release and the answers without a human are stateful
-  across calls and are held only by the reference's tests. A scenario
-  form, a sequence of steps each with its expected verdicts, is the
-  likely shape for a later draft.
+- **Grants in the corpus.** The corpus covers grant sets and, since
+  draft 0.4, a case's `steps`: grants, grants over a call's verdict and
+  revocations made after its calls, with the records they report. A
+  release and the answers without a human are stateful across calls
+  and are held only by the reference's tests; extending `steps` to
+  them, and to calls decided after a step, is the likely shape for a
+  later draft.

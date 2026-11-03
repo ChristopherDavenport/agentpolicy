@@ -116,7 +116,8 @@ func (g grant) rules() int { return len(g.set.Allow) + len(g.set.Deny) + len(g.s
 // carries that scope; one activated under no scope decides every call
 // the engine sees. Rules a name governs are expanded as [Build]
 // expands them. Every grant and every refusal is a Verdict through the
-// observer.
+// observer, with Grant [KindGrantSet], Source the set's source name and
+// Scope the grant scope of ctx.
 //
 // A product with several skills activates each as its own source
 // rather than merging them all into the policy before the run, so the
@@ -191,11 +192,11 @@ func (e *Engine) GrantSet(ctx context.Context, set RuleSet) (granted []Rule, ref
 
 	for i := range granted {
 		g := granted[i]
-		e.observe(ctx, Verdict{Tool: g.Tool, Action: agentturn.Allow, Rule: &g, Reason: "granted " + g.String() + " by " + sourceName(set.Source), By: ByPolicy})
+		e.observe(ctx, Verdict{Tool: g.Tool, Action: agentturn.Allow, Rule: &g, Reason: "granted " + g.String() + " by " + sourceName(set.Source), By: ByPolicy, Grant: KindGrantSet, Source: set.Source.Name, Scope: kept.scope})
 	}
 	for i := range refused {
 		r := refused[i].Rule
-		e.observe(ctx, Verdict{Tool: r.Tool, Action: agentturn.Block, Rule: &r, Reason: "not granted " + r.String() + ": " + refused[i].Reason, By: ByPolicy})
+		e.observe(ctx, Verdict{Tool: r.Tool, Action: agentturn.Block, Rule: &r, Reason: "not granted " + r.String() + ": " + refused[i].Reason, By: ByPolicy, Grant: KindGrantSet, Source: set.Source.Name, Scope: kept.scope})
 	}
 	return granted, refused
 }
@@ -250,11 +251,14 @@ func blocks(p Policy, r Rule, src Source) (bool, string) {
 // outlive a turn, nor the source's set under any other scope: an
 // unscoped Revoke never removes a scoped set, and a scoped one never
 // removes the unscoped set. The revocation is journaled as a Verdict,
-// Block with "revoked the rules granted by N", when it removed a rule.
+// Block with "revoked the rules granted by N", when it removed a rule,
+// with Grant [KindRevoke], Source the name and Scope the grant scope of
+// ctx.
 func (e *Engine) Revoke(ctx context.Context, source string) int {
-	n := e.revoke(func(g grant) bool { return g.key() == grantKey{scope: GrantScopeFromContext(ctx), source: source} })
+	scope := GrantScopeFromContext(ctx)
+	n := e.revoke(func(g grant) bool { return g.key() == grantKey{scope: scope, source: source} })
 	if n > 0 {
-		e.observe(ctx, Verdict{Action: agentturn.Block, Reason: "revoked the rules granted by " + source, By: ByPolicy})
+		e.observe(ctx, Verdict{Action: agentturn.Block, Reason: "revoked the rules granted by " + source, By: ByPolicy, Grant: KindRevoke, Source: source, Scope: scope})
 	}
 	return n
 }
@@ -268,7 +272,7 @@ func (e *Engine) Revoke(ctx context.Context, source string) int {
 // one. The revocation is journaled as a Verdict, Block with "revoked
 // the rules granted under S", S the scope, or "revoked the rules
 // granted without a scope" for the unscoped one, when it removed a
-// rule.
+// rule, with Grant [KindRevokeScope], Scope the scope and no Source.
 func (e *Engine) RevokeScope(ctx context.Context) int {
 	scope := GrantScopeFromContext(ctx)
 	n := e.revoke(func(g grant) bool { return g.scope == scope })
@@ -277,7 +281,7 @@ func (e *Engine) RevokeScope(ctx context.Context) int {
 		if scope != "" {
 			reason = "revoked the rules granted under " + scope
 		}
-		e.observe(ctx, Verdict{Action: agentturn.Block, Reason: reason, By: ByPolicy})
+		e.observe(ctx, Verdict{Action: agentturn.Block, Reason: reason, By: ByPolicy, Grant: KindRevokeScope, Scope: scope})
 	}
 	return n
 }

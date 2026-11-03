@@ -524,6 +524,12 @@ agentpolicy.WithObserver(func(ctx context.Context, v agentpolicy.Verdict) {
 })
 ```
 
+A grant's or a revocation's record also names its kind (`grant`,
+`grant_over`, `grant_set`, `revoke`, `revoke_scope`), its source and
+the grant scope it was made under, as the members `grant`, `source`
+and `scope`, so a reader that rebuilds a session's grants takes them
+from there and never parses the reason.
+
 ## Specification
 
 [RFC 0001](docs/rfcs/0001-agent-policy.md) is the contract this module

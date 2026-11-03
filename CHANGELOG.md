@@ -5,6 +5,29 @@ All user-visible changes to this library. The format follows
 uses [Semantic Versioning](https://semver.org/); before v1.0.0 minor
 versions may break the API.
 
+## Unreleased
+
+- Changed: RFC 0001 is draft 0.4, with a "Changes since 0.3" section.
+- Added: a grant's and a revocation's verdict says what it did, and
+  its record carries it as members (agentkit#80). `Verdict` gains
+  `Grant`, a `GrantKind` (`KindGrant`, `KindGrantOver`, `KindGrantSet`,
+  `KindRevoke`, `KindRevokeScope`), `Source`, the source name the
+  grant or set was made under or the revocation removed, and `Scope`,
+  the grant scope a set was activated or refused under or a
+  revocation removed under. `Verdict.Record` writes them as `grant`,
+  `source` and `scope`, so a revocation's record now names its source,
+  and a grant set's or a revocation's names its scope. `Engine.Grant`
+  and `Engine.GrantOver` record no scope: their rules join the policy,
+  which no scope limits. A `GrantOver` of a verdict with no rule is a
+  plain grant and records `grant`. Each member is omitted when empty,
+  so every other record is byte-identical; a reader takes the kind,
+  source and scope from the members and falls back on the reason texts
+  only for a record written before this release. RFC 0001 draft 0.4,
+  Grant sets and The record.
+- Added: the decisions corpus gains `steps` on a case, grants, grants
+  over a call's verdict and revocations made after its calls with the
+  records they report, and `scope` and `records` on a grant set.
+
 ## v0.0.18 - 2026-11-03
 
 - Changed: RFC 0001 is draft 0.3, with a "Changes since 0.2" section

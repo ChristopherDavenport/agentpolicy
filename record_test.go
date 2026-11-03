@@ -20,6 +20,15 @@ func TestVerdictRecord(t *testing.T) {
 		// from, not only its name (#64).
 		{name: "a grant from a hashed source", v: Verdict{Tool: "bash", Action: agentturn.Allow, Rule: &Rule{Tool: "bash", Spec: "git:*", Source: Source{Name: "skill:deploy", Hash: "sha256:9f2c", Trusted: true, Rank: 2}}, Reason: "granted bash(git:*) by skill:deploy", By: ByPolicy},
 			want: `{"tool":"bash","action":"allow","rule":"bash(git:*)","source":"skill:deploy","source_hash":"sha256:9f2c","reason":"granted bash(git:*) by skill:deploy","by":"policy"}`},
+		// A grant's and a revocation's record names its kind, source and
+		// scope as members, so a reader rebuilds the grants in force
+		// without parsing the reason (agentkit#80).
+		{name: "a grant set's grant under a scope", v: Verdict{Tool: "bash", Action: agentturn.Allow, Rule: &Rule{Tool: "bash", Spec: "git:*", Source: Source{Name: "skill:deploy", Trusted: true, Rank: 1}}, Reason: "granted bash(git:*) by skill:deploy", By: ByPolicy, Grant: KindGrantSet, Source: "skill:deploy", Scope: "conv-1"},
+			want: `{"tool":"bash","action":"allow","rule":"bash(git:*)","source":"skill:deploy","reason":"granted bash(git:*) by skill:deploy","by":"policy","grant":"grant_set","scope":"conv-1"}`},
+		{name: "a revocation", v: Verdict{Action: agentturn.Block, Reason: "revoked the rules granted by skill:deploy", By: ByPolicy, Grant: KindRevoke, Source: "skill:deploy", Scope: "conv-1"},
+			want: `{"action":"block","source":"skill:deploy","reason":"revoked the rules granted by skill:deploy","by":"policy","grant":"revoke","scope":"conv-1"}`},
+		{name: "a scope's revocation", v: Verdict{Action: agentturn.Block, Reason: "revoked the rules granted without a scope", By: ByPolicy, Grant: KindRevokeScope},
+			want: `{"action":"block","reason":"revoked the rules granted without a scope","by":"policy","grant":"revoke_scope"}`},
 		{name: "a held call", v: Verdict{RunID: "run_1", CallID: "call_2", Tool: "read", Action: agentturn.Defer, Held: true, Reason: "held for approval: allowed by default", By: ByPolicy},
 			want: `{"run_id":"run_1","call_id":"call_2","tool":"read","action":"defer","reason":"held for approval: allowed by default","by":"policy","held":true}`},
 		{name: "a guard's verdict", v: Verdict{RunID: "run_1", Guard: "secrets", Action: agentturn.Allow},

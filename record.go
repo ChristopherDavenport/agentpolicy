@@ -32,6 +32,10 @@ type verdictRecord struct {
 	Held       bool   `json:"held,omitempty"`
 	Subject    string `json:"subject,omitempty"`
 	Confined   string `json:"confined,omitempty"`
+	// Grant and Scope say what a grant or a revocation did and the
+	// grant scope it was made under; Source names its source.
+	Grant string `json:"grant,omitempty"`
+	Scope string `json:"scope,omitempty"`
 	// Quarantined names the items an input guard quarantined, each by
 	// reference: its type, id and call ID, never its content.
 	Quarantined []itemRef `json:"quarantined,omitempty"`
@@ -58,8 +62,13 @@ type verdictRecord struct {
 // why it exists; then reason, by, held, subject and confined; and
 // quarantined, a reference to each item an input guard quarantined,
 // {type, id, call_id}, with no content, so the item's text is redacted
-// with the entry that holds it and not copied here. A member the
-// verdict leaves empty is left out, except action. A record is strings,
+// with the entry that holds it and not copied here. A grant or a
+// revocation adds grant, its [GrantKind], and scope, the grant scope
+// it was made under, and names its source in source even when it has
+// no rule, so a reader rebuilds the grants in force from these members
+// and never parses reason for them. A member the verdict leaves empty
+// is left out, except action, so a record written before these
+// members existed reads the same. A record is strings,
 // numbers and flags, so encoding it cannot fail; a caller that wants
 // an error of its own marshals the value itself.
 func (v Verdict) Record() (ns string, data []byte) {
@@ -75,12 +84,18 @@ func (v Verdict) Record() (ns string, data []byte) {
 		Held:     v.Held,
 		Subject:  v.Subject,
 		Confined: v.Confined,
+		Grant:    string(v.Grant),
+		Source:   v.Source,
+		Scope:    v.Scope,
 	}
 	for _, item := range v.Quarantined {
 		rec.Quarantined = append(rec.Quarantined, refOf(item))
 	}
 	if v.Rule != nil {
-		rec.Rule, rec.Source, rec.SourceHash, rec.Note = v.Rule.String(), v.Rule.Source.Name, v.Rule.Source.Hash, v.Rule.Note
+		rec.Rule, rec.SourceHash, rec.Note = v.Rule.String(), v.Rule.Source.Hash, v.Rule.Note
+		if v.Rule.Source.Name != "" {
+			rec.Source = v.Rule.Source.Name
+		}
 	}
 	data, err := json.Marshal(rec)
 	if err != nil {
