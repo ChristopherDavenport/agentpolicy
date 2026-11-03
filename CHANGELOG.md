@@ -34,7 +34,9 @@ versions may break the API.
   the answering hooks are asked in order and the first allow answers
   the ask: the call is allowed, with no rule, the hook's reason and
   decider, and the subject the policy deferred on. It never lifts a
-  deny, an ordinary hook's ask or a hold: a call it allows is still
+  deny, an ordinary hook's ask, an ask a constraint raised (`ask
+  tainted` over a `WithConstraints` subject), an ask rule of a source
+  that outranks the host's own (rank above 0), or a hold: a call it allows is still
   held when its batch asks. It does what a product's run end, resume
   and "approved by policy" record did, and records what was decided.
 - Changed: an input guard's verdict names the turn whose model call

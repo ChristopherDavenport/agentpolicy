@@ -348,9 +348,14 @@ func WithConstraints(fns ...func(context.Context, agentturn.ToolCallInfo) ([]Sub
 // ask. It is not asked about a call the fold blocks, nor about one an
 // ordinary hook deferred, whether that hook raised the defer or
 // deferred a call the policy already deferred, since the host's own
-// hooks asking is not the policy's question to answer. A call it allows
-// is still held when another call of its batch asks, as any allowed
-// call is: it never runs beside an ask. Its error fails the call's
+// hooks asking is not the policy's question to answer. Nor is it asked
+// when a constraint defers the call, as ask tainted does over a
+// [WithConstraints] subject, which holds the call to another tool's
+// question, or when an ask rule of a source that outranks the host's
+// own, rank above 0, defers it, as a managed settings file's does: the
+// host's hook answers no more than the host's own grant could. A call
+// it allows is still held when another call of its batch asks, as any
+// allowed call is: it never runs beside an ask. Its error fails the call's
 // decision as a [WithHooks] hook's does, and it is called for a sibling
 // as one is. Each WithAnsweringHooks adds its hooks after those already
 // given; a nil hook adds nothing.
@@ -912,17 +917,15 @@ func (e *Engine) evaluate(ctx context.Context, a active, info agentturn.ToolCall
 	if info.Call != nil {
 		name = info.Call.Name
 	}
-	c := e.confinement(ctx, info.Tool, info.Args)
-	var failed bool
-	var rewrite json.RawMessage
-	v.Action, v.Rule, v.Reason, v.Subject, failed, rewrite, c = e.decide(ctx, a, info, c, true)
-	v.Confined = c.by
+	d := e.decide(ctx, a, info, e.confinement(ctx, info.Tool, info.Args), true)
+	v.Action, v.Rule, v.Reason, v.Subject, v.Confined = d.act, d.rule, d.reason, d.subject, d.c.by
+	failed, rewrite := d.failed, d.rewrite
 	if rewrite != nil {
 		// The claim's rewrite is what the call runs with: the hooks are
 		// handed it, as they are a hook's rewrite.
 		info.Args = rewrite
 	}
-	out, rewriteFailed, err := e.foldHooks(ctx, a, name, info, v)
+	out, rewriteFailed, err := e.foldHooks(ctx, a, name, info, v, d.pinned)
 	if out.Args == nil {
 		out.Args = rewrite
 	}
@@ -937,8 +940,9 @@ func (e *Engine) evaluate(ctx context.Context, a active, info agentturn.ToolCall
 // still the policy's takes the rewrite's rule and reason, so it
 // describes the arguments the call runs with. failed reports that the
 // verdict is the block of a rewrite whose subjects could not be
-// evaluated.
-func (e *Engine) foldHooks(ctx context.Context, a active, name string, info agentturn.ToolCallInfo, v *Verdict) (out agentturn.ToolDecision, failed bool, err error) {
+// evaluated. pinned is the policy's word that its defer is not its own
+// to answer (see [decided]), which no answering hook lifts.
+func (e *Engine) foldHooks(ctx context.Context, a active, name string, info agentturn.ToolCallInfo, v *Verdict, pinned bool) (out agentturn.ToolDecision, failed bool, err error) {
 	// policy is whether the verdict is still the policy's; asked whether
 	// an ordinary hook deferred the call, which no answering hook lifts;
 	// added the reasons hooks added to an equal defer, kept across a
@@ -979,11 +983,12 @@ func (e *Engine) foldHooks(ctx context.Context, a active, name string, info agen
 		if d.Args != nil {
 			out.Args, info.Args = d.Args, d.Args
 			c := e.confinement(ctx, info.Tool, d.Args)
-			act, rule, reason, subject, bad, _, _ := e.decide(ctx, a, info, c, false)
-			if r, cur := restrictiveness(act), restrictiveness(v.Action); r > cur || policy && r == cur {
+			again := e.decide(ctx, a, info, c, false)
+			pinned = pinned || again.pinned
+			if r, cur := restrictiveness(again.act), restrictiveness(v.Action); r > cur || policy && r == cur {
 				keep := v.Subject
-				v.Action, v.Rule, v.Reason, v.Subject, v.By = act, rule, reason, subject, ByPolicy
-				policy, failed = true, bad
+				v.Action, v.Rule, v.Reason, v.Subject, v.By = again.act, again.rule, again.reason, again.subject, ByPolicy
+				policy, failed = true, again.failed
 				if r == cur && v.Action == agentturn.Defer {
 					// The hooks that deferred with the policy still did.
 					for _, why := range added {
@@ -999,7 +1004,7 @@ func (e *Engine) foldHooks(ctx context.Context, a active, name string, info agen
 			v.Confined = c.by
 		}
 	}
-	if v.Action == agentturn.Defer && policy && !asked {
+	if v.Action == agentturn.Defer && policy && !asked && !pinned {
 		for _, fn := range e.answerers {
 			d, err := fn(ctx, info)
 			if err != nil {
@@ -1062,7 +1067,7 @@ func (e *Engine) confinement(ctx context.Context, tool agenttool.Tool, args json
 // and the rewrite's rule and reason on an equal one, and the rewrite
 // and its confinement are returned. Without it, a claim's rewrite is
 // ignored, since the arguments being decided are already a hook's.
-func (e *Engine) decide(ctx context.Context, a active, info agentturn.ToolCallInfo, c confinement, claimed bool) (act agentturn.ToolAction, rule *Rule, reason, subject string, failed bool, rewrite json.RawMessage, _ confinement) {
+func (e *Engine) decide(ctx context.Context, a active, info agentturn.ToolCallInfo, c confinement, claimed bool) decided {
 	name := ""
 	if info.Call != nil {
 		name = info.Call.Name
@@ -1072,18 +1077,40 @@ func (e *Engine) decide(ctx context.Context, a active, info agentturn.ToolCallIn
 		subjects, err = e.constrain(ctx, info, subjects)
 	}
 	if err != nil {
-		return agentturn.Block, nil, name + " call could not be evaluated: " + err.Error(), "", true, nil, c
+		return decided{act: agentturn.Block, reason: name + " call could not be evaluated: " + err.Error(), failed: true, c: c}
 	}
-	act, rule, reason, subject = e.fold(a, name, c, subjects)
+	d := e.fold(a, name, c, subjects)
+	d.c = c
 	if !claimed || rewrite == nil {
-		return act, rule, reason, subject, false, nil, c
+		return d
 	}
 	rc := e.confinement(ctx, info.Tool, rewrite)
-	ract, rrule, rreason, rsubject := e.fold(a, name, rc, subjects)
-	if restrictiveness(ract) >= restrictiveness(act) {
-		act, rule, reason, subject = ract, rrule, rreason, rsubject
+	r := e.fold(a, name, rc, subjects)
+	if restrictiveness(r.act) >= restrictiveness(d.act) {
+		d.act, d.rule, d.reason, d.subject = r.act, r.rule, r.reason, r.subject
 	}
-	return act, rule, reason, subject, false, rewrite, rc
+	d.pinned = d.pinned || r.pinned
+	d.rewrite, d.c = rewrite, rc
+	return d
+}
+
+// decided is the policy's verdict on one call's subjects: its action,
+// rule, reason and subject; whether it is a block because the subjects
+// could not be read; a facts claim's rewrite taken and the confinement
+// of what runs. pinned says some subject's defer is not the policy's
+// own to answer: a constraint's, which holds the call to another
+// tool's question, or an ask rule's of a source that outranks the
+// host's own, whose rank is 0, so no answering hook lifts the defer
+// whatever subject the verdict names.
+type decided struct {
+	act     agentturn.ToolAction
+	rule    *Rule
+	reason  string
+	subject string
+	failed  bool
+	pinned  bool
+	rewrite json.RawMessage
+	c       confinement
 }
 
 // batchCache is whether each call of one batch asks, by its position
@@ -1552,12 +1579,13 @@ func (e *Engine) constrain(ctx context.Context, info agentturn.ToolCallInfo, sub
 // names the subject it was for, says nothing in the command ran and
 // names the other subjects, so the model does not report the other
 // half as having succeeded.
-func (e *Engine) fold(a active, name string, c confinement, subjects []Subject) (agentturn.ToolAction, *Rule, string, string) {
+func (e *Engine) fold(a active, name string, c confinement, subjects []Subject) decided {
 	var (
 		action  agentturn.ToolAction
 		rule    *Rule
 		reason  string
 		subject string
+		pinned  bool
 		at      = -1
 	)
 	for i, s := range subjects {
@@ -1575,6 +1603,9 @@ func (e *Engine) fold(a active, name string, c confinement, subjects []Subject) 
 		if !ok {
 			continue
 		}
+		if act == agentturn.Defer && (s.Constrain || r != nil && r.Source.Rank > 0) {
+			pinned = true
+		}
 		if at < 0 || restrictiveness(act) > restrictiveness(action) {
 			action, rule, reason, subject, at = act, r, why, s.Text, i
 		}
@@ -1591,7 +1622,7 @@ func (e *Engine) fold(a active, name string, c confinement, subjects []Subject) 
 			reason += ", including " + series(rest)
 		}
 	}
-	return action, rule, reason, subject
+	return decided{act: action, rule: rule, reason: reason, subject: subject, pinned: pinned}
 }
 
 // series joins items as prose: "a", "a and b", "a, b and c".

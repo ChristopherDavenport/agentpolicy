@@ -155,3 +155,48 @@ func TestAnsweringHooksAnswerThePolicysAsk(t *testing.T) {
 		}
 	})
 }
+
+// An answering hook answers only the policy's own question: not an ask
+// a constraint raised, such as ask tainted from a constraint source;
+// not one of a source that outranks the host's own; and not a defer an
+// ordinary hook raised. An ask rule of the host's own source it may
+// answer.
+func TestAnsweringHooksLiftOnlyThePolicysOwnAsk(t *testing.T) {
+	ctx := context.Background()
+	answer := hookOn(`"go `, agentturn.ToolDecision{Action: agentturn.Allow, Reason: "go is safe"})
+	tainted := func(context.Context, agentturn.ToolCallInfo) ([]Subject, error) {
+		return []Subject{{Tool: "tainted", Args: []byte(`{}`), Text: "untrusted content is in context"}}, nil
+	}
+	managed, err := Merge(RuleSet{Source: Source{Name: "managed", Rank: 3, Trusted: true}, Ask: rules(t, "bash(go:*)")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	managed.Default = Allow()
+	tests := []struct {
+		name   string
+		policy Policy
+		opts   []Option
+		action agentturn.ToolAction
+		reason string
+	}{
+		{"an ask of the host's own source", Policy{Ask: rules(t, "bash(go:*)"), Default: Allow()}, nil, agentturn.Allow, "go is safe"},
+		{"an ask a constraint raised", Policy{Ask: rules(t, "tainted"), Default: Allow()}, []Option{WithConstraints(tainted)}, agentturn.Defer, "approval required by tainted"},
+		{"an ask of an outranking source", managed, nil, agentturn.Defer, "approval required by bash(go:*)"},
+		{"a defer an ordinary hook raised", Policy{Default: Allow()}, []Option{WithHooks(hookOn(`"go `, agentturn.ToolDecision{Action: agentturn.Defer, Reason: "go fetches modules"}))}, agentturn.Defer, "go fetches modules"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			e, err := Build(tt.policy, testMatchers, append(tt.opts, WithAnsweringHooks(answer))...)
+			if err != nil {
+				t.Fatal(err)
+			}
+			d, err := e.Decide(ctx, call("c1", "bash", `{"command":"go version"}`))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if d.Action != tt.action || d.Reason != tt.reason {
+				t.Errorf("decision = %s %q, want %s %q", actionName(d.Action), d.Reason, actionName(tt.action), tt.reason)
+			}
+		})
+	}
+}

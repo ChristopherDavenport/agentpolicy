@@ -617,8 +617,14 @@ the policy and the ordinary hooks stands at a defer the policy's own
 verdict raised, by an ask rule or the default, the answering hooks are
 asked in order, and the first allow replaces the defer. The verdict
 then has no rule, the hook's reason and decider (`policy` when it names
-none), and the subject the policy deferred on. An answering hook never
-lifts a block, a defer an ordinary hook raised or joined, or a hold: a
+none), and the subject the policy deferred on. The defer is the
+policy's own only when no subject's defer is a constraint's, which
+holds the call to another tool's question, as `ask tainted` over a
+constraint source's subject does, and none is an ask rule's of a
+source that outranks the host's own, whose rank is 0: the host's hook
+answers no more than the host's own grant could. An answering hook
+never lifts a block, a defer an ordinary hook raised or joined, a
+defer a constraint or an outranking source's ask rule raised, or a hold: a
 call it allows is still held when another call of its batch asks, so it
 never runs beside an ask. Anything an answering hook says but an allow
 is no answer, and it rewrites nothing; its error fails the call's
@@ -1341,7 +1347,7 @@ call whose splitter, claim or constraint source fails; reads confinement from th
 reads an unanswered tool as unconfined; folds the host's hooks as
 [Hooks](#hooks) says, a stricter hook's subject and an equal deferring
 hook's reason included, and lets an answering hook lift only the
-policy's own ask; holds every call it allows
+policy's own ask, never a constraint's or an outranking source's; holds every call it allows
 when another of its batch asks, and never runs one beside an ask;
 gives the reason texts this document states; reports every verdict to
 every observer exactly once; remembers a deferred call under its own
@@ -1471,7 +1477,8 @@ listed in the changelog as one.
   where draft 0.2 dropped both. This is stated as differing from
   agentturn's chain fold.
 - Answering hooks (#86): a host MAY register hooks whose allow answers
-  the policy's own ask, never a deny, an ordinary hook's ask or a hold.
+  the policy's own ask, never a deny, an ordinary hook's ask, a
+  constraint's ask, an outranking source's ask rule, or a hold.
 - Constraint sources (#89): a host MAY supply functions from a call to
   subjects, added to every call's as constraints after its split, so a
   data-flow rule holds for a tool with no splitter
