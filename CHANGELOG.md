@@ -112,7 +112,11 @@ versions may break the API.
   is the call's decision when the loop hands the same call, arguments
   and tool under the same rules and scope; a sibling read with no tool,
   `WithTools` naming none, is decided again. `WithAskInRun` reads the
-  batch from the same readings. RFC 0001 draft 0.3, Hooks.
+  batch from the same readings. The readings are kept per batch, where
+  the engine kept the last batch's alone, so runs sharing an engine no
+  longer evict each other's mid-batch; a batch is dropped when its
+  run's next batch starts, on `Forget` or `Resumed`, and the oldest of
+  more than 256 fully decided batches are dropped. RFC 0001 draft 0.3, Hooks.
 - Added: a server glob, `mcp__S__*`, builds in the allow list and
   allows every tool of the one MCP server `S`, including one the server
   adds later (#85). `Rule.ServerGlob` reports the shape: `S` is not

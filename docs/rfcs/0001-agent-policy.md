@@ -670,7 +670,10 @@ A batch is identified by its run, its turn, every call's ID, name and
 arguments, and the rules in force, the grant scope of the decision's
 context included. A binding MAY cache the siblings' readings for a
 batch, and MUST NOT read a cache across two batches, across a change
-of rules or across two grant scopes. It MUST NOT cache a reading that
+of rules or across two grant scopes. An engine shared by runs keeps
+each batch's readings apart, so one run's batch never evicts
+another's while either is being decided: the hold and the decision of
+a call, and its one claim, are read from its own batch's. It MUST NOT cache a reading that
 failed: the failure may pass, as a cancelled context or a remote
 executor that did not answer does.
 

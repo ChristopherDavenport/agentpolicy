@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/ChristopherDavenport/agenttool"
@@ -71,5 +72,96 @@ func TestAClaimIsReadOncePerCallPerBatch(t *testing.T) {
 				t.Errorf("decisions %s, %s", actionName(ds[0].Action), actionName(ds[1].Action))
 			}
 		})
+	}
+}
+
+// Runs that share an engine keep their batches apart: two runs whose
+// batches are decided interleaved each read one claim and run each hook
+// once per call, and a batch is dropped once its last call is decided.
+func TestConcurrentBatchesKeepTheirReadings(t *testing.T) {
+	ctx := context.Background()
+	claims := map[string]int{}
+	shell := agenttool.New("shell", "Runs a command", func(context.Context, agenttool.NoArgs) (string, error) { return "", nil },
+		agenttool.WithFacts(func(_ context.Context, args json.RawMessage) (agenttool.Facts, error) {
+			claims[string(args)]++
+			return agenttool.Facts{}, nil
+		}))
+	hooks := map[string]int{}
+	count := func(_ context.Context, info agentturn.ToolCallInfo) (*agentturn.ToolDecision, error) {
+		hooks[info.RunID+"/"+info.Call.CallID]++
+		return nil, nil
+	}
+	e, err := Build(Policy{Allow: rules(t, "shell"), Default: Ask()}, testMatchers, WithHooks(count), WithTools(func(string) (agenttool.Tool, bool) { return shell, true }))
+	if err != nil {
+		t.Fatal(err)
+	}
+	mk := func(run string) []agentturn.ToolCallInfo {
+		batch := []*openresponses.FunctionCall{
+			{CallID: "c0", Name: "shell", Arguments: `{"path":"/` + run + `/0"}`},
+			{CallID: "c1", Name: "shell", Arguments: `{"path":"/` + run + `/1"}`},
+		}
+		out := make([]agentturn.ToolCallInfo, len(batch))
+		for i, c := range batch {
+			out[i] = agentturn.ToolCallInfo{RunID: run, Turn: 1, Call: c, Tool: shell, Args: json.RawMessage(c.Arguments), Batch: batch, Index: i}
+		}
+		return out
+	}
+	a, b := mk("run_a"), mk("run_b")
+	for _, info := range []agentturn.ToolCallInfo{a[0], b[0], a[1], b[1]} {
+		if d, err := e.Decide(ctx, info); err != nil || d.Action != agentturn.Allow {
+			t.Fatalf("%s %s: %+v, %v", info.RunID, info.Call.CallID, d, err)
+		}
+	}
+	for args, n := range claims {
+		if n != 1 {
+			t.Errorf("the claim for %s was read %d times", args, n)
+		}
+	}
+	for call, n := range hooks {
+		if n != 1 {
+			t.Errorf("the hook ran %d times for %s", n, call)
+		}
+	}
+	if len(claims) != 4 || len(hooks) != 4 {
+		t.Errorf("claims %v, hooks %v", claims, hooks)
+	}
+	open := func() (live, done int) {
+		e.mu.Lock()
+		defer e.mu.Unlock()
+		for _, b := range e.batches {
+			if b.done {
+				done++
+			} else {
+				live++
+			}
+		}
+		return live, done
+	}
+	if live, done := open(); live != 0 || done != 2 {
+		t.Errorf("%d batches open and %d done after every call was decided", live, done)
+	}
+	// A run forgotten drops its batch; a run's next batch drops its last.
+	e.Forget("run_a")
+	next := mk("run_b")
+	for i := range next {
+		next[i].Turn = 2
+	}
+	if _, err := e.Decide(ctx, next[0]); err != nil {
+		t.Fatal(err)
+	}
+	if live, done := open(); live != 1 || done != 0 {
+		t.Errorf("%d batches open and %d done after a Forget and a next batch", live, done)
+	}
+	// Done batches beyond the bound are dropped, oldest first.
+	for i := range keptBatches + 10 {
+		run := mk(fmt.Sprintf("run_%d", i))
+		for _, info := range run {
+			if _, err := e.Decide(ctx, info); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if _, done := open(); done != keptBatches {
+		t.Errorf("%d done batches kept, want %d", done, keptBatches)
 	}
 }

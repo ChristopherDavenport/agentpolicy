@@ -400,9 +400,17 @@ type Engine struct {
 	grants   []grant
 	withheld map[grantKey][]Rule
 	gen      uint64
-	// batch is the last batch's verdicts, so the product's splitter
-	// runs once per call of a batch rather than once per pair.
-	batch batchCache
+	// batches are the readings of each batch being decided, by batch
+	// key, so the product's splitter, hooks and claims run once per call
+	// of a batch rather than once per pair, whatever other runs sharing
+	// the engine decide meanwhile. A batch is dropped when a later batch
+	// of its run starts and when its run is forgotten or resumed; once
+	// the hook has decided its every call it is done, and done batches
+	// beyond the last [keptBatches] are dropped too, oldest first, so
+	// runs that end without a Forget do not grow it. done is their
+	// order.
+	batches map[string]*batchCache
+	done    []string
 	// deferred remembers the calls deferred in each run, asked and
 	// held, keyed by run and then by call, so Answers can hand the
 	// reviewer what the hook saw and Release can answer the held ones.
@@ -801,6 +809,9 @@ func (e *Engine) Decide(ctx context.Context, info agentturn.ToolCallInfo) (*agen
 
 	a := e.active(ctx)
 	a.batch = e.batchOf(info, a)
+	if a.batch != "" {
+		defer e.batchDecided(a.batch, position(info), len(info.Batch))
+	}
 
 	// A call the engine already read as a sibling, with the tool the
 	// loop now hands it, is decided by that reading: the hooks are not
@@ -1082,11 +1093,20 @@ func (e *Engine) decide(ctx context.Context, a active, info agentturn.ToolCallIn
 // its calls the same way, against a policy that has changed since, or
 // against another scope's grants.
 type batchCache struct {
-	key      string
+	run      string
 	asks     map[int]bool
 	readings map[int]reading
 	claims   map[claimKey]claimed
+	// decided is the positions the hook has decided; the batch is done
+	// once it holds them all.
+	decided map[int]bool
+	done    bool
 }
+
+// keptBatches is how many done batches an engine keeps, so a call
+// decided again in its batch after the batch was decided reads it as
+// before, without the readings of every run that ended outliving it.
+const keptBatches = 256
 
 // reading is what the engine made of one call of a batch, policy and
 // hooks folded: the verdict, the decision's note, Terminate and
@@ -1119,10 +1139,11 @@ func (e *Engine) siblingReading(info agentturn.ToolCallInfo, a active) (reading,
 	key := batchKey(info, a.gen, a.scope)
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	if e.batch.key != key {
+	b := e.batches[key]
+	if b == nil {
 		return reading{}, false
 	}
-	r, ok := e.batch.readings[self]
+	r, ok := b.readings[self]
 	if !ok || r.own || !sameTool(r.tool, info.Tool) || !bytes.Equal(r.args, info.Args) {
 		return reading{}, false
 	}
@@ -1186,18 +1207,18 @@ func (e *Engine) batchAsks(ctx context.Context, a active, info agentturn.ToolCal
 	self := position(info)
 	key := batchKey(info, a.gen, a.scope)
 	e.mu.Lock()
-	e.batchFor(key, len(info.Batch))
+	b := e.batchFor(key, info.RunID, len(info.Batch))
 	if self >= 0 {
-		e.batch.asks[self] = e.batch.asks[self] || own == agentturn.Defer || failed
-		if _, read := e.batch.readings[self]; mine != nil && !read && info.Parent == "" {
-			e.batch.readings[self] = *mine
+		b.asks[self] = b.asks[self] || own == agentturn.Defer || failed
+		if _, read := b.readings[self]; mine != nil && !read && info.Parent == "" {
+			b.readings[self] = *mine
 		}
 	}
 	if own != agentturn.Allow {
 		e.mu.Unlock()
 		return false
 	}
-	known := maps.Clone(e.batch.asks)
+	known := maps.Clone(b.asks)
 	e.mu.Unlock()
 
 	asks, decided := false, map[int]bool{}
@@ -1218,9 +1239,9 @@ func (e *Engine) batchAsks(ctx context.Context, a active, info agentturn.ToolCal
 	}
 	if len(decided) > 0 {
 		e.mu.Lock()
-		if e.batch.key == key {
+		if b := e.batches[key]; b != nil {
 			for i, ask := range decided {
-				e.batch.asks[i] = e.batch.asks[i] || ask
+				b.asks[i] = b.asks[i] || ask
 			}
 		}
 		e.mu.Unlock()
@@ -1228,11 +1249,57 @@ func (e *Engine) batchAsks(ctx context.Context, a active, info agentturn.ToolCal
 	return asks
 }
 
-// batchFor makes the batch cache key's, dropping another batch's. The
+// batchFor returns the cache of the batch key names, of the run run,
+// making it when there is none. A run decides one batch at a time, so a
+// new batch of a run drops the run's others, even one whose last call
+// the hook was never handed, as a turn that was cut off leaves. The
 // caller holds e.mu.
-func (e *Engine) batchFor(key string, n int) {
-	if e.batch.key != key {
-		e.batch = batchCache{key: key, asks: make(map[int]bool, n), readings: make(map[int]reading, n), claims: make(map[claimKey]claimed, n)}
+func (e *Engine) batchFor(key, run string, n int) *batchCache {
+	if b := e.batches[key]; b != nil {
+		return b
+	}
+	e.dropBatches(run)
+	b := &batchCache{run: run, asks: make(map[int]bool, n), readings: make(map[int]reading, n), claims: make(map[claimKey]claimed, n), decided: make(map[int]bool, n)}
+	if e.batches == nil {
+		e.batches = make(map[string]*batchCache)
+	}
+	e.batches[key] = b
+	return b
+}
+
+// dropBatches drops the batches of the run runID. The caller holds
+// e.mu.
+func (e *Engine) dropBatches(runID string) {
+	for k, b := range e.batches {
+		if b.run == runID {
+			delete(e.batches, k)
+		}
+	}
+}
+
+// batchDecided notes that the hook decided the call at position self of
+// the batch key names, of n calls. Once every call of it has been
+// decided the batch is done, and the oldest done batches beyond
+// [keptBatches] are dropped.
+func (e *Engine) batchDecided(key string, self, n int) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	b := e.batches[key]
+	if b == nil || b.done {
+		return
+	}
+	b.decided[self] = true
+	if len(b.decided) < n {
+		return
+	}
+	b.done = true
+	e.done = append(e.done, key)
+	for len(e.done) > keptBatches {
+		old := e.done[0]
+		e.done = e.done[1:]
+		if b := e.batches[old]; b != nil && b.done {
+			delete(e.batches, old)
+		}
 	}
 }
 
@@ -1245,8 +1312,8 @@ func (e *Engine) batchFor(key string, n int) {
 // failure may pass. A sibling a rule blocks is read, and kept.
 func (e *Engine) readSibling(ctx context.Context, a active, info agentturn.ToolCallInfo, key string, i int) (r reading, ok bool) {
 	e.mu.Lock()
-	if e.batch.key == key {
-		if r, ok := e.batch.readings[i]; ok {
+	if b := e.batches[key]; b != nil {
+		if r, ok := b.readings[i]; ok {
 			e.mu.Unlock()
 			return r, true
 		}
@@ -1261,9 +1328,10 @@ func (e *Engine) readSibling(ctx context.Context, a active, info agentturn.ToolC
 	}
 	r = reading{tool: sib.Tool, args: sib.Args, out: out, verdict: v}
 	e.mu.Lock()
-	e.batchFor(key, len(info.Batch))
-	if _, kept := e.batch.readings[i]; !kept {
-		e.batch.readings[i] = r
+	if b := e.batchFor(key, info.RunID, len(info.Batch)); b != nil {
+		if _, kept := b.readings[i]; !kept {
+			b.readings[i] = r
+		}
 	}
 	e.mu.Unlock()
 	return r, true
@@ -1421,8 +1489,8 @@ func (e *Engine) claim(ctx context.Context, a active, info agentturn.ToolCallInf
 	k := claimKey{at: at, args: string(info.Args)}
 	if at >= 0 {
 		e.mu.Lock()
-		if e.batch.key == a.batch {
-			if c, ok := e.batch.claims[k]; ok && sameTool(c.tool, info.Tool) {
+		if b := e.batches[a.batch]; b != nil {
+			if c, ok := b.claims[k]; ok && sameTool(c.tool, info.Tool) {
 				e.mu.Unlock()
 				return c.facts, nil
 			}
@@ -1435,9 +1503,9 @@ func (e *Engine) claim(ctx context.Context, a active, info agentturn.ToolCallInf
 	}
 	if at >= 0 {
 		e.mu.Lock()
-		e.batchFor(a.batch, len(info.Batch))
-		if _, kept := e.batch.claims[k]; !kept {
-			e.batch.claims[k] = claimed{tool: info.Tool, facts: f}
+		b := e.batchFor(a.batch, info.RunID, len(info.Batch))
+		if _, kept := b.claims[k]; !kept {
+			b.claims[k] = claimed{tool: info.Tool, facts: f}
 		}
 		e.mu.Unlock()
 	}
