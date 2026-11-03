@@ -325,12 +325,64 @@ func TestGrantSetJournal(t *testing.T) {
 		got = append(got, v.Reason)
 	}
 	want := []string{
+		"activated the rules granted by skill:commit",
 		"granted read(/repo:*) by skill:commit",
 		"granted bash(git add:*) by skill:commit",
 		"revoked the rules granted by skill:commit",
 	}
 	if strings.Join(got, "|") != strings.Join(want, "|") {
 		t.Errorf("verdicts = %q\nwant %q", got, want)
+	}
+}
+
+// The verdicts of grant changes reach the observer in the order the
+// changes took effect, so a reader that replays them in record order
+// ends with the sets in force. A revocation made while an activation's
+// verdicts are still being reported is reported after them, though the
+// observer of the activation is slow.
+func TestGrantVerdictsInTheOrderTheyTookEffect(t *testing.T) {
+	ctx := context.Background()
+	var (
+		mu      sync.Mutex
+		reasons []string
+	)
+	started, release := make(chan struct{}), make(chan struct{})
+	// The first verdict's observer waits until the revocation is made;
+	// the others return at once.
+	e, err := Build(Policy{Default: Ask()}, testMatchers, WithObserver(func(_ context.Context, v Verdict) {
+		mu.Lock()
+		reasons = append(reasons, v.Reason)
+		first := len(reasons) == 1
+		mu.Unlock()
+		if first {
+			close(started)
+			<-release
+		}
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	set := RuleSet{Source: Source{Name: "skill:deploy", Trusted: true}, Allow: rules(t, "bash(git:*)")}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		e.GrantSet(ctx, set)
+	}()
+	<-started
+	if n := e.Revoke(ctx, "skill:deploy"); n != 1 {
+		t.Errorf("Revoke removed %d rules, want 1", n)
+	}
+	close(release)
+	<-done
+	mu.Lock()
+	defer mu.Unlock()
+	want := []string{
+		"activated the rules granted by skill:deploy",
+		"granted bash(git:*) by skill:deploy",
+		"revoked the rules granted by skill:deploy",
+	}
+	if strings.Join(reasons, "|") != strings.Join(want, "|") {
+		t.Errorf("verdicts = %q\nwant %q", reasons, want)
 	}
 }
 
@@ -519,8 +571,9 @@ func TestGrantCrossesAgents(t *testing.T) {
 		t.Errorf("%d grants after every RevokeScope", got)
 	}
 
-	// The grant verdicts have no scope member and keep their text; a
-	// RevokeScope that removed a rule is one verdict.
+	// The grant verdicts keep their text, each activation is one
+	// verdict before its grants, and a RevokeScope that removed a rule
+	// is one verdict.
 	var got []string
 	for _, v := range j.all() {
 		if v.CallID == "" {
@@ -528,10 +581,14 @@ func TestGrantCrossesAgents(t *testing.T) {
 		}
 	}
 	want := []string{
+		"activated the rules granted by skill:commit",
 		"granted bash(git commit:*) by skill:commit",
 		"revoked the rules granted by skill:commit",
+		"activated the rules granted by skill:commit",
 		"granted bash(git commit:*) by skill:commit",
+		"activated the rules granted by skill:review",
 		"granted bash(git diff:*) by skill:review",
+		"activated the rules granted by skill:review",
 		"granted bash(git log:*) by skill:review",
 		"revoked the rules granted under A",
 		"revoked the rules granted without a scope",

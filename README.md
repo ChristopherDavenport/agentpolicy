@@ -527,8 +527,11 @@ agentpolicy.WithObserver(func(ctx context.Context, v agentpolicy.Verdict) {
 A grant's or a revocation's record also names its kind (`grant`,
 `grant_over`, `grant_set`, `revoke`, `revoke_scope`), its source and
 the grant scope it was made under, as the members `grant`, `source`
-and `scope`, so a reader that rebuilds a session's grants takes them
-from there and never parses the reason.
+and `scope`; an activation's record carries the set it kept (`set`)
+and what it refused (`refused`), and a grant over's the ask rule it
+answered (`over`). A reader that rebuilds a session's grants takes them
+from there, in record order, which is the order the changes took
+effect, and never parses the reason.
 
 ## Specification
 

@@ -36,6 +36,11 @@ type verdictRecord struct {
 	// grant scope it was made under; Source names its source.
 	Grant string `json:"grant,omitempty"`
 	Scope string `json:"scope,omitempty"`
+	// Over is the ask rule a grant over answered; Set and Refused are
+	// what an activation kept and refused.
+	Over    *overRecord     `json:"over,omitempty"`
+	Set     *setRecord      `json:"set,omitempty"`
+	Refused []refusalRecord `json:"refused,omitempty"`
 	// Quarantined names the items an input guard quarantined, each by
 	// reference: its type, id and call ID, never its content.
 	Quarantined []itemRef `json:"quarantined,omitempty"`
@@ -65,7 +70,10 @@ type verdictRecord struct {
 // with the entry that holds it and not copied here. A grant or a
 // revocation adds grant, its [GrantKind], and scope, the grant scope
 // it was made under, and names its source in source even when it has
-// no rule, so a reader rebuilds the grants in force from these members
+// no rule; a grant over adds over, {rule, source}, the ask rule it
+// answered; and an activation adds set, {rank, trusted, allow, deny,
+// ask, notes}, the set it kept, and refused, [{rule, reason}], so a
+// reader rebuilds the grants in force from these members
 // and never parses reason for them. A member the verdict leaves empty
 // is left out, except action, so a record written before these
 // members existed reads the same. A record is strings,
@@ -97,6 +105,18 @@ func (v Verdict) Record() (ns string, data []byte) {
 			rec.Source = v.Rule.Source.Name
 		}
 	}
+	if v.Over != nil {
+		rec.Over = &overRecord{Rule: v.Over.String(), Source: v.Over.Source.Name}
+	}
+	if v.Set != nil {
+		rec.Set = setOf(*v.Set)
+		if rec.SourceHash == "" {
+			rec.SourceHash = v.Set.Source.Hash
+		}
+	}
+	for _, r := range v.Refused {
+		rec.Refused = append(rec.Refused, refusalRecord{Rule: r.Rule.String(), Reason: r.Reason})
+	}
 	data, err := json.Marshal(rec)
 	if err != nil {
 		// Unreachable: every member is a string, an int or a bool.
@@ -105,6 +125,52 @@ func (v Verdict) Record() (ns string, data []byte) {
 		data = fmt.Appendf(nil, "{%q:%q}", "error", err.Error())
 	}
 	return VerdictNS, data
+}
+
+// overRecord names the ask rule a grant over answered, by its string
+// form and its source's name.
+type overRecord struct {
+	Rule   string `json:"rule"`
+	Source string `json:"source,omitempty"`
+}
+
+// setRecord is a grant set as an activation kept it: its source's rank
+// and trust, its lists as rule strings, and the note of every rule that
+// has one, keyed by the rule's string form. The source's name and hash
+// are the record's own source and source_hash.
+type setRecord struct {
+	Rank    int               `json:"rank,omitempty"`
+	Trusted bool              `json:"trusted,omitempty"`
+	Allow   []string          `json:"allow,omitempty"`
+	Deny    []string          `json:"deny,omitempty"`
+	Ask     []string          `json:"ask,omitempty"`
+	Notes   map[string]string `json:"notes,omitempty"`
+}
+
+// setOf is the record of a kept set.
+func setOf(set RuleSet) *setRecord {
+	rec := &setRecord{Rank: set.Source.Rank, Trusted: set.Source.Trusted}
+	list := func(rules []Rule) []string {
+		var out []string
+		for _, r := range rules {
+			out = append(out, r.String())
+			if r.Note != "" {
+				if rec.Notes == nil {
+					rec.Notes = map[string]string{}
+				}
+				rec.Notes[r.String()] = r.Note
+			}
+		}
+		return out
+	}
+	rec.Allow, rec.Deny, rec.Ask = list(set.Allow), list(set.Deny), list(set.Ask)
+	return rec
+}
+
+// refusalRecord is one rule an activation refused, with the reason.
+type refusalRecord struct {
+	Rule   string `json:"rule"`
+	Reason string `json:"reason"`
 }
 
 // itemRef names an item without its content, so a quarantined item's

@@ -24,6 +24,30 @@ versions may break the API.
   source and scope from the members and falls back on the reason texts
   only for a record written before this release. RFC 0001 draft 0.4,
   Grant sets and The record.
+- Added: each `GrantSet` activation is one verdict of its own, before
+  its grants and refusals: Allow, `activated the rules granted by N`,
+  `Grant` `KindActivate`, with `Verdict.Set`, the set as kept (its
+  deny and ask rules included), and `Verdict.Refused`. Its record
+  carries `set`, `{rank, trusted, allow, deny, ask, notes}`, and
+  `refused`, `[{rule, reason}]`, and replaces any set of its source
+  under its scope, so a reader rebuilds the sets from the record alone.
+  An activation that keeps nothing, such as one of deny rules alone,
+  is reported too. A product's observer sees one more verdict per
+  `GrantSet`.
+- Added: a grant over's verdict carries `Verdict.Over`, the ask rule it
+  answered, on the one rule of the grant's expansion that names the ask
+  rule's tool; its record carries `over`, `{rule, source}`.
+- Changed: `Revoke(ctx, "")`, which removes the set of a source with no
+  name, reads `revoked the rules granted by the product`, where the
+  name was left out.
+- Changed: the verdicts of `Grant`, `GrantOver`, `GrantSet`, `Revoke`
+  and `RevokeScope` are queued under the lock their change was made
+  under and reported in that order, by one caller at a time. A change
+  made while another's verdicts are being reported, by another
+  goroutine or by an observer, is reported after them by the caller
+  already reporting, and may reach the observers after the call that
+  made it returns. Before, a revocation made at once with an activation
+  could be reported before it.
 - Added: the decisions corpus gains `steps` on a case, grants, grants
   over a call's verdict and revocations made after its calls with the
   records they report, and `scope` and `records` on a grant set.

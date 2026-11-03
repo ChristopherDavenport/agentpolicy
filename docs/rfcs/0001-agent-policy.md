@@ -835,15 +835,20 @@ turn. A set's bare deny, a skill's `disallowed-tools`, removes the
 tool from the offer for as long as the set is active, for the runs
 under its scope.
 
-Every grant, every grant set's refusal, and every revocation that
-removed a rule is a verdict: allow with the rule and `granted G` for a
-grant, `granted G over R` for a grant over and `granted G by N` for a
-grant set, `N` its source's name or `the product` when it has none;
-block with the rule and `not granted G: reason` for a grant set's
-refusal; block with `revoked the rules granted by N` for a revocation,
-`revoked the rules granted under S` for a scope's, `S` the scope, and
-`revoked the rules granted without a scope` for the unscoped scope's.
-The decider is `policy`.
+Every grant, every grant set's activation, grant and refusal, and
+every revocation that removed a rule is a verdict: allow with the rule
+and `granted G` for a grant, `granted G over R` for a grant over and
+`granted G by N` for a grant set, `N` its source's name or `the
+product` when it has none; allow with `activated the rules granted by
+N` for an activation, with no rule; block with the rule and `not
+granted G: reason` for a grant set's refusal; block with `revoked the
+rules granted by N` for a revocation, `N` as before, so revoking the
+name of a source that has none, which removes that source's set, reads
+`revoked the rules granted by the product`; `revoked the rules granted
+under S` for a scope's, `S` the scope, and `revoked the rules granted
+without a scope` for the unscoped scope's. The decider is `policy`.
+An activation's verdict comes first, then one per rule granted and
+one per rule refused, in the set's order.
 
 Each of these verdicts also says, apart from its reason, what it did,
 so a reader rebuilds the grants in force from the record without
@@ -851,10 +856,10 @@ re-deciding them and without parsing a reason:
 
 - its **grant** is the kind: `grant` for a grant, and for a grant
   over a verdict with no rule, which is a plain grant; `grant_over`
-  for a grant over an ask rule; `grant_set` for a grant set's grant
-  and for its refusal alike, told apart by the action; `revoke` for a
-  revocation of a name; and `revoke_scope` for a revocation of a
-  scope;
+  for a grant over an ask rule; `activate` for a grant set's
+  activation; `grant_set` for a grant set's grant and for its refusal
+  alike, told apart by the action; `revoke` for a revocation of a
+  name; and `revoke_scope` for a revocation of a scope;
 - its **source** is the name of the source the grant's rule or the
   set was made under, which is also the rule's source, or the name a
   revocation removed, on every kind but `revoke_scope`, and empty for
@@ -862,10 +867,36 @@ re-deciding them and without parsing a reason:
 - its **scope** is the grant scope a set was activated or refused
   under, or a revocation removed under, and empty for the unscoped
   scope. A grant and a grant over join the policy, which no scope
-  limits, so they carry no scope whatever their context carries.
+  limits, so they carry no scope whatever their context carries;
+- an activation's **set** is the set as it was kept: its source's rank
+  and trust, the allow rules granted, none for an untrusted source, the
+  deny and ask rules it applies, each in order and stamped with the
+  source, and each rule's note; and its **refused** is the rules
+  refused, each with its reason, in order. Every activation has one,
+  one that keeps nothing included, and it replaces any set of its
+  source under its scope, so a reader rebuilds the sets in force under
+  each scope from the activations and revocations alone, in the order
+  they were reported: an activation puts its set under its source and
+  scope, a revocation removes the set of its source under its scope,
+  and a scope's revocation every set under its scope;
+- a grant over's **over** is the ask rule it answered, with that
+  rule's source, on the one rule of the grant's expansion whose tool is
+  the ask rule's; the others of the expansion were granted beside it
+  and carry none. A reader replays it as the grant over did: a bare
+  rule removes the ask rule, and one with a specifier `S` appends the
+  carve-out `T(!S)` under the grant's source.
 
 A refused grant or grant over changes nothing and is no verdict; a
 revocation that removed no rule is none either.
+
+The verdicts of grants, activations and revocations reach the
+observers in the order the changes took effect, whatever calls make
+changes at the same time: two changes to one source under one scope
+are never reported in the reverse of the order they were made, so a
+reader that replays the record in order ends with the rules in force.
+A binding MAY report a change's verdicts after the call that made it
+returns, while another change's are being reported, and MUST then
+report them after those.
 
 ## Deferred calls
 
@@ -1227,9 +1258,11 @@ A verdict is what was decided and why:
 | subject | the text of the subject whose verdict the fold kept, or of the part a hook decided on; empty for a call no splitter split and no hook named a part of |
 | confined | what confines the call, whatever the action; empty when unconfined or unnamed |
 | quarantined | the items an input guard quarantined, on its allow, or named in a refused quarantine, on its block; empty otherwise |
-| grant | for a grant, a grant set's grant or refusal, or a revocation, its kind as [Grant sets](#grant-sets) gives it: `grant`, `grant_over`, `grant_set`, `revoke` or `revoke_scope`; empty otherwise |
+| grant | for a grant, a grant set's activation, grant or refusal, or a revocation, its kind as [Grant sets](#grant-sets) gives it: `grant`, `grant_over`, `activate`, `grant_set`, `revoke` or `revoke_scope`; empty otherwise |
 | source | for a grant or a revocation, the name of the source it was made under or removed; empty for `revoke_scope`, for a source with no name, and for any other verdict, whose rule names its source |
 | scope | the grant scope a grant set was activated or refused under, or a revocation removed under; empty for the unscoped scope, for a grant and a grant over, and for any other verdict |
+| set, refused | on an activation, the set as kept and the rules refused with their reasons; empty otherwise |
+| over | on a grant over, the ask rule it answered, on the rule of its expansion that names the ask rule's tool; empty otherwise |
 
 Every verdict reaches every observer the host registered, exactly
 once, in the order they were registered, and outside any lock the
@@ -1258,8 +1291,11 @@ with `ns` set to `agentpolicy:verdict` and `data` a JSON object:
 | `note` | the rule's note, whatever its source |
 | `reason`, `by`, `held`, `subject`, `confined` | as the verdict names them |
 | `quarantined` | an array naming each quarantined item by reference, `{"type", "id"?, "call_id"?}`, from its Open Responses form; never its content, so its text is redacted with the entry that holds it and is not copied into this one |
-| `grant` | the kind of a grant or a revocation: `"grant"`, `"grant_over"`, `"grant_set"`, `"revoke"` or `"revoke_scope"` |
+| `grant` | the kind of a grant or a revocation: `"grant"`, `"grant_over"`, `"activate"`, `"grant_set"`, `"revoke"` or `"revoke_scope"` |
 | `scope` | the grant scope's key a grant set or a revocation was made under |
+| `over` | on a grant over, `{"rule", "source"?}`: the ask rule it answered, in string form, and its source's name |
+| `set` | on an activation, `{"rank"?, "trusted"?, "allow"?, "deny"?, "ask"?, "notes"?}`: the source's rank and trust, each list as rule strings in order, and `notes` mapping a rule's string form to its note; the source's name and hash are the record's `source` and `source_hash`; `{}` for a set that keeps nothing |
+| `refused` | on an activation, an array of `{"rule", "reason"}`, in order |
 
 Every member but `action` is omitted when the verdict leaves it empty,
 zero or false. A reader MUST ignore members it does not know.
@@ -1271,8 +1307,11 @@ source the grant or the set was made under or the revocation removed,
 on every kind but `revoke_scope`, unless that source has no name, so
 an absent `source` on a grant is the host's own. When it was made
 under a grant scope it MUST carry `scope`, the scope's key; a grant
-and a grant over carry none. A reader MUST take the kind, the source
-and the scope from these members and MUST NOT parse `reason` for them.
+and a grant over carry none. An activation MUST carry `set`, and
+`refused` when it refused a rule; a grant over MUST carry `over` on
+the rule that answered the ask. A reader MUST take the kind, the source,
+the scope, the set and the ask rule answered from these members and
+MUST NOT parse `reason` for them.
 A record written under draft 0.3 or before carries none of them, and
 a reader that must read one MAY fall back on the reason texts
 [Grant sets](#grant-sets) fixes; it then has no scope but the session
@@ -1329,7 +1368,7 @@ The root module of this repository is the reference binding.
 | model-backed output | `classify.WithEveryTurn()` to judge a turn that is not final |
 | hooks | `WithHooks(fns…)`; answering hooks `WithAnsweringHooks(fns…)`; a hook's subject is `agentturn.ToolDecision.Subject` |
 | offering tools | `Engine.Removes(tool)`, `Engine.Filter(tools)`, `Engine.ToolProvider(base)` for `agentturn.Config.ToolProvider` |
-| grants | `Engine.Grant`, `Engine.GrantOver`; `Engine.GrantSet` → granted and `[]Refusal{Rule, Reason}`, `Engine.Revoke`, `Engine.Grants`; the scope: `ContextWithGrantScope(ctx, scope)`, `GrantScopeFromContext(ctx)`, `Engine.GrantsFor(ctx)`, `Engine.RevokeScope(ctx)`; the kind: `GrantKind`, `KindGrant`, `KindGrantOver`, `KindGrantSet`, `KindRevoke`, `KindRevokeScope` |
+| grants | `Engine.Grant`, `Engine.GrantOver`; `Engine.GrantSet` → granted and `[]Refusal{Rule, Reason}`, `Engine.Revoke`, `Engine.Grants`; the scope: `ContextWithGrantScope(ctx, scope)`, `GrantScopeFromContext(ctx)`, `Engine.GrantsFor(ctx)`, `Engine.RevokeScope(ctx)`; the kind: `GrantKind`, `KindGrant`, `KindGrantOver`, `KindActivate`, `KindGrantSet`, `KindRevoke`, `KindRevokeScope` |
 | deferred calls | `Engine.Deferred`, `Engine.Runs`, `Engine.Forget` |
 | release | `Engine.Release(ctx, end, answers…)`; `ErrUnanswered`; `Engine.Resumed(ctx, end, answers, next)` with the end the resume returned; `Engine.ForgetAnswers(runID)` |
 | asking in the run | `WithAskInRun()`, through the elicitor on the hook's context (`agentturn.Ask`); the decider is `agenttool.Answer.By` |
@@ -1338,7 +1377,7 @@ The root module of this repository is the reference binding.
 | nested calls | `agentturn.ToolCallInfo.Parent` non-empty: decided and reported, no deferral remembered |
 | denial bound | `DenialBound{Consecutive, Total, Window}`, `DefaultDenialBound`, `WithDenialBound`, `ErrDenialBound`, `Engine.ResetReviews` |
 | decider | `ByPolicy`, `ByAgent`, `ByHuman` |
-| verdict | `Verdict{RunID, Turn, CallID, Tool, Guard, Action, Rule, Reason, By, Held, Subject, Confined, Quarantined, Grant, Source, Scope}`; `WithObserver(fn)`, which adds an observer |
+| verdict | `Verdict{RunID, Turn, CallID, Tool, Guard, Action, Rule, Reason, By, Held, Subject, Confined, Quarantined, Grant, Source, Scope, Set, Refused, Over}`; `WithObserver(fn)`, which adds an observer |
 | record | `VerdictNS = "agentpolicy:verdict"`; `Verdict.Record()` → namespace and bytes |
 | presets | `Tools{Read, Edit, Execute}`; `Suggest`, `AutoEdit`, `FullAuto` |
 | guard | `guard.Guard{Name, Check}`, `guard.New`; `guard.Input{Items, Instructions}`, `guard.Message`, `guard.Output{Response, Results, Final}` and `Output.Answer()`; `guard.Verdict{Action, Reason, Items, Instructions, Quarantine}`, the quarantine kept with `agentturn.Quarantine` |
@@ -1398,7 +1437,9 @@ policy's own ask, never a constraint's or an outranking source's; holds every ca
 when another of its batch asks, and never runs one beside an ask;
 gives the reason texts this document states; reports every verdict to
 every observer exactly once; names the kind, source and scope of every
-grant and revocation; remembers a deferred call under its own
+grant and revocation, records each activation's set and each grant
+over's ask rule, and reports rule changes in the order they took
+effect; remembers a deferred call under its own
 run; answers a held call only from the answers to the asked ones; and
 for every case of `testdata/policy/decisions.json` builds, grants,
 decides and offers as the case says.
@@ -1468,7 +1509,8 @@ a splitter. A case has:
   `{"name", "rank", "trusted"}`, the source a grant's rule is stamped
   with; `scope`, the grant scope of the context it is made under,
   unscoped when absent; `removed`, how many rules a revocation
-  removed; `refused`, a grant over's refusal reason; and `records`,
+  removed, `revoke` given `""` removing the set of a source with no
+  name; `refused`, a grant over's refusal reason; and `records`,
   the records the step reports, none when absent.
 
 A grant set of `grants` MAY also have `scope`, the grant scope it is
@@ -1521,9 +1563,9 @@ listed in the changelog as one.
 
 ## Changes since 0.3
 
-- The verdict of a grant, a grant over, a grant set's grant or
-  refusal, and a revocation carries its kind, `grant`, `grant_over`,
-  `grant_set`, `revoke` or `revoke_scope`, its source's name, on every
+- The verdict of a grant, a grant over, a grant set's activation,
+  grant or refusal, and a revocation carries its kind, `grant`,
+  `grant_over`, `activate`, `grant_set`, `revoke` or `revoke_scope`, its source's name, on every
   kind but `revoke_scope`, and the grant scope it was made under, and
   its record carries them as the members `grant`, `source` and `scope`
   (agentkit#80). A reader MUST take them from the members and MUST NOT
@@ -1535,6 +1577,25 @@ listed in the changelog as one.
   grants of a session parsed three reason prefixes and took the scope
   from the session the record sat in. Each member is omitted when
   empty, so every record without one is byte-identical.
+- Each grant set activation is a verdict of its own, `activated the
+  rules granted by N`, whose record carries the set as kept, its deny
+  and ask rules included, and the rules refused, and which replaces
+  the set of its source under its scope, so a reader rebuilds the sets
+  from the record alone; one that keeps nothing is recorded too. Draft
+  0.3 reported only the rules granted and refused, so a set of deny
+  rules left no record, and a set activated again with fewer rules read
+  as the union.
+- A grant over's record names the ask rule it answered, `over`, on the
+  rule of its expansion that names that rule's tool. Draft 0.3 put the
+  ask rule only in the reason, and tagged every rule of an expansion
+  alike.
+- Revoking the name of a source that has none reads `revoked the rules
+  granted by the product`, as the grant read; draft 0.3 left the name
+  out.
+- The verdicts of rule changes are reported in the order the changes
+  took effect. Draft 0.3 did not say, and the reference reported each
+  after releasing its lock, so a revocation made at once with an
+  activation could be recorded before it.
 - The corpus gains `steps` on a decision case, and `scope` and
   `records` on a grant set ([The fixture corpus](#the-fixture-corpus)).
 

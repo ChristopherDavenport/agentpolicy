@@ -3,6 +3,7 @@ package agentpolicy
 import (
 	"context"
 	"encoding/json"
+	"slices"
 
 	"github.com/ChristopherDavenport/agentturn"
 )
@@ -115,9 +116,13 @@ func (g grant) rules() int { return len(g.set.Allow) + len(g.set.Deny) + len(g.s
 // A set activated under a scope decides only the calls whose context
 // carries that scope; one activated under no scope decides every call
 // the engine sees. Rules a name governs are expanded as [Build]
-// expands them. Every grant and every refusal is a Verdict through the
-// observer, with Grant [KindGrantSet], Source the set's source name and
-// Scope the grant scope of ctx.
+// expands them. The activation is a Verdict through the observer, Allow
+// with "activated the rules granted by N", Grant [KindActivate], the
+// set as kept in Set and the refusals in Refused, so a reader of the
+// record rebuilds the set from it alone; then every grant and every
+// refusal is one, with Grant [KindGrantSet]. Each carries Source, the
+// set's source name, and Scope, the grant scope of ctx. An activation
+// that keeps nothing is reported too.
 //
 // A product with several skills activates each as its own source
 // rather than merging them all into the policy before the run, so the
@@ -188,16 +193,20 @@ func (e *Engine) GrantSet(ctx context.Context, set RuleSet) (granted []Rule, ref
 	e.grants = grants
 	e.withheld[kept.key()] = withheldOf(set)
 	e.gen++
-	e.mu.Unlock()
-
+	// The activation first, as a whole, then each rule it granted and
+	// refused, all queued under the lock the replacement was made under.
+	activated := cloneSets([]RuleSet{kept.set})[0]
+	e.enqueue(ctx, Verdict{Action: agentturn.Allow, Reason: "activated the rules granted by " + sourceName(set.Source), By: ByPolicy, Grant: KindActivate, Source: set.Source.Name, Scope: kept.scope, Set: &activated, Refused: slices.Clone(refused)})
 	for i := range granted {
 		g := granted[i]
-		e.observe(ctx, Verdict{Tool: g.Tool, Action: agentturn.Allow, Rule: &g, Reason: "granted " + g.String() + " by " + sourceName(set.Source), By: ByPolicy, Grant: KindGrantSet, Source: set.Source.Name, Scope: kept.scope})
+		e.enqueue(ctx, Verdict{Tool: g.Tool, Action: agentturn.Allow, Rule: &g, Reason: "granted " + g.String() + " by " + sourceName(set.Source), By: ByPolicy, Grant: KindGrantSet, Source: set.Source.Name, Scope: kept.scope})
 	}
 	for i := range refused {
 		r := refused[i].Rule
-		e.observe(ctx, Verdict{Tool: r.Tool, Action: agentturn.Block, Rule: &r, Reason: "not granted " + r.String() + ": " + refused[i].Reason, By: ByPolicy, Grant: KindGrantSet, Source: set.Source.Name, Scope: kept.scope})
+		e.enqueue(ctx, Verdict{Tool: r.Tool, Action: agentturn.Block, Rule: &r, Reason: "not granted " + r.String() + ": " + refused[i].Reason, By: ByPolicy, Grant: KindGrantSet, Source: set.Source.Name, Scope: kept.scope})
 	}
+	e.mu.Unlock()
+	e.report()
 	return granted, refused
 }
 
@@ -250,17 +259,16 @@ func blocks(p Policy, r Rule, src Source) (bool, string) {
 // [Engine.GrantOver] added, which are the always-allow journal and
 // outlive a turn, nor the source's set under any other scope: an
 // unscoped Revoke never removes a scoped set, and a scoped one never
-// removes the unscoped set. The revocation is journaled as a Verdict,
-// Block with "revoked the rules granted by N", when it removed a rule,
+// removes the unscoped set. A source of "" names the set of a source
+// with no name. The revocation is journaled as a Verdict, Block with
+// "revoked the rules granted by N", N "the product" for a source with
+// no name, when it removed a rule,
 // with Grant [KindRevoke], Source the name and Scope the grant scope of
 // ctx.
 func (e *Engine) Revoke(ctx context.Context, source string) int {
 	scope := GrantScopeFromContext(ctx)
-	n := e.revoke(func(g grant) bool { return g.key() == grantKey{scope: scope, source: source} })
-	if n > 0 {
-		e.observe(ctx, Verdict{Action: agentturn.Block, Reason: "revoked the rules granted by " + source, By: ByPolicy, Grant: KindRevoke, Source: source, Scope: scope})
-	}
-	return n
+	return e.revoke(ctx, func(g grant) bool { return g.key() == grantKey{scope: scope, source: source} },
+		Verdict{Action: agentturn.Block, Reason: "revoked the rules granted by " + sourceName(Source{Name: source}), By: ByPolicy, Grant: KindRevoke, Source: source, Scope: scope})
 }
 
 // RevokeScope removes every rule set activated under the grant scope
@@ -275,22 +283,19 @@ func (e *Engine) Revoke(ctx context.Context, source string) int {
 // rule, with Grant [KindRevokeScope], Scope the scope and no Source.
 func (e *Engine) RevokeScope(ctx context.Context) int {
 	scope := GrantScopeFromContext(ctx)
-	n := e.revoke(func(g grant) bool { return g.scope == scope })
-	if n > 0 {
-		reason := "revoked the rules granted without a scope"
-		if scope != "" {
-			reason = "revoked the rules granted under " + scope
-		}
-		e.observe(ctx, Verdict{Action: agentturn.Block, Reason: reason, By: ByPolicy, Grant: KindRevokeScope, Scope: scope})
+	reason := "revoked the rules granted without a scope"
+	if scope != "" {
+		reason = "revoked the rules granted under " + scope
 	}
-	return n
+	return e.revoke(ctx, func(g grant) bool { return g.scope == scope },
+		Verdict{Action: agentturn.Block, Reason: reason, By: ByPolicy, Grant: KindRevokeScope, Scope: scope})
 }
 
 // revoke removes the sets drop selects, and their withheld rules, and
-// returns how many rules they held.
-func (e *Engine) revoke(drop func(grant) bool) int {
+// returns how many rules they held. When that is any, v is queued under
+// the lock the removal was made under, and reported.
+func (e *Engine) revoke(ctx context.Context, drop func(grant) bool, v Verdict) int {
 	e.mu.Lock()
-	defer e.mu.Unlock()
 	n := 0
 	kept := make([]grant, 0, len(e.grants))
 	for _, g := range e.grants {
@@ -307,6 +312,11 @@ func (e *Engine) revoke(drop func(grant) bool) int {
 		e.grants = kept
 		e.gen++
 	}
+	if n > 0 {
+		e.enqueue(ctx, v)
+	}
+	e.mu.Unlock()
+	e.report()
 	return n
 }
 

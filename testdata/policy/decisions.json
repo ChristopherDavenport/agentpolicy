@@ -572,16 +572,19 @@
         {"source": {"name": "skill:deploy", "rank": 1, "trusted": true}, "allow": "bash(git:*)", "scope": "conv-1",
          "granted": ["bash(git:*)"],
          "records": [
+           {"action": "allow", "source": "skill:deploy", "reason": "activated the rules granted by skill:deploy", "by": "policy", "grant": "activate", "scope": "conv-1", "set": {"rank": 1, "trusted": true, "allow": ["bash(git:*)"]}},
            {"tool": "bash", "action": "allow", "rule": "bash(git:*)", "source": "skill:deploy", "reason": "granted bash(git:*) by skill:deploy", "by": "policy", "grant": "grant_set", "scope": "conv-1"}
          ]},
         {"source": {"name": "skill:web", "rank": 0, "trusted": false}, "allow": "read", "deny": "web_fetch",
          "refused": [{"rule": "read", "reason": "withheld: the source skill:web is not trusted"}],
          "records": [
+           {"action": "allow", "source": "skill:web", "reason": "activated the rules granted by skill:web", "by": "policy", "grant": "activate", "set": {"deny": ["web_fetch"]}, "refused": [{"rule": "read", "reason": "withheld: the source skill:web is not trusted"}]},
            {"tool": "read", "action": "block", "rule": "read", "source": "skill:web", "reason": "not granted read: withheld: the source skill:web is not trusted", "by": "policy", "grant": "grant_set"}
          ]},
         {"source": {"name": "skill:test", "rank": 1, "trusted": true}, "allow": "bash(go test:*)", "scope": "conv-2",
          "granted": ["bash(go test:*)"],
          "records": [
+           {"action": "allow", "source": "skill:test", "reason": "activated the rules granted by skill:test", "by": "policy", "grant": "activate", "scope": "conv-2", "set": {"rank": 1, "trusted": true, "allow": ["bash(go test:*)"]}},
            {"tool": "bash", "action": "allow", "rule": "bash(go test:*)", "source": "skill:test", "reason": "granted bash(go test:*) by skill:test", "by": "policy", "grant": "grant_set", "scope": "conv-2"}
          ]}
       ],
@@ -594,7 +597,7 @@
          "refused": "grant read does not name the tool of bash(git push:*)"},
         {"grant_over": "bash(git push origin:*)", "over": 1, "source": {"name": "user", "rank": 1, "trusted": true}, "scope": "conv-1",
          "records": [
-           {"tool": "bash", "action": "allow", "rule": "bash(git push origin:*)", "source": "user", "reason": "granted bash(git push origin:*) over bash(git push:*)", "by": "policy", "grant": "grant_over"}
+           {"tool": "bash", "action": "allow", "rule": "bash(git push origin:*)", "source": "user", "reason": "granted bash(git push origin:*) over bash(git push:*)", "by": "policy", "grant": "grant_over", "over": {"rule": "bash(git push:*)", "source": "project"}}
          ]},
         {"grant_over": "bash(ls -l:*)", "over": 2, "source": {"name": "user", "rank": 1, "trusted": true},
          "records": [
@@ -616,6 +619,76 @@
         {"revoke_scope": true, "removed": 1,
          "records": [
            {"action": "block", "reason": "revoked the rules granted without a scope", "by": "policy", "grant": "revoke_scope"}
+         ]}
+      ]
+    },
+    {
+      "name": "an activation replaces the set of its source and scope",
+      "policy": {"default": "ask"},
+      "grants": [
+        {"source": {"name": "skill:deploy", "rank": 1, "trusted": true}, "allow": "bash(git:*) bash(ls:*)",
+         "granted": ["bash(git:*)", "bash(ls:*)"],
+         "records": [
+           {"action": "allow", "source": "skill:deploy", "reason": "activated the rules granted by skill:deploy", "by": "policy", "grant": "activate", "set": {"rank": 1, "trusted": true, "allow": ["bash(git:*)", "bash(ls:*)"]}},
+           {"tool": "bash", "action": "allow", "rule": "bash(git:*)", "source": "skill:deploy", "reason": "granted bash(git:*) by skill:deploy", "by": "policy", "grant": "grant_set"},
+           {"tool": "bash", "action": "allow", "rule": "bash(ls:*)", "source": "skill:deploy", "reason": "granted bash(ls:*) by skill:deploy", "by": "policy", "grant": "grant_set"}
+         ]},
+        {"source": {"name": "skill:deploy", "rank": 1, "trusted": true}, "allow": "bash(git:*)",
+         "granted": ["bash(git:*)"],
+         "records": [
+           {"action": "allow", "source": "skill:deploy", "reason": "activated the rules granted by skill:deploy", "by": "policy", "grant": "activate", "set": {"rank": 1, "trusted": true, "allow": ["bash(git:*)"]}},
+           {"tool": "bash", "action": "allow", "rule": "bash(git:*)", "source": "skill:deploy", "reason": "granted bash(git:*) by skill:deploy", "by": "policy", "grant": "grant_set"}
+         ]},
+        {"source": {"name": "", "rank": 0, "trusted": true}, "allow": "read",
+         "granted": ["read"],
+         "records": [
+           {"action": "allow", "reason": "activated the rules granted by the product", "by": "policy", "grant": "activate", "set": {"trusted": true, "allow": ["read"]}},
+           {"tool": "read", "action": "allow", "rule": "read", "reason": "granted read by the product", "by": "policy", "grant": "grant_set"}
+         ]},
+        {"source": {"name": "skill:review", "rank": 0, "trusted": true}, "deny": "edit",
+         "records": [
+           {"action": "allow", "source": "skill:review", "reason": "activated the rules granted by skill:review", "by": "policy", "grant": "activate", "set": {"trusted": true, "deny": ["edit"]}}
+         ]}
+      ],
+      "calls": [
+        {"tool": "bash", "args": {"command": "ls -la"}, "want": {"action": "defer", "reason": "no rule allows bash: approval required by default"}},
+        {"tool": "bash", "args": {"command": "git status"}, "want": {"action": "allow", "rule": "bash(git:*)", "source": "skill:deploy", "reason": "allowed by bash(git:*)"}}
+      ],
+      "steps": [
+        {"revoke": "skill:deploy", "removed": 1,
+         "records": [
+           {"action": "block", "source": "skill:deploy", "reason": "revoked the rules granted by skill:deploy", "by": "policy", "grant": "revoke"}
+         ]},
+        {"revoke": "", "removed": 1,
+         "records": [
+           {"action": "block", "reason": "revoked the rules granted by the product", "by": "policy", "grant": "revoke"}
+         ]}
+      ]
+    },
+    {
+      "name": "a grant of an alias records each rule it expands to",
+      "matchers": {
+        "bash": {"match": "prefix", "field": "command"},
+        "zsh": {"match": "prefix", "field": "command"}
+      },
+      "aliases": {"shell": ["bash", "zsh"]},
+      "policy": {
+        "sources": [{"name": "project", "rank": 1, "trusted": true, "ask": "bash(git push:*)"}],
+        "default": "ask"
+      },
+      "calls": [
+        {"tool": "bash", "args": {"command": "git push origin main"}, "want": {"action": "defer", "rule": "bash(git push:*)", "source": "project", "reason": "approval required by bash(git push:*)"}}
+      ],
+      "steps": [
+        {"grant_over": "shell(git push origin:*)", "over": 1, "source": {"name": "user", "rank": 1, "trusted": true},
+         "records": [
+           {"tool": "bash", "action": "allow", "rule": "bash(git push origin:*)", "source": "user", "reason": "granted shell(git push origin:*) over bash(git push:*)", "by": "policy", "grant": "grant_over", "over": {"rule": "bash(git push:*)", "source": "project"}},
+           {"tool": "zsh", "action": "allow", "rule": "zsh(git push origin:*)", "source": "user", "reason": "granted shell(git push origin:*) over bash(git push:*)", "by": "policy", "grant": "grant_over"}
+         ]},
+        {"grant": "shell(ls:*)", "source": {"name": "user", "rank": 1, "trusted": true},
+         "records": [
+           {"tool": "bash", "action": "allow", "rule": "bash(ls:*)", "source": "user", "reason": "granted bash(ls:*)", "by": "policy", "grant": "grant"},
+           {"tool": "zsh", "action": "allow", "rule": "zsh(ls:*)", "source": "user", "reason": "granted zsh(ls:*)", "by": "policy", "grant": "grant"}
          ]}
       ]
     }

@@ -29,6 +29,19 @@ func TestVerdictRecord(t *testing.T) {
 			want: `{"action":"block","source":"skill:deploy","reason":"revoked the rules granted by skill:deploy","by":"policy","grant":"revoke","scope":"conv-1"}`},
 		{name: "a scope's revocation", v: Verdict{Action: agentturn.Block, Reason: "revoked the rules granted without a scope", By: ByPolicy, Grant: KindRevokeScope},
 			want: `{"action":"block","reason":"revoked the rules granted without a scope","by":"policy","grant":"revoke_scope"}`},
+		// An activation carries the set as kept, so a reader rebuilds it
+		// from the record alone, the rules a set only restricts with and
+		// a note included.
+		{name: "an activation", v: Verdict{Action: agentturn.Allow, Reason: "activated the rules granted by skill:deploy", By: ByPolicy, Grant: KindActivate, Source: "skill:deploy", Scope: "conv-1",
+			Set: &RuleSet{Source: Source{Name: "skill:deploy", Hash: "sha256:9f2c", Trusted: true, Rank: 1},
+				Allow: []Rule{{Tool: "bash", Spec: "git:*"}}, Deny: []Rule{{Tool: "web_fetch", Note: "no network"}}},
+			Refused: []Refusal{{Rule: Rule{Tool: "edit"}, Reason: "edit from managed outranks the grant"}}},
+			want: `{"action":"allow","source":"skill:deploy","source_hash":"sha256:9f2c","reason":"activated the rules granted by skill:deploy","by":"policy","grant":"activate","scope":"conv-1","set":{"rank":1,"trusted":true,"allow":["bash(git:*)"],"deny":["web_fetch"],"notes":{"web_fetch":"no network"}},"refused":[{"rule":"edit","reason":"edit from managed outranks the grant"}]}`},
+		{name: "an activation that keeps nothing", v: Verdict{Action: agentturn.Allow, Reason: "activated the rules granted by the product", By: ByPolicy, Grant: KindActivate, Set: &RuleSet{}},
+			want: `{"action":"allow","reason":"activated the rules granted by the product","by":"policy","grant":"activate","set":{}}`},
+		{name: "a grant over an ask rule", v: Verdict{Tool: "bash", Action: agentturn.Allow, Rule: &Rule{Tool: "bash", Spec: "git push origin:*", Source: Source{Name: "user", Rank: 1}}, Reason: "granted bash(git push origin:*) over bash(git push:*)", By: ByPolicy, Grant: KindGrantOver, Source: "user",
+			Over: &Rule{Tool: "bash", Spec: "git push:*", Source: Source{Name: "project", Rank: 1}}},
+			want: `{"tool":"bash","action":"allow","rule":"bash(git push origin:*)","source":"user","reason":"granted bash(git push origin:*) over bash(git push:*)","by":"policy","grant":"grant_over","over":{"rule":"bash(git push:*)","source":"project"}}`},
 		{name: "a held call", v: Verdict{RunID: "run_1", CallID: "call_2", Tool: "read", Action: agentturn.Defer, Held: true, Reason: "held for approval: allowed by default", By: ByPolicy},
 			want: `{"run_id":"run_1","call_id":"call_2","tool":"read","action":"defer","reason":"held for approval: allowed by default","by":"policy","held":true}`},
 		{name: "a guard's verdict", v: Verdict{RunID: "run_1", Guard: "secrets", Action: agentturn.Allow},
