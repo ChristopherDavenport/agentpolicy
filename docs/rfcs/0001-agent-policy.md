@@ -1055,9 +1055,14 @@ A guard checks content. Its **subject** is one of:
   before the transcript, the record or the front keeps it;
 - an **output**: a finished turn's response, its items already in the
   transcript, as the model produced it and not as the output guard's
-  rewrites left it, and whether the turn is **final**, one in which
-  the model called no tools, so the response is the run's answer. A
-  guard over the answer passes a turn that is not final.
+  rewrites left it; the turn's tool results, in the model's order; and
+  whether the turn is **final**. A turn is final when the model called
+  no tools, so the response is the run's answer, or when one of its
+  results ends the run as its tool answering for the model, under
+  agentturn RFC 0001; in the second case the outputs of the results
+  that end the run are the run's **answer**, each the output of the
+  call it answers. A guard over the answer MUST judge those outputs as
+  it judges a final message, and passes a turn that is not final.
 
 A guard answers with an action and a reason, and for an input or a
 message MAY rewrite: replacement items for an input, a replacement
@@ -1109,9 +1114,13 @@ The reference guards, informative:
 | `secrets` | all | block on the first secret shape found: `secret detected: NAME` |
 | `redact` | input, message | rewrite every secret to `[REDACTED NAME]`: `redacted N secret: NAME` for one and `redacted N secrets: NAMES` for more, the distinct names in the order found joined by `, `; on an output, block as `secrets` does over the items that are not messages, since the messages were its to rewrite on the output guard and the output holds them as the model said them |
 
-The text of an item is a message's text parts, a function call's
-arguments, a function call output's text or text parts, and a
-reasoning item's summary and content.
+The items of an output are its response's output items followed by
+its answer, when a terminating result gave one; the results that do
+not end the run are the next input's, and an input guard reads them
+there. The text of an item is a message's text parts, a function
+call's arguments, a function call output's text or text parts, a tool
+result's output among them, and a reasoning item's summary and
+content.
 
 ## The verdict
 
@@ -1222,7 +1231,7 @@ The root module of this repository is the reference binding.
 | verdict | `Verdict{RunID, Turn, CallID, Tool, Guard, Action, Rule, Reason, By, Held, Subject, Confined}`; `WithObserver(fn)`, which adds an observer |
 | record | `VerdictNS = "agentpolicy:verdict"`; `Verdict.Record()` → namespace and bytes |
 | presets | `Tools{Read, Edit, Execute}`; `Suggest`, `AutoEdit`, `FullAuto` |
-| guard | `guard.Guard{Name, Check}`, `guard.New`; `guard.Input{Items, Instructions}`, `guard.Message`, `guard.Output{Response, Final}`; `guard.Verdict{Action, Reason, Items, Instructions}` |
+| guard | `guard.Guard{Name, Check}`, `guard.New`; `guard.Input{Items, Instructions}`, `guard.Message`, `guard.Output{Response, Results, Final}` and `Output.Answer()`; `guard.Verdict{Action, Reason, Items, Instructions}` |
 | chain | `guard.Chain{Guards, Observer, Placeholder, Stop}`; `BeforeModelCall`, `OutputGuard`, `ShouldStopAfterTurn`; `guard.Withheld` |
 | guard stop | `guard.BlockedError{Guard, Subject, Reason}`, which wraps `agentturn.ErrGuard` |
 | reference guards | `guard.Limit`, `guard.Deny`, `guard.Secrets`, `guard.Redact`, `guard.Pattern`, `guard.DefaultSecrets` |
@@ -1387,6 +1396,11 @@ listed in the changelog as one.
   agentturn's chain fold.
 - Answering hooks (#86): a host MAY register hooks whose allow answers
   the policy's own ask, never a deny, an ordinary hook's ask or a hold.
+- A turn a terminating tool result ends is final, and the outputs of
+  the results that end the run are its answer, which a guard over the
+  answer judges as a final message (#78). The output subject carries
+  the turn's tool results. Draft 0.2 called final only a turn with no
+  calls, so a terminating tool's answer reached the caller unjudged.
 - Claims (#81): a call whose tool claims facts, with no splitter, is
   split by the claim; hints are constraints after the call itself; a
   claim's rewrite is decided again and is what the call runs with; one

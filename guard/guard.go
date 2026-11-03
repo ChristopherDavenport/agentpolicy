@@ -45,6 +45,7 @@ import (
 	"fmt"
 
 	"github.com/ChristopherDavenport/agentpolicy"
+	"github.com/ChristopherDavenport/agenttool"
 	"github.com/ChristopherDavenport/agentturn"
 	"github.com/ChristopherDavenport/openresponses"
 )
@@ -74,12 +75,59 @@ type Input struct {
 // arguments, a reasoning summary.
 type Output struct {
 	Response *openresponses.Response
-	// Final is set when the model called no tools, so the response is
-	// the run's answer unless a queued follow-up keeps it going, as
-	// agentturn.TurnInfo.Final says. A guard over the answer passes a
-	// turn that is not one rather than judging, and paying for, a turn
-	// that produced nothing but tool calls.
+	// Results are the turn's tool results in the model's order, as
+	// agentturn.TurnInfo.ToolResults carries them; empty when the model
+	// called no tools.
+	Results []agenttool.Result
+	// Final is set when the turn is the run's answer: the model called
+	// no tools, as agentturn.TurnInfo.Final says, and the response is
+	// the answer unless a queued follow-up keeps the run going; or one
+	// of its results ends the run, its Terminate set, as the tool
+	// answering for the model, and the outputs of the results that end
+	// the run are the answer, [Output.Answer]. A guard over the answer
+	// passes a turn that is not one rather than judging, and paying
+	// for, a turn that produced nothing but tool calls.
 	Final bool
+}
+
+// Answer returns the outputs of the results that end the run, each as
+// a function call output with the call ID of the call it answers, the
+// function calls of the response taken in order: the run's answer when
+// a terminating tool answered for the model, which both fronts serve
+// as the answer. It is nil for a turn no result ends. A guard over the
+// answer judges these as it judges a final message, and the reference
+// guards read them among the output's items.
+func (o Output) Answer() openresponses.Items {
+	var calls []*openresponses.FunctionCall
+	if o.Response != nil {
+		for _, item := range o.Response.Output {
+			if c, ok := item.(*openresponses.FunctionCall); ok {
+				calls = append(calls, c)
+			}
+		}
+	}
+	var out openresponses.Items
+	for i, r := range o.Results {
+		if !r.Terminate {
+			continue
+		}
+		id := ""
+		if i < len(calls) {
+			id = calls[i].CallID
+		}
+		out = append(out, &openresponses.FunctionCallOutput{CallID: id, Output: r.Output})
+	}
+	return out
+}
+
+// terminates reports whether any of results ends the run.
+func terminates(results []agenttool.Result) bool {
+	for _, r := range results {
+		if r.Terminate {
+			return true
+		}
+	}
+	return false
 }
 
 // Message is the subject of a check on one assistant message as the
@@ -303,7 +351,7 @@ func Withheld(withheld *openresponses.Message, guard, reason string) *openrespon
 func (c Chain) ShouldStopAfterTurn() func(context.Context, agentturn.TurnInfo) (bool, error) {
 	return func(ctx context.Context, info agentturn.TurnInfo) (bool, error) {
 		for _, g := range c.Guards {
-			v, err := g.Check(ctx, Output{Response: info.Response, Final: info.Final})
+			v, err := g.Check(ctx, Output{Response: info.Response, Results: info.ToolResults, Final: info.Final || terminates(info.ToolResults)})
 			if err != nil {
 				return false, c.fail(ctx, agentpolicy.Verdict{RunID: info.RunID, Turn: info.Turn, Guard: g.Name()}, err)
 			}
@@ -370,7 +418,9 @@ func block(reason string) Verdict {
 }
 
 // items returns the items a subject carries: the input, the message,
-// or the response's output.
+// or the response's output followed by the answer a terminating tool
+// gave, so a guard over the output reads the run's answer however the
+// run gave it.
 func items(subject any) (openresponses.Items, bool) {
 	switch s := subject.(type) {
 	case Input:
@@ -381,10 +431,14 @@ func items(subject any) (openresponses.Items, bool) {
 		}
 		return openresponses.Items{s.Message}, true
 	case Output:
-		if s.Response == nil {
-			return nil, true
+		var out openresponses.Items
+		if s.Response != nil {
+			out = s.Response.Output
 		}
-		return s.Response.Output, true
+		if answer := s.Answer(); answer != nil {
+			out = append(append(openresponses.Items(nil), out...), answer...)
+		}
+		return out, true
 	}
 	return nil, false
 }

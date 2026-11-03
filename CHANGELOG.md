@@ -35,6 +35,18 @@ versions may break the API.
   deny, an ordinary hook's ask or a hold: a call it allows is still
   held when its batch asks. It does what a product's run end, resume
   and "approved by policy" record did, and records what was decided.
+- Fixed: a guard over the answer judges the answer a terminating tool
+  gives (#78). `guard.Output` gains `Results`, the turn's tool results,
+  and `Final` is set when a result ends the run (`Terminate`), not only
+  when the model called no tools; `Output.Answer()` returns the outputs
+  of the results that end the run as function call outputs. `Deny`,
+  `Secrets`, `Redact` (which blocks there as `Secrets` does) and `Limit`
+  read the answer among the output's items, and `classify` judges it
+  with the turn, so a closing note a terminating tool formats from a
+  customer's record is judged before either front serves it. A Block
+  stops the run as a guard stop, as for a final message; withholding
+  the answer from `RunEnd.Items` is agentturn#275's. `Limit` over a
+  terminating turn counts the answer.
 - Changed, breaking: the engine reads a tool's facts claim
   (`agenttool.Factual`) for a call whose tool has no `Subjects`
   splitter, by default (#81). Each claimed call is a subject under the

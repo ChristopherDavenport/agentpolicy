@@ -132,8 +132,11 @@ func parseAnswer(text string) (answer, error) {
 // Guard classifies content with a model and blocks what the rubric
 // refuses. It checks a guard.Input, a guard.Message or a guard.Output
 // and passes anything else. A guard.Output that is not the run's
-// answer, one whose Final is unset because the model called tools,
-// passes without a model call unless [WithEveryTurn] is given.
+// answer, one whose Final is unset because the model called tools and
+// none of their results ends the run, passes without a model call
+// unless [WithEveryTurn] is given. A turn a terminating result ends is
+// judged with its answer, guard.Output.Answer, which is what the user
+// reads.
 type Guard struct {
 	model     openresponses.Streamer
 	modelName string
@@ -175,6 +178,11 @@ func (g *Guard) Check(ctx context.Context, subject any) (guard.Verdict, error) {
 		kind = "output"
 		if s.Response != nil {
 			items = s.Response.Output
+		}
+		// The answer a terminating tool gave is the run's answer, and is
+		// judged with the turn.
+		if answer := s.Answer(); answer != nil {
+			items = append(append(openresponses.Items(nil), items...), answer...)
 		}
 	default:
 		return guard.Verdict{Action: agentturn.Allow}, nil
