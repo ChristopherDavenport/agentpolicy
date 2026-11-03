@@ -92,7 +92,67 @@ type Verdict struct {
 	// that was refused, on the block that reports it; nil otherwise.
 	// The record names each by reference, never by its content.
 	Quarantined openresponses.Items
+	// Grant says what a grant or a revocation did, so a reader of the
+	// record rebuilds the grants in force from it without parsing
+	// Reason: [KindGrant] for [Engine.Grant], [KindGrantOver] for
+	// [Engine.GrantOver], [KindActivate] for an [Engine.GrantSet]
+	// activation, [KindGrantSet] for a rule it granted or refused, [KindRevoke] for [Engine.Revoke] and
+	// [KindRevokeScope] for [Engine.RevokeScope]. It is empty for every
+	// other verdict.
+	Grant GrantKind
+	// Source names the source a grant or a revocation names: the
+	// source a grant's rule or a grant set was made under, which is
+	// also the rule's, or the source whose set a revocation removed. It
+	// is empty on a scope's revocation, for a source with no name, and
+	// on every verdict that is no grant's or revocation's, whose rule
+	// names its own source.
+	Source string
+	// Scope is the grant scope a grant set was activated or refused
+	// under, or a revocation removed under, see [ContextWithGrantScope].
+	// It is empty for the unscoped scope, and on a grant and a grant
+	// over, which change the policy and so no scope limits.
+	Scope string
+	// Set is, on an activation ([KindActivate]), the set as
+	// [Engine.GrantSet] kept it, its source stamped on every rule: the
+	// allow rules it granted, none for an untrusted source, and the deny
+	// and ask rules it applies. It replaces any set of its source under
+	// Scope, so a reader rebuilds the sets in force from the activations
+	// and revocations alone. It is nil on every other verdict.
+	Set *RuleSet
+	// Refused is, on an activation, the rules the set asked for and
+	// [Engine.GrantSet] did not keep, each with its reason, the withheld
+	// allow rules of an untrusted source among them; nil otherwise.
+	Refused []Refusal
+	// Over is, on a grant over, the ask rule the grant answered, with its
+	// source, set on the one rule of the grant's expansion that names the
+	// ask rule's tool: [Engine.GrantOver] removed that ask rule when the
+	// rule is bare and appended its carve-out otherwise. The other rules
+	// of the expansion were granted beside it and leave Over nil.
+	Over *Rule
 }
+
+// GrantKind names what a grant or a revocation verdict did, as
+// [Verdict.Grant] and the record's grant member carry it.
+type GrantKind string
+
+// The kinds of grant and revocation, in the record's words.
+const (
+	// KindGrant is an "always allow" [Engine.Grant] added.
+	KindGrant GrantKind = "grant"
+	// KindGrantOver is an "always allow" [Engine.GrantOver] added over
+	// the verdict that deferred a call.
+	KindGrantOver GrantKind = "grant_over"
+	// KindGrantSet is a rule [Engine.GrantSet] granted or refused.
+	KindGrantSet GrantKind = "grant_set"
+	// KindActivate is a set [Engine.GrantSet] activated, as a whole:
+	// [Verdict.Set] and [Verdict.Refused] say what it kept and refused.
+	KindActivate GrantKind = "activate"
+	// KindRevoke is a set [Engine.Revoke] removed.
+	KindRevoke GrantKind = "revoke"
+	// KindRevokeScope is the sets of a scope [Engine.RevokeScope]
+	// removed.
+	KindRevokeScope GrantKind = "revoke_scope"
+)
 
 // Option configures an [Engine].
 type Option func(*Engine)
@@ -101,6 +161,19 @@ type Option func(*Engine)
 // produces: each decision, each grant and each reviewer answer, exactly
 // once, outside the engine's lock. A hook cannot append to the
 // transcript, so this is how a verdict reaches the session.
+//
+// The verdicts of rule changes, grants, activations and revocations,
+// are reported in the order the changes took effect, whatever calls
+// change the rules at the same time. A change made while another's
+// verdicts are being reported, by another goroutine or by an observer,
+// is reported after them by the caller already reporting, and may
+// reach the observers after the call that made it returns, on that
+// caller's goroutine. A rule change's verdict therefore comes with a
+// context that keeps the values of the one the change was made with,
+// its grant scope among them, and is detached from its cancellation
+// and deadline. An observer that panics on one does not keep the
+// others from any observer; the panic is raised again once the queue
+// is reported.
 //
 // Each WithObserver adds an observer rather than replacing one, and
 // the observers are called in the order they were given, each with
@@ -407,6 +480,12 @@ type Engine struct {
 	grants   []grant
 	withheld map[grantKey][]Rule
 	gen      uint64
+	// journal holds the verdicts of rule changes not yet reported, in
+	// the order the changes took effect: each is queued under the lock
+	// that made its change, and draining says a caller is reporting
+	// them, outside the lock, so the observers see them in that order.
+	journal  []journaled
+	draining bool
 	// batches are the readings of each batch being decided, by batch
 	// key, so the product's splitter, hooks and claims run once per call
 	// of a batch rather than once per pair, whatever other runs sharing
@@ -1770,10 +1849,85 @@ func (e *Engine) observe(ctx context.Context, v Verdict) {
 	}
 }
 
+// journaled is a rule change's verdict waiting to be reported, with the
+// context of the call that made the change.
+type journaled struct {
+	ctx context.Context
+	v   Verdict
+}
+
+// enqueue queues the verdicts of a rule change for [Engine.report].
+// The lock is held, the one under which the change took effect, so the
+// queue is in the order the changes took effect.
+//
+// The context is detached from the caller's cancellation, keeping its
+// values: the verdict may be reported after the call returns, on
+// another goroutine, and a recorder handed a cancelled context would
+// drop it.
+func (e *Engine) enqueue(ctx context.Context, vs ...Verdict) {
+	ctx = context.WithoutCancel(ctx)
+	for _, v := range vs {
+		e.journal = append(e.journal, journaled{ctx: ctx, v: v})
+	}
+}
+
+// report hands the queued verdicts of rule changes to the observers,
+// in order and outside the lock. One caller reports at a time: a caller
+// that finds another reporting leaves its verdicts to that one, which
+// reports them after the ones before, so two changes made at once are
+// never reported in the reverse of the order they took effect, and an
+// observer that changes the rules itself queues its change's verdicts
+// behind the one it is observing rather than waiting on itself.
+//
+// An observer that panics does not keep the rest of the queue from the
+// observers: each call is recovered, every queued verdict is reported,
+// and then the first panic is raised again in the reporting caller.
+func (e *Engine) report() {
+	e.mu.Lock()
+	if e.draining {
+		e.mu.Unlock()
+		return
+	}
+	e.draining = true
+	e.mu.Unlock()
+	var panicked any
+	for {
+		e.mu.Lock()
+		batch := e.journal
+		e.journal = nil
+		if len(batch) == 0 {
+			e.draining = false
+			e.mu.Unlock()
+			break
+		}
+		e.mu.Unlock()
+		for _, j := range batch {
+			for _, fn := range e.observers {
+				if r := observeSafely(fn, j.ctx, j.v); r != nil && panicked == nil {
+					panicked = r
+				}
+			}
+		}
+	}
+	if panicked != nil {
+		panic(panicked)
+	}
+}
+
+// observeSafely calls fn and returns what it panicked with, nil when
+// it returned.
+func observeSafely(fn func(context.Context, Verdict), ctx context.Context, v Verdict) (panicked any) {
+	defer func() { panicked = recover() }()
+	fn(ctx, v)
+	return nil
+}
+
 // Grant adds an allow rule for the rest of the process, as "always
 // allow" does in an approval prompt that the default raised. The grant
 // is journaled through the observer with a Verdict whose Action is
-// Allow and whose Rule is the new rule. A rule with a specifier and no
+// Allow, whose Rule is the new rule, and whose Grant is [KindGrant],
+// with the rule's source name as its Source and no Scope whatever
+// ctx carries: the rule joins the policy, which no grant scope limits. A rule with a specifier and no
 // matcher is refused with [ErrNoMatcher]. A rule whose name is an
 // alias is expanded as [Build] expands one, so the grant adds a rule
 // per tool the name governs and journals each. A grant never beats a
@@ -1791,12 +1945,20 @@ func (e *Engine) Grant(ctx context.Context, r Rule) error {
 	e.mu.Lock()
 	e.policy.Allow = append(e.policy.Allow, granted...)
 	e.gen++
+	e.enqueue(ctx, grantVerdicts(granted)...)
 	e.mu.Unlock()
+	e.report()
+	return nil
+}
+
+// grantVerdicts are the verdicts of a plain grant, one per rule.
+func grantVerdicts(granted []Rule) []Verdict {
+	out := make([]Verdict, len(granted))
 	for i := range granted {
 		g := granted[i]
-		e.observe(ctx, Verdict{Tool: g.Tool, Action: agentturn.Allow, Rule: &g, Reason: "granted " + g.String(), By: ByPolicy})
+		out[i] = Verdict{Tool: g.Tool, Action: agentturn.Allow, Rule: &g, Reason: "granted " + g.String(), By: ByPolicy, Grant: KindGrant, Source: g.Source.Name}
 	}
-	return nil
+	return out
 }
 
 // GrantOver answers the prompt behind v with "always allow". It adds r
@@ -1810,7 +1972,9 @@ func (e *Engine) Grant(ctx context.Context, r Rule) error {
 // into the file the team shares; a carve-out cancels a rule of any
 // source that does not outrank it, which is what makes it reach the
 // rule it answers. [Engine.PolicyOf] is what a product persists. The
-// grant is journaled as [Engine.Grant] journals one.
+// grant is journaled as [Engine.Grant] journals one, with Grant
+// [KindGrantOver] when an ask rule produced v and [KindGrant] when the
+// default did, since that is a plain grant.
 //
 // It reports why it cannot, so a front drops the "always" option and
 // offers a one-time approval instead: v did not defer the call, a deny
@@ -1838,13 +2002,10 @@ func (e *Engine) GrantOver(ctx context.Context, v Verdict, r Rule) (granted bool
 		e.mu.Lock()
 		e.policy.Allow = append(e.policy.Allow, rules...)
 		e.gen++
+		e.enqueue(ctx, grantVerdicts(rules)...)
 		e.mu.Unlock()
-		reason = "granted " + r.String()
-		for i := range rules {
-			g := rules[i]
-			e.observe(ctx, Verdict{Tool: g.Tool, Action: agentturn.Allow, Rule: &g, Reason: "granted " + g.String(), By: ByPolicy})
-		}
-		return true, reason
+		e.report()
+		return true, "granted " + r.String()
 	}
 	ask := *v.Rule
 	// The rule that answers the ask is the expansion naming its tool;
@@ -1879,11 +2040,16 @@ func (e *Engine) GrantOver(ctx context.Context, v Verdict, r Rule) (granted bool
 	}
 	e.policy.Allow = append(e.policy.Allow, rules...)
 	e.gen++
-	e.mu.Unlock()
 	reason = "granted " + r.String() + " over " + ask.String()
 	for i := range rules {
 		g := rules[i]
-		e.observe(ctx, Verdict{Tool: g.Tool, Action: agentturn.Allow, Rule: &g, Reason: reason, By: ByPolicy})
+		gv := Verdict{Tool: g.Tool, Action: agentturn.Allow, Rule: &g, Reason: reason, By: ByPolicy, Grant: KindGrantOver, Source: g.Source.Name}
+		if i == over {
+			gv.Over = &ask
+		}
+		e.enqueue(ctx, gv)
 	}
+	e.mu.Unlock()
+	e.report()
 	return true, reason
 }

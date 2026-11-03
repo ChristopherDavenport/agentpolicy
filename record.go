@@ -32,6 +32,15 @@ type verdictRecord struct {
 	Held       bool   `json:"held,omitempty"`
 	Subject    string `json:"subject,omitempty"`
 	Confined   string `json:"confined,omitempty"`
+	// Grant and Scope say what a grant or a revocation did and the
+	// grant scope it was made under; Source names its source.
+	Grant string `json:"grant,omitempty"`
+	Scope string `json:"scope,omitempty"`
+	// Over is the ask rule a grant over answered; Set and Refused are
+	// what an activation kept and refused.
+	Over    *overRecord     `json:"over,omitempty"`
+	Set     *setRecord      `json:"set,omitempty"`
+	Refused []refusalRecord `json:"refused,omitempty"`
 	// Quarantined names the items an input guard quarantined, each by
 	// reference: its type, id and call ID, never its content.
 	Quarantined []itemRef `json:"quarantined,omitempty"`
@@ -58,8 +67,16 @@ type verdictRecord struct {
 // why it exists; then reason, by, held, subject and confined; and
 // quarantined, a reference to each item an input guard quarantined,
 // {type, id, call_id}, with no content, so the item's text is redacted
-// with the entry that holds it and not copied here. A member the
-// verdict leaves empty is left out, except action. A record is strings,
+// with the entry that holds it and not copied here. A grant or a
+// revocation adds grant, its [GrantKind], and scope, the grant scope
+// it was made under, and names its source in source even when it has
+// no rule; a grant over adds over, {rule, source}, the ask rule it
+// answered; and an activation adds set, {rank, trusted, allow, deny,
+// ask, notes}, the set it kept, and refused, [{rule, reason}], so a
+// reader rebuilds the grants in force from these members
+// and never parses reason for them. A member the verdict leaves empty
+// is left out, except action, so a record written before these
+// members existed reads the same. A record is strings,
 // numbers and flags, so encoding it cannot fail; a caller that wants
 // an error of its own marshals the value itself.
 func (v Verdict) Record() (ns string, data []byte) {
@@ -75,12 +92,30 @@ func (v Verdict) Record() (ns string, data []byte) {
 		Held:     v.Held,
 		Subject:  v.Subject,
 		Confined: v.Confined,
+		Grant:    string(v.Grant),
+		Source:   v.Source,
+		Scope:    v.Scope,
 	}
 	for _, item := range v.Quarantined {
 		rec.Quarantined = append(rec.Quarantined, refOf(item))
 	}
 	if v.Rule != nil {
-		rec.Rule, rec.Source, rec.SourceHash, rec.Note = v.Rule.String(), v.Rule.Source.Name, v.Rule.Source.Hash, v.Rule.Note
+		rec.Rule, rec.SourceHash, rec.Note = v.Rule.String(), v.Rule.Source.Hash, v.Rule.Note
+		if v.Rule.Source.Name != "" {
+			rec.Source = v.Rule.Source.Name
+		}
+	}
+	if v.Over != nil {
+		rec.Over = &overRecord{Rule: v.Over.String(), Source: v.Over.Source.Name}
+	}
+	if v.Set != nil {
+		rec.Set = setOf(*v.Set)
+		if rec.SourceHash == "" {
+			rec.SourceHash = v.Set.Source.Hash
+		}
+	}
+	for _, r := range v.Refused {
+		rec.Refused = append(rec.Refused, refusalRecord{Rule: r.Rule.String(), Reason: r.Reason})
 	}
 	data, err := json.Marshal(rec)
 	if err != nil {
@@ -90,6 +125,56 @@ func (v Verdict) Record() (ns string, data []byte) {
 		data = fmt.Appendf(nil, "{%q:%q}", "error", err.Error())
 	}
 	return VerdictNS, data
+}
+
+// overRecord names the ask rule a grant over answered, by its string
+// form and its source's name.
+type overRecord struct {
+	Rule   string `json:"rule"`
+	Source string `json:"source,omitempty"`
+}
+
+// setRecord is a grant set as an activation kept it: its source's rank
+// and trust, its lists as rule strings, and the note of every rule that
+// has one, keyed by its list, "allow", "deny" or "ask", and then by the
+// rule's string form, so one rule in two lists keeps both notes. The source's name and hash
+// are the record's own source and source_hash.
+type setRecord struct {
+	Rank    int                          `json:"rank,omitempty"`
+	Trusted bool                         `json:"trusted,omitempty"`
+	Allow   []string                     `json:"allow,omitempty"`
+	Deny    []string                     `json:"deny,omitempty"`
+	Ask     []string                     `json:"ask,omitempty"`
+	Notes   map[string]map[string]string `json:"notes,omitempty"`
+}
+
+// setOf is the record of a kept set.
+func setOf(set RuleSet) *setRecord {
+	rec := &setRecord{Rank: set.Source.Rank, Trusted: set.Source.Trusted}
+	list := func(name string, rules []Rule) []string {
+		var out []string
+		for _, r := range rules {
+			out = append(out, r.String())
+			if r.Note != "" {
+				if rec.Notes == nil {
+					rec.Notes = map[string]map[string]string{}
+				}
+				if rec.Notes[name] == nil {
+					rec.Notes[name] = map[string]string{}
+				}
+				rec.Notes[name][r.String()] = r.Note
+			}
+		}
+		return out
+	}
+	rec.Allow, rec.Deny, rec.Ask = list("allow", set.Allow), list("deny", set.Deny), list("ask", set.Ask)
+	return rec
+}
+
+// refusalRecord is one rule an activation refused, with the reason.
+type refusalRecord struct {
+	Rule   string `json:"rule"`
+	Reason string `json:"reason"`
 }
 
 // itemRef names an item without its content, so a quarantined item's

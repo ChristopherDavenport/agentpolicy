@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/ChristopherDavenport/agenttool"
@@ -253,6 +254,11 @@ type decisionCase struct {
 			Rule   string `json:"rule"`
 			Reason string `json:"reason"`
 		} `json:"refused"`
+		// Scope is the grant scope the set is activated under, and
+		// Records, when present, the records of the verdicts the
+		// activation reports, in order.
+		Scope   string             `json:"scope"`
+		Records *[]json.RawMessage `json:"records"`
 	} `json:"grants"`
 	Calls []corpusCall `json:"calls"`
 	Batch []corpusCall `json:"batch"`
@@ -260,6 +266,61 @@ type decisionCase struct {
 		Tools []string `json:"tools"`
 		Want  []string `json:"want"`
 	} `json:"offer"`
+	Steps []corpusStep `json:"steps"`
+}
+
+// corpusStep is a grant or a revocation made after the case's calls:
+// exactly one of Grant, GrantOver, Revoke and RevokeScope, under the
+// grant scope Scope, with the records of the verdicts it reports, none
+// when absent.
+type corpusStep struct {
+	Grant     string `json:"grant"`
+	GrantOver string `json:"grant_over"`
+	// Over is the number, from 1, of the call of calls whose verdict a
+	// grant over answers.
+	Over        int     `json:"over"`
+	Revoke      *string `json:"revoke"`
+	RevokeScope bool    `json:"revoke_scope"`
+	// Source is the source a grant's rule is stamped with.
+	Source  *corpusSource     `json:"source"`
+	Scope   string            `json:"scope"`
+	Removed int               `json:"removed"`
+	Refused string            `json:"refused"`
+	Records []json.RawMessage `json:"records"`
+}
+
+// rule is the step's one rule, stamped with its source.
+func (s corpusStep) rule(t *testing.T, text string) Rule {
+	t.Helper()
+	rules := corpusRules(text).parse(t, nil)
+	if len(rules) != 1 {
+		t.Fatalf("step %q: want one rule, got %d", text, len(rules))
+	}
+	if s.Source != nil {
+		rules[0].Source = Source{Name: s.Source.Name, Rank: s.Source.Rank, Trusted: s.Source.Trusted}
+	}
+	return rules[0]
+}
+
+// checkRecords compares the records of the verdicts a step reported
+// with the ones the case expects, in order, each as a JSON value.
+func checkRecords(t *testing.T, step string, got []Verdict, want []json.RawMessage) {
+	t.Helper()
+	var gotRecs, wantRecs []string
+	for _, v := range got {
+		_, data := v.Record()
+		gotRecs = append(gotRecs, string(data))
+	}
+	for _, w := range want {
+		wantRecs = append(wantRecs, string(w))
+	}
+	same := len(got) == len(want)
+	for i := 0; same && i < len(got); i++ {
+		same = jsonEqual(json.RawMessage(gotRecs[i]), want[i])
+	}
+	if !same {
+		t.Errorf("%s recorded\n%s\nwant\n%s", step, strings.Join(gotRecs, "\n"), strings.Join(wantRecs, "\n"))
+	}
 }
 
 // buildErrors is the sentinel each build error kind is in the
@@ -411,8 +472,9 @@ func runDecisionCase(t *testing.T, defaults map[string]corpusMatcher, tc decisio
 	p.Default = def
 
 	var last Verdict
+	var seen []Verdict
 	opts := []Option{
-		WithObserver(func(_ context.Context, v Verdict) { last = v }),
+		WithObserver(func(_ context.Context, v Verdict) { last, seen = v, append(seen, v) }),
 		WithTools(func(name string) (agenttool.Tool, bool) {
 			tool, ok := tools[name]
 			return tool, ok
@@ -464,7 +526,15 @@ func runDecisionCase(t *testing.T, defaults map[string]corpusMatcher, tc decisio
 	for _, g := range tc.Grants {
 		set := g.Source.set(t)
 		set.Allow, set.Deny, set.Ask = g.Allow.parse(t, nil), g.Deny.parse(t, nil), g.Ask.parse(t, nil)
-		granted, refused := e.GrantSet(ctx, set)
+		gctx := ctx
+		if g.Scope != "" {
+			gctx = ContextWithGrantScope(ctx, g.Scope)
+		}
+		seen = nil
+		granted, refused := e.GrantSet(gctx, set)
+		if g.Records != nil {
+			checkRecords(t, "GrantSet("+set.Source.Name+")", seen, *g.Records)
+		}
 		var gotGranted []string
 		for _, r := range granted {
 			gotGranted = append(gotGranted, r.String())
@@ -529,8 +599,11 @@ func runDecisionCase(t *testing.T, defaults map[string]corpusMatcher, tc decisio
 			}
 		}
 	}
+	// The verdict of each of calls, for a step that grants over one.
+	var verdicts []Verdict
 	for i, c := range tc.Calls {
 		decide([]corpusCall{c}, i+1)
+		verdicts = append(verdicts, last)
 	}
 	if len(tc.Batch) > 0 {
 		decide(tc.Batch, len(tc.Calls)+1)
@@ -548,6 +621,40 @@ func runDecisionCase(t *testing.T, defaults map[string]corpusMatcher, tc decisio
 		if !slices.Equal(got, tc.Offer.Want) {
 			t.Errorf("Filter(%q) = %q, want %q", tc.Offer.Tools, got, tc.Offer.Want)
 		}
+	}
+
+	for i, s := range tc.Steps {
+		sctx := ctx
+		if s.Scope != "" {
+			sctx = ContextWithGrantScope(ctx, s.Scope)
+		}
+		seen = nil
+		name := fmt.Sprintf("step %d", i+1)
+		switch {
+		case s.Grant != "":
+			if err := e.Grant(sctx, s.rule(t, s.Grant)); err != nil {
+				t.Fatalf("%s: Grant: %v", name, err)
+			}
+		case s.GrantOver != "":
+			if s.Over < 1 || s.Over > len(verdicts) {
+				t.Fatalf("%s: over %d names no call", name, s.Over)
+			}
+			ok, reason := e.GrantOver(sctx, verdicts[s.Over-1], s.rule(t, s.GrantOver))
+			if want := s.Refused == ""; ok != want || (!ok && reason != s.Refused) {
+				t.Errorf("%s: GrantOver = %v %q, want refused %q", name, ok, reason, s.Refused)
+			}
+		case s.Revoke != nil:
+			if n := e.Revoke(sctx, *s.Revoke); n != s.Removed {
+				t.Errorf("%s: Revoke removed %d rules, want %d", name, n, s.Removed)
+			}
+		case s.RevokeScope:
+			if n := e.RevokeScope(sctx); n != s.Removed {
+				t.Errorf("%s: RevokeScope removed %d rules, want %d", name, n, s.Removed)
+			}
+		default:
+			t.Fatalf("%s: no grant, grant_over, revoke or revoke_scope", name)
+		}
+		checkRecords(t, name, seen, s.Records)
 	}
 }
 

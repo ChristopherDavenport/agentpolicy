@@ -5,6 +5,59 @@ All user-visible changes to this library. The format follows
 uses [Semantic Versioning](https://semver.org/); before v1.0.0 minor
 versions may break the API.
 
+## Unreleased
+
+- Changed: RFC 0001 is draft 0.4, with a "Changes since 0.3" section.
+- Added: a grant's and a revocation's verdict says what it did, and
+  its record carries it as members (agentkit#80). `Verdict` gains
+  `Grant`, a `GrantKind` (`KindGrant`, `KindGrantOver`, `KindGrantSet`,
+  `KindRevoke`, `KindRevokeScope`), `Source`, the source name the
+  grant or set was made under or the revocation removed, and `Scope`,
+  the grant scope a set was activated or refused under or a
+  revocation removed under. `Verdict.Record` writes them as `grant`,
+  `source` and `scope`, so a revocation's record now names its source,
+  and a grant set's or a revocation's names its scope. `Engine.Grant`
+  and `Engine.GrantOver` record no scope: their rules join the policy,
+  which no scope limits. A `GrantOver` of a verdict with no rule is a
+  plain grant and records `grant`. Each member is omitted when empty,
+  so every other record is byte-identical; a reader takes the kind,
+  source and scope from the members and falls back on the reason texts
+  only for a record written before this release. RFC 0001 draft 0.4,
+  Grant sets and The record.
+- Added: each `GrantSet` activation is one verdict of its own, before
+  its grants and refusals: Allow, `activated the rules granted by N`,
+  `Grant` `KindActivate`, with `Verdict.Set`, the set as kept (its
+  deny and ask rules included), and `Verdict.Refused`. Its record
+  carries `set`, `{rank, trusted, allow, deny, ask, notes}`, `notes`
+  keyed by list and then by rule, and
+  `refused`, `[{rule, reason}]`, and replaces any set of its source
+  under its scope, so a reader rebuilds the sets from the record alone.
+  An activation that keeps nothing, such as one of deny rules alone,
+  is reported too. A product's observer sees one more verdict per
+  `GrantSet`.
+- Added: a grant over's verdict carries `Verdict.Over`, the ask rule it
+  answered, on the one rule of the grant's expansion that names the ask
+  rule's tool; its record carries `over`, `{rule, source}`.
+- Changed: `Revoke(ctx, "")`, which removes the set of a source with no
+  name, reads `revoked the rules granted by the product`, where the
+  name was left out.
+- Changed: the verdicts of `Grant`, `GrantOver`, `GrantSet`, `Revoke`
+  and `RevokeScope` are queued under the lock their change was made
+  under and reported in that order, by one caller at a time. A change
+  made while another's verdicts are being reported, by another
+  goroutine or by an observer, is reported after them by the caller
+  already reporting, and may reach the observers after the call that
+  made it returns, on the reporting caller's goroutine, with a context
+  that keeps the caller's values and is detached from its
+  cancellation (`context.WithoutCancel`). An observer that panics no
+  longer keeps the rest of the queue from the observers: every verdict
+  is reported, then the first panic is raised again. Before, a
+  revocation made at once with an activation could be reported before
+  it.
+- Added: the decisions corpus gains `steps` on a case, grants, grants
+  over a call's verdict and revocations made after its calls with the
+  records they report, and `scope` and `records` on a grant set.
+
 ## v0.0.18 - 2026-11-03
 
 - Changed: RFC 0001 is draft 0.3, with a "Changes since 0.2" section
