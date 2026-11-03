@@ -5,7 +5,7 @@ All user-visible changes to this library. The format follows
 uses [Semantic Versioning](https://semver.org/); before v1.0.0 minor
 versions may break the API.
 
-## Unreleased
+## v0.0.19 - 2026-11-03
 
 - Changed: RFC 0001 is draft 0.4, with a "Changes since 0.3" section.
 - Added: a grant's and a revocation's verdict says what it did, and
