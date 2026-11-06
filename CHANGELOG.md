@@ -5,7 +5,7 @@ All user-visible changes to this library. The format follows
 uses [Semantic Versioning](https://semver.org/); before v1.0.0 minor
 versions may break the API.
 
-## Unreleased
+## v0.0.20 - 2026-11-06
 
 - Changed: RFC 0001 is draft 0.5, with a "Changes since 0.4" section.
 - Added: a default carries the host's note, `Deny().WithNote(n)` or
