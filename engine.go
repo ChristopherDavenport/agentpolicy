@@ -135,7 +135,9 @@ type Verdict struct {
 	Over *Rule
 	// Policy is, on a replacement ([KindReplace]), the policy
 	// [Engine.SetPolicy] put in force, expanded through the aliases;
-	// nil on every other verdict.
+	// nil on every other verdict. Every observer is handed the same
+	// copy, and the engine keeps none of it, so an observer reads it
+	// and must not modify it.
 	Policy *Policy
 }
 
@@ -173,18 +175,25 @@ type Option func(*Engine)
 // once, outside the engine's lock. A hook cannot append to the
 // transcript, so this is how a verdict reaches the session.
 //
-// The verdicts of rule changes, grants, activations and revocations,
-// are reported in the order the changes took effect, whatever calls
-// change the rules at the same time. A change made while another's
-// verdicts are being reported, by another goroutine or by an observer,
-// is reported after them by the caller already reporting, and may
-// reach the observers after the call that made it returns, on that
-// caller's goroutine. A rule change's verdict therefore comes with a
-// context that keeps the values of the one the change was made with,
-// its grant scope among them, and is detached from its cancellation
-// and deadline. An observer that panics on one does not keep the
-// others from any observer; the panic is raised again once the queue
-// is reported.
+// The verdicts of rule changes, grants, activations, revocations and
+// replacements of the policy, are reported in the order the changes
+// took effect, whatever calls change the rules at the same time. A
+// change made while another's verdicts are being reported, by another
+// goroutine, is reported after them by the caller already reporting,
+// on that caller's goroutine, and the call that made it returns once
+// they are reported. A decision's verdict is reported after those of
+// every change made before the decision read the rules, so a reader
+// of the record takes it as made under them. A rule change's verdict
+// comes with a context that keeps the values of the one the change was
+// made with, its grant scope among them, is detached from its
+// cancellation and deadline, and is marked as this engine's report: an
+// observer that changes the rules or decides a call passes that
+// context on, and its change is then queued behind the verdict it is
+// handling and reported after it returns, without waiting on itself. An
+// observer that makes such a call with a context of its own waits on
+// the report it is part of, forever. An observer that panics on one
+// does not keep the others from any observer; the panic is raised
+// again once the queue is reported.
 //
 // Each WithObserver adds an observer rather than replacing one, and
 // the observers are called in the order they were given, each with
@@ -497,6 +506,12 @@ type Engine struct {
 	// them, outside the lock, so the observers see them in that order.
 	journal  []journaled
 	draining bool
+	// queued counts the verdicts of rule changes ever queued and
+	// reported those handed to every observer, so a change's caller
+	// and a decision made after it wait, on reportedCond, until the
+	// changes before them are reported.
+	queued, reported uint64
+	reportedCond     sync.Cond
 	// batches are the readings of each batch being decided, by batch
 	// key, so the product's splitter, hooks and claims run once per call
 	// of a batch rather than once per pair, whatever other runs sharing
@@ -570,6 +585,7 @@ func Build(p Policy, matchers map[string]ToolMatcher, opts ...Option) (*Engine, 
 		deferred: make(map[string]map[string]deferredCall),
 		withheld: make(map[grantKey][]Rule),
 	}
+	e.reportedCond.L = &e.mu
 	for _, opt := range opts {
 		opt(e)
 	}
@@ -778,9 +794,11 @@ func (e *Engine) Policy() Policy {
 // calls already decided: a run that ended on an ask is answered under
 // the rules that deferred it, and a batch being decided as the policy
 // changes can see both, so a product that must not straddle one
-// replaces the policy between turns. The scoped grants
-// [Engine.GrantSet] activated, the deferred calls and the review log
-// are untouched.
+// replaces the policy between turns. The rules [Engine.Grant] and
+// [Engine.GrantOver] added are part of the policy replaced, so they end
+// with it: a product that keeps an "always allow" puts it into p, as it
+// persists one into its settings. The scoped grants [Engine.GrantSet]
+// activated, the deferred calls and the review log are untouched.
 //
 // The replacement is journaled through the observer as a rule change,
 // as [Engine.Grant] journals one, so a reader of the record takes the
@@ -789,10 +807,14 @@ func (e *Engine) Policy() Policy {
 // Reason is "replaced the policy", followed by ": " and reason when the
 // host gives one, and whose Policy is the policy put in force, expanded
 // through the aliases. Its record names the default and the sources by
-// name and hash, and, for a policy that names no sources, such as one
-// built by hand, its lists too. reason is the host's words for why,
-// "the MCP server gh announced tools"; the rest of the text is fixed. A
-// refused replacement changes nothing and reports nothing.
+// name and hash, and lists the rules no hashed source accounts for:
+// every rule when a source has no hash, and otherwise those of no
+// source the policy names, which is every rule of a policy built by
+// hand. reason is the host's words for why, "the MCP server gh
+// announced tools"; the rest of the text is fixed. SetPolicy returns
+// once the verdict has reached the observers, and a decision that read
+// the new policy is reported after it. A refused replacement changes
+// nothing and reports nothing.
 func (e *Engine) SetPolicy(ctx context.Context, p Policy, reason string) error {
 	if err := checkDefault(p.Default); err != nil {
 		return err
@@ -805,9 +827,9 @@ func (e *Engine) SetPolicy(ctx context.Context, p Policy, reason string) error {
 	e.mu.Lock()
 	e.policy = clonePolicy(p)
 	e.gen++
-	e.enqueue(ctx, replaceVerdict(&kept, reason))
+	seq := e.enqueue(ctx, replaceVerdict(&kept, reason))
 	e.mu.Unlock()
-	e.report()
+	e.report(ctx, seq)
 	return nil
 }
 
@@ -919,8 +941,9 @@ func (e *Engine) BeforeToolCall() func(context.Context, agentturn.ToolCallInfo) 
 // The decision names the policy as its decider, or the hook that made
 // it stricter, or the [WithAnsweringHooks] hook that allowed it. The
 // verdict reaches
-// the observer before Decide returns, and the same policy and the same
-// call in the same batch always give the same verdict.
+// the observer before Decide returns, after the verdicts of every rule
+// change made before Decide read the rules, and the same policy and
+// the same call in the same batch always give the same verdict.
 //
 // A nested call, one a tool made with agentturn.Invoke, has a Parent
 // on its info. Its deferral is reported as a verdict, but nothing is
@@ -975,6 +998,7 @@ func (e *Engine) Decide(ctx context.Context, info agentturn.ToolCallInfo) (*agen
 	held := e.batchAsks(ctx, a, info, v.Action, failed, mine)
 	if e.askInRun && info.Parent == "" {
 		if decided, ok := e.askedInRun(ctx, a, info, &v, out, held); ok {
+			e.waitReported(ctx, a.queued)
 			e.observe(ctx, v)
 			return decided, nil
 		}
@@ -987,6 +1011,9 @@ func (e *Engine) Decide(ctx context.Context, info agentturn.ToolCallInfo) (*agen
 		d.verdict = v
 		e.remember(info.RunID, callID, d)
 	}
+	// The verdicts of the rule changes made before the rules were read
+	// come first, so a reader takes this decision as made under them.
+	e.waitReported(ctx, a.queued)
 	e.observe(ctx, v)
 	// Held and Subject travel on the decision, so a front that has only
 	// the run's end tells a held call from the one asked about, and says
@@ -1908,6 +1935,8 @@ func (e *Engine) observe(ctx context.Context, v Verdict) {
 type journaled struct {
 	ctx context.Context
 	v   Verdict
+	// seq is the verdict's place in the queue, from 1.
+	seq uint64
 }
 
 // enqueue queues the verdicts of a rule change for [Engine.report].
@@ -1915,28 +1944,64 @@ type journaled struct {
 // queue is in the order the changes took effect.
 //
 // The context is detached from the caller's cancellation, keeping its
-// values: the verdict may be reported after the call returns, on
-// another goroutine, and a recorder handed a cancelled context would
-// drop it.
-func (e *Engine) enqueue(ctx context.Context, vs ...Verdict) {
+// values: the verdict may be reported on another goroutine, and after
+// the call returns when an observer made it, and a recorder handed a
+// cancelled context would drop it.
+//
+// It returns the place of the last verdict in the queue, which
+// [Engine.report] waits for.
+func (e *Engine) enqueue(ctx context.Context, vs ...Verdict) uint64 {
 	ctx = context.WithoutCancel(ctx)
 	for _, v := range vs {
-		e.journal = append(e.journal, journaled{ctx: ctx, v: v})
+		e.queued++
+		e.journal = append(e.journal, journaled{ctx: ctx, v: v, seq: e.queued})
 	}
+	return e.queued
 }
 
-// report hands the queued verdicts of rule changes to the observers,
+// report hands the queued verdicts of rule changes to the observers
+// and returns once the change's own, those queued up to upto, have
+// reached them; see [Engine.drain] and [Engine.waitReported].
+func (e *Engine) report(ctx context.Context, upto uint64) {
+	e.drain()
+	e.waitReported(ctx, upto)
+}
+
+// observingKey marks the context an observer is handed with a rule
+// change's verdict, with the engine reporting it.
+type observingKey struct{}
+
+// waitReported waits until the verdicts of rule changes queued up to
+// upto have reached every observer, so a change's caller does not
+// return, and a decision made after a change is not reported, before
+// that change's verdicts are. A call made from inside an observer,
+// with the context it was handed, does not wait: the report it would
+// wait for is the one that called it.
+func (e *Engine) waitReported(ctx context.Context, upto uint64) {
+	if upto == 0 || ctx.Value(observingKey{}) == e {
+		return
+	}
+	e.mu.Lock()
+	for e.reported < upto {
+		e.reportedCond.Wait()
+	}
+	e.mu.Unlock()
+}
+
+// drain hands the queued verdicts of rule changes to the observers,
 // in order and outside the lock. One caller reports at a time: a caller
 // that finds another reporting leaves its verdicts to that one, which
 // reports them after the ones before, so two changes made at once are
 // never reported in the reverse of the order they took effect, and an
 // observer that changes the rules itself queues its change's verdicts
-// behind the one it is observing rather than waiting on itself.
+// behind the one it is observing rather than waiting on itself. Each
+// observer is handed the change's context marked as observing this
+// engine, so a call it makes with it does not wait on this report.
 //
 // An observer that panics does not keep the rest of the queue from the
 // observers: each call is recovered, every queued verdict is reported,
 // and then the first panic is raised again in the reporting caller.
-func (e *Engine) report() {
+func (e *Engine) drain() {
 	e.mu.Lock()
 	if e.draining {
 		e.mu.Unlock()
@@ -1956,11 +2021,16 @@ func (e *Engine) report() {
 		}
 		e.mu.Unlock()
 		for _, j := range batch {
+			octx := context.WithValue(j.ctx, observingKey{}, e)
 			for _, fn := range e.observers {
-				if r := observeSafely(fn, j.ctx, j.v); r != nil && panicked == nil {
+				if r := observeSafely(fn, octx, j.v); r != nil && panicked == nil {
 					panicked = r
 				}
 			}
+			e.mu.Lock()
+			e.reported = j.seq
+			e.reportedCond.Broadcast()
+			e.mu.Unlock()
 		}
 	}
 	if panicked != nil {
@@ -1999,9 +2069,9 @@ func (e *Engine) Grant(ctx context.Context, r Rule) error {
 	e.mu.Lock()
 	e.policy.Allow = append(e.policy.Allow, granted...)
 	e.gen++
-	e.enqueue(ctx, grantVerdicts(granted)...)
+	seq := e.enqueue(ctx, grantVerdicts(granted)...)
 	e.mu.Unlock()
-	e.report()
+	e.report(ctx, seq)
 	return nil
 }
 
@@ -2056,9 +2126,9 @@ func (e *Engine) GrantOver(ctx context.Context, v Verdict, r Rule) (granted bool
 		e.mu.Lock()
 		e.policy.Allow = append(e.policy.Allow, rules...)
 		e.gen++
-		e.enqueue(ctx, grantVerdicts(rules)...)
+		seq := e.enqueue(ctx, grantVerdicts(rules)...)
 		e.mu.Unlock()
-		e.report()
+		e.report(ctx, seq)
 		return true, "granted " + r.String()
 	}
 	ask := *v.Rule
@@ -2095,15 +2165,16 @@ func (e *Engine) GrantOver(ctx context.Context, v Verdict, r Rule) (granted bool
 	e.policy.Allow = append(e.policy.Allow, rules...)
 	e.gen++
 	reason = "granted " + r.String() + " over " + ask.String()
+	var seq uint64
 	for i := range rules {
 		g := rules[i]
 		gv := Verdict{Tool: g.Tool, Action: agentturn.Allow, Rule: &g, Reason: reason, By: ByPolicy, Grant: KindGrantOver, Source: g.Source.Name}
 		if i == over {
 			gv.Over = &ask
 		}
-		e.enqueue(ctx, gv)
+		seq = e.enqueue(ctx, gv)
 	}
 	e.mu.Unlock()
-	e.report()
+	e.report(ctx, seq)
 	return true, reason
 }

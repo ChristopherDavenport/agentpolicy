@@ -754,11 +754,21 @@ is the new default's. Its `policy` member is `{"default",
 names by its name and hash, which is where a reader finds the rules.
 Its `reason` is `replaced the policy`, or `replaced the policy: H` when
 the host gave the reason `H`: the host's words are its own, and the
-rest is fixed. A policy that names no sources, such as one a host
-built by hand, SHOULD also carry its lists as `set` does, since
-nothing else says what its rules are. A reader MUST take the decisions
-after the record as made under the replacement. A replacement that is
-refused records nothing. The decider is `policy`; a replacement has no
+rest is fixed. The record SHOULD also carry, as `set` does, the rules
+no hashed source accounts for: every rule when a source the policy
+names has no hash, since its name alone says no version of its rules,
+and otherwise the rules of no source the policy names, the host's own
+among them, which for a policy a host built by hand, naming no
+sources, is every rule. A reader MUST take the decisions after the
+record as made under the replacement. A replacement that is refused
+records nothing.
+
+A replacement replaces the policy whole, the rules that grants and
+grants over added to it included, so those grants end with it: a host
+that keeps an "always allow" across a replacement puts the rule into
+the policy it replaces with, as it persists one into its settings. The
+grant sets active under every scope, and the calls deferred under the
+old policy, are untouched. The decider is `policy`; a replacement has no
 rule, no tool, no source of its own and no scope, since the policy is
 the engine's whatever the context's scope.
 
@@ -923,19 +933,26 @@ re-deciding them and without parsing a reason:
 A refused grant or grant over changes nothing and is no verdict; a
 revocation that removed no rule is none either.
 
-The verdicts of grants, activations and revocations reach the
-observers in the order the changes took effect, whatever calls make
-changes at the same time: two changes to one source under one scope
-are never reported in the reverse of the order they were made, so a
-reader that replays the record in order ends with the rules in force.
-A binding MAY report a change's verdicts after the call that made it
-returns, while another change's are being reported, and MUST then
-report them after those. An observer MAY therefore be called on
-another thread than the one that made the change, and with the
-caller's context values, the grant scope among them, detached from
-its cancellation and deadline, so a verdict reported late is not lost
-to a call that has since ended. An observer that fails on one verdict
-MUST NOT keep the rest from any observer.
+The verdicts of grants, activations, revocations and replacements of
+the policy reach the observers in the order the changes took effect,
+whatever calls make changes at the same time: two changes to one
+source under one scope are never reported in the reverse of the order
+they were made, so a reader that replays the record in order ends with
+the rules in force. A change's verdicts are reported after those of
+the changes before it, and a binding MAY report them on another thread
+than the one that made the change, while another change's are being
+reported; the call that made the change MUST NOT return before they
+are reported, unless an observer made it while handling another
+change's verdict, which would otherwise wait on itself. A decision's
+verdict MUST be reported after those of every change made before the
+decision read the rules, with the same exception, so a reader takes a
+decision recorded after a change as made under it. An observer MAY
+therefore be called on another thread than the one that made the
+change, and with the caller's context values, the grant scope among
+them, detached from its cancellation and deadline, so a verdict
+reported after an observer's change returns is not lost to a call
+that has since ended. An observer that fails on one verdict MUST NOT
+keep the rest from any observer.
 
 ## Deferred calls
 
@@ -1336,7 +1353,7 @@ with `ns` set to `agentpolicy:verdict` and `data` a JSON object:
 | `over` | on a grant over, `{"rule", "source"?}`: the ask rule it answered, in string form, and its source's name |
 | `set` | on an activation, `{"rank"?, "trusted"?, "allow"?, "deny"?, "ask"?, "notes"?}`: the source's rank and trust, each list as rule strings in order, and `notes` mapping a list's name, `"allow"`, `"deny"` or `"ask"`, to an object mapping a rule's string form to its note, so one rule in two lists keeps both; the source's name and hash are the record's `source` and `source_hash`; `{}` for a set that keeps nothing |
 | `refused` | on an activation, an array of `{"rule", "reason"}`, in order |
-| `policy` | on a replacement, `{"default", "default_note"?, "sources"?, "allow"?, "deny"?, "ask"?, "notes"?}`: the default, `"allow"`, `"deny"` or `"ask"`, and its note; `sources`, an array of `{"name", "hash"?}`, one per source the policy names, in order; and, for a policy that names no sources, its lists and notes as `set` holds them |
+| `policy` | on a replacement, `{"default", "default_note"?, "sources"?, "allow"?, "deny"?, "ask"?, "notes"?}`: the default, `"allow"`, `"deny"` or `"ask"`, and its note; `sources`, an array of `{"name", "hash"?}`, one per source the policy names, in order; and the lists and notes, as `set` holds them, of the rules no hashed source accounts for, all of them when a source has no hash ([Grants](#grants), Replace) |
 
 Every member but `action` is omitted when the verdict leaves it empty,
 zero or false. A reader MUST ignore members it does not know.
@@ -1553,7 +1570,8 @@ a splitter. A case has:
   `replace`, a policy in the shape of a case's `policy` that replaces
   the policy in force, with `reason`, the host's reason, none when
   absent, and `build_error`, the kind the replacement MUST be refused
-  with. Beside it: `source`,
+  with; and `calls`, decided after the step as `calls` are, each a
+  batch of its own, in the turns after those before. Beside it: `source`,
   `{"name", "rank", "trusted"}`, the source a grant's rule is stamped
   with; `scope`, the grant scope of the context it is made under,
   unscoped when absent; `removed`, how many rules a revocation
@@ -1627,13 +1645,24 @@ listed in the changelog as one.
   default's, whose reason is `replaced the policy` or `replaced the
   policy: H` for the host's reason `H`, and whose record carries
   `policy`, the default, its note and the sources by name and hash,
-  and the lists of a policy that names no sources. A refused
-  replacement records nothing. Draft 0.4 did not record a replacement,
-  so the decisions after one read as made under the rules before it.
-  The host's words are only the reason's tail, since the rest of a
-  reason is stable text. The corpus gains `replace`, `reason` and
-  `build_error` on a step, and `hash` on a source ([Grants](#grants),
-  [The verdict](#the-verdict), [The record](#the-record)).
+  and the rules no hashed source accounts for: every rule when a
+  source has no hash, otherwise the host's own and any other of no
+  named source. A refused replacement records nothing. A replacement
+  ends the grants and grants over that joined the policy, and leaves
+  the grant sets. Draft 0.4 did not record a replacement, so the
+  decisions after one read as made under the rules before it. The
+  host's words are only the reason's tail, since the rest of a reason
+  is stable text. The corpus gains `replace`, `reason`, `build_error`
+  and `calls`, decided after the step, on a step, and `hash` on a
+  source ([Grants](#grants), [The verdict](#the-verdict), [The
+  record](#the-record)).
+- The call that changes the rules returns once its verdicts are
+  reported, and a decision's verdict is reported after those of every
+  change made before it read the rules, unless the call is an
+  observer's, made while it handles a change's verdict ([Grant
+  sets](#grant-sets)). Draft 0.4 let a binding report a change after
+  its call returned, so the next decision could be recorded before
+  the change it was made under.
 
 ## Changes since 0.3
 
@@ -1807,8 +1836,8 @@ listed in the changelog as one.
   is the likely rule for a later draft.
 - **Grants in the corpus.** The corpus covers grant sets and, since
   draft 0.4, a case's `steps`: grants, grants over a call's verdict and
-  revocations made after its calls, with the records they report. A
-  release and the answers without a human are stateful across calls
-  and are held only by the reference's tests; extending `steps` to
-  them, and to calls decided after a step, is the likely shape for a
-  later draft.
+  revocations made after its calls, with the records they report, and
+  since draft 0.5 replacements of the policy and calls decided after a
+  step. A release and the answers without a human are stateful across
+  calls and are held only by the reference's tests; extending `steps`
+  to them is the likely shape for a later draft.

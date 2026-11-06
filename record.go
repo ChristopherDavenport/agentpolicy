@@ -78,8 +78,9 @@ type verdictRecord struct {
 // reader rebuilds the grants in force from these members
 // and never parses reason for them. A replacement of the policy adds
 // grant "replace" and policy, {default, default_note, sources: [{name,
-// hash}]}, with allow, deny, ask and notes as a set's when the policy
-// names no sources. A member the verdict leaves empty
+// hash}]}, with allow, deny, ask and notes as a set's for the rules no
+// hashed source accounts for: all of them when a source has no hash,
+// and otherwise those of no source the policy names. A member the verdict leaves empty
 // is left out, except action, so a record written before these
 // members existed reads the same. A record is strings,
 // numbers and flags, so encoding it cannot fail; a caller that wants
@@ -182,9 +183,11 @@ func setOf(set RuleSet) *setRecord {
 // policyRecord is a policy as a replacement put it in force: its
 // default, as "allow", "deny" or "ask", and the default's note; the
 // sources it was merged from, each by name and hash, which is where a
-// reader finds the rules; and, for a policy that names no sources, its
-// lists and notes as a set's record holds them, since nothing else
-// would say what its rules are.
+// reader finds their rules; and the rules no hashed source accounts
+// for, as a set's record holds them: every rule when a source has no
+// hash, since its name alone says no version of its rules, and
+// otherwise the rules of no source the policy names, the host's own
+// among them, which is every rule of a policy built by hand.
 type policyRecord struct {
 	Default     string                       `json:"default"`
 	DefaultNote string                       `json:"default_note,omitempty"`
@@ -204,13 +207,29 @@ type sourceRecord struct {
 // policyOf is the record of a policy a replacement put in force.
 func policyOf(p Policy) *policyRecord {
 	rec := &policyRecord{Default: p.Default.String(), DefaultNote: p.Default.Note()}
+	whole := false
+	hashed := make(map[string]bool, len(p.Sources))
 	for _, src := range p.Sources {
 		rec.Sources = append(rec.Sources, sourceRecord{Name: src.Name, Hash: src.Hash})
+		if src.Hash == "" {
+			whole = true
+		}
+		hashed[src.Name] = true
 	}
-	if len(p.Sources) == 0 {
-		set := setOf(RuleSet{Allow: p.Allow, Deny: p.Deny, Ask: p.Ask})
-		rec.Allow, rec.Deny, rec.Ask, rec.Notes = set.Allow, set.Deny, set.Ask, set.Notes
+	unaccounted := func(rules []Rule) []Rule {
+		if whole {
+			return rules
+		}
+		var out []Rule
+		for _, r := range rules {
+			if !hashed[r.Source.Name] {
+				out = append(out, r)
+			}
+		}
+		return out
 	}
+	set := setOf(RuleSet{Allow: unaccounted(p.Allow), Deny: unaccounted(p.Deny), Ask: unaccounted(p.Ask)})
+	rec.Allow, rec.Deny, rec.Ask, rec.Notes = set.Allow, set.Deny, set.Ask, set.Notes
 	return rec
 }
 

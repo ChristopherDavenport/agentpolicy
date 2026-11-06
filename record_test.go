@@ -48,9 +48,18 @@ func TestVerdictRecord(t *testing.T) {
 			want: `{"tool":"bash","action":"allow","rule":"bash(git push origin:*)","source":"user","reason":"granted bash(git push origin:*) over bash(git push:*)","by":"policy","grant":"grant_over","over":{"rule":"bash(git push:*)","source":"project"}}`},
 		// A replacement of the policy names its default and its sources
 		// by name and hash, the files a reader finds its rules in (#94).
+		// A source with no hash names no version of its rules, so then
+		// the lists are recorded whole.
 		{name: "a replacement from sources", v: Verdict{Action: agentturn.Defer, Reason: "replaced the policy: the tool list changed", By: ByPolicy, Grant: KindReplace,
 			Policy: &Policy{Default: Ask(), Sources: []Source{{Name: "managed", Hash: "sha256:1a", Rank: 2}, project}, Allow: []Rule{{Tool: "read", Source: project}}}},
-			want: `{"action":"defer","reason":"replaced the policy: the tool list changed","by":"policy","grant":"replace","policy":{"default":"ask","sources":[{"name":"managed","hash":"sha256:1a"},{"name":"project"}]}}`},
+			want: `{"action":"defer","reason":"replaced the policy: the tool list changed","by":"policy","grant":"replace","policy":{"default":"ask","sources":[{"name":"managed","hash":"sha256:1a"},{"name":"project"}],"allow":["read"]}}`},
+		// Every source hashed: the record names them, and lists only the
+		// rules no source it names accounts for, the host's own.
+		{name: "a replacement from hashed sources and the host's rules", v: Verdict{Action: agentturn.Defer, Reason: "replaced the policy", By: ByPolicy, Grant: KindReplace,
+			Policy: &Policy{Default: Ask(), Sources: []Source{{Name: "managed", Hash: "sha256:1a", Rank: 2}, {Name: "project", Hash: "sha256:2b", Rank: 1}},
+				Allow: []Rule{{Tool: "read", Source: Source{Name: "project", Hash: "sha256:2b", Rank: 1}}}, Deny: []Rule{{Tool: "bash", Spec: "rm:*", Source: Source{Name: "managed", Hash: "sha256:1a", Rank: 2}}},
+				Ask: []Rule{{Tool: "edit", Note: "the host asks"}}}},
+			want: `{"action":"defer","reason":"replaced the policy","by":"policy","grant":"replace","policy":{"default":"ask","sources":[{"name":"managed","hash":"sha256:1a"},{"name":"project","hash":"sha256:2b"}],"ask":["edit"],"notes":{"ask":{"edit":"the host asks"}}}}`},
 		// A policy built by hand names no sources, so its record carries
 		// its lists as an activation's set does, and the default's note.
 		{name: "a replacement built by hand", v: Verdict{Action: agentturn.Block, Reason: "replaced the policy", By: ByPolicy, Grant: KindReplace,

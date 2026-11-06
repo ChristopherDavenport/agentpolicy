@@ -730,7 +730,19 @@
         {"replace": {"sources": [{"name": "managed", "rank": 2, "trusted": true, "hash": "sha256:1a", "deny": "bash(rm:*)"}, {"name": "project", "rank": 1, "trusted": true, "allow": "read"}], "default": "deny"},
          "reason": "the tool list changed",
          "records": [
-           {"action": "block", "reason": "replaced the policy: the tool list changed", "by": "policy", "grant": "replace", "policy": {"default": "deny", "sources": [{"name": "managed", "hash": "sha256:1a"}, {"name": "project"}]}}
+           {"action": "block", "reason": "replaced the policy: the tool list changed", "by": "policy", "grant": "replace", "policy": {"default": "deny", "sources": [{"name": "managed", "hash": "sha256:1a"}, {"name": "project"}], "allow": ["read"], "deny": ["bash(rm:*)"]}}
+         ],
+         "calls": [
+           {"tool": "bash", "args": {"command": "rm -rf /"}, "want": {"action": "block", "rule": "bash(rm:*)", "source": "managed", "reason": "denied by bash(rm:*)"}},
+           {"tool": "bash", "args": {"command": "make"}, "want": {"action": "block", "reason": "no rule allows bash: denied by default"}}
+         ]},
+        {"replace": {"sources": [{"name": "managed", "rank": 2, "trusted": true, "hash": "sha256:1a", "deny": "bash(rm:*)"}, {"name": "project", "rank": 1, "trusted": true, "hash": "sha256:2b", "allow": "read"}], "ask": "shell(git push:*)", "default": "allow"},
+         "records": [
+           {"action": "allow", "reason": "replaced the policy", "by": "policy", "grant": "replace", "policy": {"default": "allow", "sources": [{"name": "managed", "hash": "sha256:1a"}, {"name": "project", "hash": "sha256:2b"}], "ask": ["bash(git push:*)", "zsh(git push:*)"]}}
+         ],
+         "calls": [
+           {"tool": "zsh", "args": {"command": "git push origin"}, "want": {"action": "defer", "rule": "zsh(git push:*)", "reason": "approval required by zsh(git push:*)"}},
+           {"tool": "bash", "args": {"command": "npm test"}, "want": {"action": "allow", "reason": "allowed by default"}}
          ]},
         {"replace": {"allow": "read", "deny": "shell(rm:*)", "default": "ask", "default_note": "a person answers"},
          "records": [

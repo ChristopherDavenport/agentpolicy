@@ -6,9 +6,11 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/ChristopherDavenport/agentturn"
 	"github.com/ChristopherDavenport/openresponses"
@@ -1014,6 +1016,143 @@ func TestSetPolicyReported(t *testing.T) {
 	}
 	if len(seen) != 0 {
 		t.Errorf("a refused replacement reported %+v", seen)
+	}
+}
+
+// A replacement is recorded before any call decided under it, however
+// the reporting of rule changes is interleaved. Another goroutine is
+// reporting a change to a slow observer when the policy is replaced:
+// SetPolicy does not return until its own verdict is reported, and a
+// decision that read the new policy waits for it too, so neither the
+// caller's next decision nor a concurrent one is recorded first.
+func TestReplacementReportedBeforeDecisionsUnderIt(t *testing.T) {
+	ctx := context.Background()
+	var (
+		mu      sync.Mutex
+		reasons []string
+	)
+	seen := func() []string {
+		mu.Lock()
+		defer mu.Unlock()
+		return append([]string(nil), reasons...)
+	}
+	blocked, release := make(chan struct{}), make(chan struct{})
+	e, err := Build(Policy{Allow: rules(t, "read"), Default: Ask()}, testMatchers, WithObserver(func(_ context.Context, v Verdict) {
+		mu.Lock()
+		reasons = append(reasons, v.Reason)
+		mu.Unlock()
+		if v.Grant == KindActivate {
+			close(blocked)
+			<-release
+		}
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// B reports its activation to the slow observer.
+	bDone := make(chan struct{})
+	go func() {
+		defer close(bDone)
+		e.GrantSet(ctx, RuleSet{Source: Source{Name: "skill:slow", Trusted: true}})
+	}()
+	<-blocked
+
+	// C replaces the policy, then decides a call under it.
+	cDone := make(chan []string, 1)
+	go func() {
+		if err := e.SetPolicy(ctx, Policy{Allow: rules(t, "read"), Default: Deny()}, "c"); err != nil {
+			t.Error(err)
+		}
+		// What the observers had when SetPolicy returned.
+		at := seen()
+		if _, err := e.Decide(ctx, call("call_c", "bash", `{"command":"c"}`)); err != nil {
+			t.Error(err)
+		}
+		cDone <- at
+	}()
+	// D decides once the replacement is in force, while its verdict
+	// may still be waiting to be reported.
+	for {
+		if def, _ := e.Policy().Default.Action(); def == agentturn.Block {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	dDone := make(chan struct{})
+	go func() {
+		defer close(dDone)
+		if _, err := e.Decide(ctx, call("call_d", "bash", `{"command":"d"}`)); err != nil {
+			t.Error(err)
+		}
+	}()
+	// Before the fix C and D finish while B is still reporting; after
+	// it they wait for B, and the timeout only lets B go on.
+	select {
+	case <-dDone:
+	case <-time.After(200 * time.Millisecond):
+	}
+	close(release)
+	at := <-cDone
+	<-dDone
+	<-bDone
+
+	replaced := "replaced the policy: c"
+	if !slices.Contains(at, replaced) {
+		t.Errorf("SetPolicy returned before its verdict was reported: %q", at)
+	}
+	got := seen()
+	idx := func(reason string) int { return slices.Index(got, reason) }
+	r := idx(replaced)
+	deny := "no rule allows bash: denied by default"
+	first := idx(deny)
+	if r < 0 || first < 0 || first < r || len(got) != 4 {
+		t.Errorf("verdicts = %q: want the activation, the replacement, then both decisions", got)
+	}
+}
+
+// An observer that changes the rules or decides a call, with the
+// context it was handed, does not wait on the report it is part of.
+func TestObserverMayChangeTheRules(t *testing.T) {
+	ctx := context.Background()
+	var e *Engine
+	var got []string
+	e, err := Build(Policy{Allow: rules(t, "read"), Default: Ask()}, testMatchers, WithObserver(func(octx context.Context, v Verdict) {
+		got = append(got, v.Reason)
+		if v.Grant == KindReplace && v.Reason == "replaced the policy: outer" {
+			if err := e.SetPolicy(octx, Policy{Allow: rules(t, "read"), Default: Deny()}, "inner"); err != nil {
+				t.Error(err)
+			}
+			if _, err := e.Decide(octx, call("call_1", "bash", `{"command":"x"}`)); err != nil {
+				t.Error(err)
+			}
+			if err := e.Grant(octx, Rule{Tool: "edit"}); err != nil {
+				t.Error(err)
+			}
+		}
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		if err := e.SetPolicy(ctx, Policy{Allow: rules(t, "read"), Default: Ask()}, "outer"); err != nil {
+			t.Error(err)
+		}
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("an observer that changed the rules deadlocked")
+	}
+	// Inside the observer the order is not waited for: the inner
+	// decision may be reported before the inner replacement, which the
+	// observer's own change queued behind the verdict it is handling.
+	want := []string{"replaced the policy: outer", "no rule allows bash: denied by default", "replaced the policy: inner", "granted edit"}
+	sorted := slices.Sorted(slices.Values(got))
+	slices.Sort(want)
+	if !slices.Equal(sorted, want) {
+		t.Errorf("verdicts = %q\nwant %q in any order", got, want)
 	}
 }
 

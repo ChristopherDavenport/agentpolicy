@@ -33,6 +33,23 @@ versions may break the API.
   and a reason, `""` for none. The decisions corpus gains `replace`,
   `reason` and `build_error` on a step, and `hash` on a source. RFC
   0001 draft 0.5, Grants, The verdict and The record.
+- Changed: the record of a replacement lists the rules no hashed
+  source accounts for: every rule when a source has no hash, and
+  otherwise the host's own rules and any of no source the policy
+  names. A replacement ends the rules `Grant` and `GrantOver` added
+  to the policy; grant sets stay. `Verdict.Policy` is one copy shared
+  by every observer, which must not modify it.
+- Changed: a rule change's call, `SetPolicy`, `Grant`, `GrantOver`,
+  `GrantSet`, `Revoke` and `RevokeScope`, returns once its verdicts
+  have reached the observers, where it could return while another
+  goroutine was still reporting earlier changes, and `Decide` reports
+  its verdict after those of every change made before it read the
+  rules. Before, the next decision could be recorded ahead of the
+  replacement it was made under. An observer handed a change's verdict
+  passes on the context it was given when it changes the rules or
+  decides; with a context of its own it waits on itself. The
+  decisions corpus gains `calls` on a step, decided after it. RFC 0001
+  draft 0.5, Grant sets.
 - Dependencies: agentturn v0.0.35 to v0.0.38, agenttool v0.0.28 to
   v0.0.30 and openresponses v0.0.18 to v0.0.19. No API of this module
   changes with them.

@@ -324,6 +324,9 @@ type corpusStep struct {
 	Replace    *corpusPolicy `json:"replace"`
 	Reason     string        `json:"reason"`
 	BuildError string        `json:"build_error"`
+	// Calls are decided after the step, each a batch of its own, in
+	// the turns after the case's and the earlier steps'.
+	Calls []corpusCall `json:"calls"`
 }
 
 // rule is the step's one rule, stamped with its source.
@@ -401,6 +404,9 @@ func TestCorpusDecisions(t *testing.T) {
 func runDecisionCase(t *testing.T, defaults map[string]corpusMatcher, tc decisionCase) {
 	ctx := context.Background()
 	all := append(append([]corpusCall(nil), tc.Calls...), tc.Batch...)
+	for _, s := range tc.Steps {
+		all = append(all, s.Calls...)
+	}
 
 	// The splitter and the confinement are the product's; the corpus
 	// writes out what they answer for each call, found by its
@@ -628,8 +634,10 @@ func runDecisionCase(t *testing.T, defaults map[string]corpusMatcher, tc decisio
 		decide([]corpusCall{c}, i+1)
 		verdicts = append(verdicts, last)
 	}
+	turn := len(tc.Calls)
 	if len(tc.Batch) > 0 {
-		decide(tc.Batch, len(tc.Calls)+1)
+		turn++
+		decide(tc.Batch, turn)
 	}
 
 	if tc.Offer != nil {
@@ -693,6 +701,10 @@ func runDecisionCase(t *testing.T, defaults map[string]corpusMatcher, tc decisio
 			t.Fatalf("%s: no grant, grant_over, revoke, revoke_scope or replace", name)
 		}
 		checkRecords(t, name, seen, s.Records)
+		for _, c := range s.Calls {
+			turn++
+			decide([]corpusCall{c}, turn)
+		}
 	}
 }
 

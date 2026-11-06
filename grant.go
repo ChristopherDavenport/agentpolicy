@@ -196,17 +196,17 @@ func (e *Engine) GrantSet(ctx context.Context, set RuleSet) (granted []Rule, ref
 	// The activation first, as a whole, then each rule it granted and
 	// refused, all queued under the lock the replacement was made under.
 	activated := cloneSets([]RuleSet{kept.set})[0]
-	e.enqueue(ctx, Verdict{Action: agentturn.Allow, Reason: "activated the rules granted by " + sourceName(set.Source), By: ByPolicy, Grant: KindActivate, Source: set.Source.Name, Scope: kept.scope, Set: &activated, Refused: slices.Clone(refused)})
+	seq := e.enqueue(ctx, Verdict{Action: agentturn.Allow, Reason: "activated the rules granted by " + sourceName(set.Source), By: ByPolicy, Grant: KindActivate, Source: set.Source.Name, Scope: kept.scope, Set: &activated, Refused: slices.Clone(refused)})
 	for i := range granted {
 		g := granted[i]
-		e.enqueue(ctx, Verdict{Tool: g.Tool, Action: agentturn.Allow, Rule: &g, Reason: "granted " + g.String() + " by " + sourceName(set.Source), By: ByPolicy, Grant: KindGrantSet, Source: set.Source.Name, Scope: kept.scope})
+		seq = e.enqueue(ctx, Verdict{Tool: g.Tool, Action: agentturn.Allow, Rule: &g, Reason: "granted " + g.String() + " by " + sourceName(set.Source), By: ByPolicy, Grant: KindGrantSet, Source: set.Source.Name, Scope: kept.scope})
 	}
 	for i := range refused {
 		r := refused[i].Rule
-		e.enqueue(ctx, Verdict{Tool: r.Tool, Action: agentturn.Block, Rule: &r, Reason: "not granted " + r.String() + ": " + refused[i].Reason, By: ByPolicy, Grant: KindGrantSet, Source: set.Source.Name, Scope: kept.scope})
+		seq = e.enqueue(ctx, Verdict{Tool: r.Tool, Action: agentturn.Block, Rule: &r, Reason: "not granted " + r.String() + ": " + refused[i].Reason, By: ByPolicy, Grant: KindGrantSet, Source: set.Source.Name, Scope: kept.scope})
 	}
 	e.mu.Unlock()
-	e.report()
+	e.report(ctx, seq)
 	return granted, refused
 }
 
@@ -312,11 +312,12 @@ func (e *Engine) revoke(ctx context.Context, drop func(grant) bool, v Verdict) i
 		e.grants = kept
 		e.gen++
 	}
+	var seq uint64
 	if n > 0 {
-		e.enqueue(ctx, v)
+		seq = e.enqueue(ctx, v)
 	}
 	e.mu.Unlock()
-	e.report()
+	e.report(ctx, seq)
 	return n
 }
 
@@ -389,6 +390,10 @@ type active struct {
 	// cache is keyed on both.
 	scope string
 	gen   uint64
+	// queued is the engine's count of rule-change verdicts queued when
+	// the snapshot was taken: a decision under it is reported after
+	// them.
+	queued uint64
 	// batch names the batch a decision is in, for the claims kept for
 	// it; "" outside Decide, so a preview or a review keeps nothing.
 	batch string
@@ -405,7 +410,7 @@ func (e *Engine) active(ctx context.Context) active {
 func (e *Engine) activeScope(scope string) active {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	a := active{policy: e.policy, scope: scope, gen: e.gen}
+	a := active{policy: e.policy, scope: scope, gen: e.gen, queued: e.queued}
 	if len(e.grants) == 0 {
 		return a
 	}
