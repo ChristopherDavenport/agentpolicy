@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/ChristopherDavenport/agentturn"
 )
@@ -369,11 +370,22 @@ func TestGrantVerdictsInTheOrderTheyTookEffect(t *testing.T) {
 		e.GrantSet(ctx, set)
 	}()
 	<-started
-	if n := e.Revoke(ctx, "skill:deploy"); n != 1 {
-		t.Errorf("Revoke removed %d rules, want 1", n)
+	// Revoke returns once its verdict is reported, after the
+	// activation's, so it is made on a goroutine of its own and the
+	// slow observer let go once it took effect.
+	revoked := make(chan struct{})
+	go func() {
+		defer close(revoked)
+		if n := e.Revoke(ctx, "skill:deploy"); n != 1 {
+			t.Errorf("Revoke removed %d rules, want 1", n)
+		}
+	}()
+	for len(e.Grants()) != 0 {
+		time.Sleep(time.Millisecond)
 	}
 	close(release)
 	<-done
+	<-revoked
 	mu.Lock()
 	defer mu.Unlock()
 	want := []string{

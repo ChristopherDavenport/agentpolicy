@@ -1,6 +1,6 @@
 # RFC 0001: Agent Policy
 
-Status: draft 0.4
+Status: draft 0.5
 Author: Christopher Davenport
 Discussion: to be opened against this repository. The Go module at its
 root is the reference binding. agentturn RFC 0001 is the loop whose
@@ -120,8 +120,9 @@ RFC 2119.
 - **Server glob**: the tool-name glob `mcp__S__*` naming every tool of
   one MCP server `S`, the one glob an allow list honours.
 - **List**: the deny, ask or allow rules of a policy.
-- **Policy**: three lists, a default, the sources the rules came from,
-  and the allow rules withheld from untrusted sources.
+- **Policy**: three lists, a default with the host's note or none, the
+  sources the rules came from, and the allow rules withheld from
+  untrusted sources.
 - **Source**: where a set of rules came from: a name, a path and a hash
   that identify it, whether the user trusts it, and a rank.
 - **Matcher**: a function from a specifier and one subject's arguments
@@ -433,6 +434,7 @@ engine. It MUST refuse, with these error kinds:
 | `tool_glob` | a tool-name glob other than a server glob is in the allow list | `agentpolicy: tool-name glob: R is not honoured in the allow list` |
 | `tool_glob` | a tool-name glob has a specifier | `agentpolicy: tool-name glob: R takes no specifier` |
 | `invalid_rule` | a rule has no tool name, or the alias table is refused | `agentpolicy: rule "R": missing tool name` for the first |
+| `default_note` | an allow default carries a note | `agentpolicy: an allow default takes no note` |
 
 `R` is the rule's string form. The texts matter because a grant's
 refusal reports them, and a front shows them. A binding MAY append a
@@ -444,6 +446,15 @@ with `agentpolicy: cannot grant a carve-out: R`.
 The rules are expanded through the alias table before they are
 checked. The default MUST be set explicitly: a deny list written on its
 own never allows everything else by accident.
+
+A default MAY carry a **note**, which only the host sets: the default
+is always the host's and never a source's, so its note is trusted text,
+as a note on a rule of the host's own source is. It is how a host tells
+the model what a refusal by default means for it: a host that denies
+by default to steer the model to a tool it does allow, `read` rather
+than a shell's `cat`, says so, and a host whose deny default means "do
+not try another way" says that. No clause is fixed for every host. A
+note on an allow default is refused, since no reason shows it.
 
 A tool-name glob is honoured in the deny and ask lists, where the
 reference agents honour one. In the allow list a server glob is
@@ -517,8 +528,14 @@ rule for the record and the front.
 | confined | allow | the ask rule passed over | `confined by X, so R does not ask`, or `confined, so R does not ask` when the tool names nothing |
 | allow | allow | the allow rule | `allowed by C` |
 | default allow | allow | none | `allowed by default` |
-| default deny | block | none | `no rule allows T: denied by default` |
-| default ask | defer | none | `no rule allows T: approval required by default` |
+| default deny | block | none | `no rule allows T: denied by default`, then `: N` when the default has the note `N` |
+| default ask | defer | none | `no rule allows T: approval required by default`, then `: N` when the default has the note `N` |
+
+The reason for a default deny MUST be `no rule allows T: denied by
+default`, followed by `: N` when the default has the note `N`, and a
+default ask's reason gains `: N` in the same way. A deny or ask rule
+carries its own note in `C`, so a rule's reason is unchanged by the
+default's note.
 
 ### Confinement
 
@@ -729,6 +746,35 @@ the policy never heard of, and an ask default parks an unattended run
 on it. A host that cannot re-derive its policy covers the tools it has
 not seen with a bare name or a tool-name glob in the deny or ask list.
 
+A replacement of the policy MUST be recorded as a verdict with `grant:
+"replace"`, before any call decided under it is recorded. Its `action`
+is the new default's. Its `policy` member is `{"default",
+"default_note"?, "sources"?: [{"name", "hash"?}]}`, the default as
+`"allow"`, `"deny"` or `"ask"` and its note, and each source the policy
+names by its name and hash, which is where a reader finds the rules.
+Its `reason` is `replaced the policy`, or `replaced the policy: H` when
+the host gave the reason `H`: the host's words are its own, and the
+rest is fixed. The record SHOULD also carry, as `set` does, the rules
+no hashed source accounts for: every rule when a source the policy
+names has no hash, since its name alone says no version of its rules,
+and otherwise the rules of no source the policy names, the host's own
+among them, which for a policy a host built by hand, naming no
+sources, is every rule. A reader MUST take the decisions after the
+record as made under the replacement, except that a decision under way
+when the policy was replaced, which read the rules before the
+replacement, may be recorded after it; a host that must not have one
+replaces the policy between turns. A replacement that is refused
+records nothing.
+
+A replacement replaces the policy whole, the rules that grants and
+grants over added to it included, so those grants end with it: a host
+that keeps an "always allow" across a replacement puts the rule into
+the policy it replaces with, as it persists one into its settings. The
+grant sets active under every scope, and the calls deferred under the
+old policy, are untouched. The decider is `policy`; a replacement has no
+rule, no tool, no source of its own and no scope, since the policy is
+the engine's whatever the context's scope.
+
 **Grant.** An "always allow" answering a prompt the default raised
 appends an allow rule, expanded through the aliases. A rule that could
 not build as an allow rule, and a carve-out, is refused.
@@ -859,7 +905,8 @@ re-deciding them and without parsing a reason:
   for a grant over an ask rule; `activate` for a grant set's
   activation; `grant_set` for a grant set's grant and for its refusal
   alike, told apart by the action; `revoke` for a revocation of a
-  name; and `revoke_scope` for a revocation of a scope;
+  name; `revoke_scope` for a revocation of a scope; and `replace` for
+  a replacement of the policy (see [Grants](#grants), Replace);
 - its **source** is the name of the source the grant's rule or the
   set was made under, which is also the rule's source, or the name a
   revocation removed, on every kind but `revoke_scope`, and empty for
@@ -889,19 +936,34 @@ re-deciding them and without parsing a reason:
 A refused grant or grant over changes nothing and is no verdict; a
 revocation that removed no rule is none either.
 
-The verdicts of grants, activations and revocations reach the
-observers in the order the changes took effect, whatever calls make
-changes at the same time: two changes to one source under one scope
-are never reported in the reverse of the order they were made, so a
-reader that replays the record in order ends with the rules in force.
-A binding MAY report a change's verdicts after the call that made it
-returns, while another change's are being reported, and MUST then
-report them after those. An observer MAY therefore be called on
-another thread than the one that made the change, and with the
-caller's context values, the grant scope among them, detached from
-its cancellation and deadline, so a verdict reported late is not lost
-to a call that has since ended. An observer that fails on one verdict
-MUST NOT keep the rest from any observer.
+The verdicts of grants, activations, revocations and replacements of
+the policy reach the observers in the order the changes took effect,
+whatever calls make changes at the same time: two changes to one
+source under one scope are never reported in the reverse of the order
+they were made, so a reader that replays the record in order ends with
+the rules in force. A change's verdicts are reported after those of
+the changes before it, and a binding MAY report them on another thread
+than the one that made the change, while another change's are being
+reported; the call that made the change MUST NOT return before they
+are reported, unless an observer made it while handling another
+change's verdict, which would otherwise wait on itself. A decision's
+verdict MUST be reported after those of every change made before the
+decision read the rules, with the same exception, so a reader takes a
+decision recorded after a change as made under it. A decision under
+way when the rules change, which read them before the change, may
+still be recorded after it, since holding the order across its hooks
+and its questions in the run would stall every change behind them; a
+host that must not have one changes the rules between turns. A
+binding MAY also hand an observer a decision's verdict with a context
+an observer's own call does not wait under, as it hands a change's,
+so an observer that holds a lock of its own while it changes the
+rules never waits on a report that waits on that lock. An observer MAY
+therefore be called on another thread than the one that made the
+change, and with the caller's context values, the grant scope among
+them, detached from its cancellation and deadline, so a verdict
+reported after an observer's change returns is not lost to a call
+that has since ended. An observer that fails on one verdict MUST NOT
+keep the rest from any observer.
 
 ## Deferred calls
 
@@ -1263,11 +1325,12 @@ A verdict is what was decided and why:
 | subject | the text of the subject whose verdict the fold kept, or of the part a hook decided on; empty for a call no splitter split and no hook named a part of |
 | confined | what confines the call, whatever the action; empty when unconfined or unnamed |
 | quarantined | the items an input guard quarantined, on its allow, or named in a refused quarantine, on its block; empty otherwise |
-| grant | for a grant, a grant set's activation, grant or refusal, or a revocation, its kind as [Grant sets](#grant-sets) gives it: `grant`, `grant_over`, `activate`, `grant_set`, `revoke` or `revoke_scope`; empty otherwise |
+| grant | for a grant, a grant set's activation, grant or refusal, a revocation, or a replacement of the policy, its kind as [Grant sets](#grant-sets) gives it: `grant`, `grant_over`, `activate`, `grant_set`, `revoke`, `revoke_scope` or `replace`; empty otherwise |
 | source | for a grant or a revocation, the name of the source it was made under or removed; empty for `revoke_scope`, for a source with no name, and for any other verdict, whose rule names its source |
 | scope | the grant scope a grant set was activated or refused under, or a revocation removed under; empty for the unscoped scope, for a grant and a grant over, and for any other verdict |
 | set, refused | on an activation, the set as kept and the rules refused with their reasons; empty otherwise |
 | over | on a grant over, the ask rule it answered, on the rule of its expansion that names the ask rule's tool; empty otherwise |
+| policy | on a replacement, the policy put in force, expanded through the aliases; empty otherwise |
 
 Every verdict reaches every observer the host registered, exactly
 once, in the order they were registered, and outside any lock the
@@ -1296,11 +1359,12 @@ with `ns` set to `agentpolicy:verdict` and `data` a JSON object:
 | `note` | the rule's note, whatever its source |
 | `reason`, `by`, `held`, `subject`, `confined` | as the verdict names them |
 | `quarantined` | an array naming each quarantined item by reference, `{"type", "id"?, "call_id"?}`, from its Open Responses form; never its content, so its text is redacted with the entry that holds it and is not copied into this one |
-| `grant` | the kind of a grant or a revocation: `"grant"`, `"grant_over"`, `"activate"`, `"grant_set"`, `"revoke"` or `"revoke_scope"` |
+| `grant` | the kind of a grant, a revocation or a replacement: `"grant"`, `"grant_over"`, `"activate"`, `"grant_set"`, `"revoke"`, `"revoke_scope"` or `"replace"` |
 | `scope` | the grant scope's key a grant set or a revocation was made under |
 | `over` | on a grant over, `{"rule", "source"?}`: the ask rule it answered, in string form, and its source's name |
 | `set` | on an activation, `{"rank"?, "trusted"?, "allow"?, "deny"?, "ask"?, "notes"?}`: the source's rank and trust, each list as rule strings in order, and `notes` mapping a list's name, `"allow"`, `"deny"` or `"ask"`, to an object mapping a rule's string form to its note, so one rule in two lists keeps both; the source's name and hash are the record's `source` and `source_hash`; `{}` for a set that keeps nothing |
 | `refused` | on an activation, an array of `{"rule", "reason"}`, in order |
+| `policy` | on a replacement, `{"default", "default_note"?, "sources"?, "allow"?, "deny"?, "ask"?, "notes"?}`: the default, `"allow"`, `"deny"` or `"ask"`, and its note; `sources`, an array of `{"name", "hash"?}`, one per source the policy names, in order; and the lists and notes, as `set` holds them, of the rules no hashed source accounts for, all of them when a source has no hash ([Grants](#grants), Replace) |
 
 Every member but `action` is omitted when the verdict leaves it empty,
 zero or false. A reader MUST ignore members it does not know.
@@ -1314,9 +1378,10 @@ an absent `source` on a grant is the host's own. When it was made
 under a grant scope it MUST carry `scope`, the scope's key; a grant
 and a grant over carry none. An activation MUST carry `set`, and
 `refused` when it refused a rule; a grant over MUST carry `over` on
-the rule that answered the ask. A reader MUST take the kind, the source,
-the scope, the set and the ask rule answered from these members and
-MUST NOT parse `reason` for them.
+the rule that answered the ask. A replacement MUST carry `grant` and
+`policy`. A reader MUST take the kind, the source, the scope, the set,
+the ask rule answered and the policy put in force from these members
+and MUST NOT parse `reason` for them.
 A record written under draft 0.3 or before carries none of them, and
 a reader that must read one MAY fall back on the reason texts
 [Grant sets](#grant-sets) fixes; it then has no scope but the session
@@ -1358,22 +1423,22 @@ The root module of this repository is the reference binding.
 | rule | `Rule{Tool, Spec, Source, Note}`; `String`, `Bare`, `Glob`, `ServerGlob`, `MatchesTool`, `AllowsTool` (the allow list's reading), `CarveOut` |
 | grammar | `ParseRules(s)`; every error begins `agentpolicy: rule "<token>": ` and ends with the kind's text, `unbalanced parentheses`, `missing tool name`, `empty specifier`, `empty carve-out`, `text after the specifier` |
 | source | `Source{Name, Path, Hash, Trusted, Rank}` |
-| policy | `Policy{Allow, Deny, Ask, Default, Sources, Withheld}`; `Allow()`, `Deny()`, `Ask()`; the zero `Default` is unset; `Policy.WithDefault(d)` |
+| policy | `Policy{Allow, Deny, Ask, Default, Sources, Withheld}`; `Allow()`, `Deny()`, `Ask()`; the zero `Default` is unset; the default's note `Default.WithNote(n)`, `Default.Note()`; `Policy.WithDefault(d)` |
 | merge | `RuleSet{Source, Allow, Deny, Ask}`, `Merge(sets…)` |
 | matcher | `Matcher func(spec, args) bool`; `PrefixMatcher(field)`, `GlobMatcher(field)` |
 | splitter, subject | `Subjects func(ctx, args) ([]Subject, error)`, `Subject{Args, Tool, Text, Constrain}`; `ToolMatcher{Match, Subjects}` per tool |
 | constraint sources | `WithConstraints(fns…)`, each `func(ctx, agentturn.ToolCallInfo) ([]Subject, error)` |
 | claims | read by default through `agenttool.FactsOf` on the call's tool; `WithoutFacts()` turns reading off, `WithFacts()` back on |
 | aliases | `WithAliases(map[string][]string)` |
-| build | `Build(policy, matchers, opts…)`; `ErrNoDefault`, `ErrNoMatcher`, `ErrToolGlob` for the kinds, and a plain error for `invalid_rule` |
-| engine | `Engine`; `Policy`, `PolicyOf(source)`, `Sources`, `Withheld`, `SetPolicy` |
+| build | `Build(policy, matchers, opts…)`; `ErrNoDefault`, `ErrNoMatcher`, `ErrToolGlob`, `ErrDefaultNote` for the kinds, and a plain error for `invalid_rule` |
+| engine | `Engine`; `Policy`, `PolicyOf(source)`, `Sources`, `Withheld`, `SetPolicy(ctx, policy, reason)` |
 | decision | `Engine.Decide`, `Engine.BeforeToolCall()` for `agentturn.Config.BeforeToolCall`; `Engine.Would(ctx, info)`, the verdict Decide would give before the hold, with no deferral remembered and no verdict reported |
 | confinement | `agenttool.ConfinedBy` by default; `WithConfinement(fn)`, `nil` to turn it off |
 | sibling tools | `WithTools(lookup)`, `WithToolsFor(lookup)` for one given the decision's context |
 | model-backed output | `classify.WithEveryTurn()` to judge a turn that is not final |
 | hooks | `WithHooks(fns…)`; answering hooks `WithAnsweringHooks(fns…)`; a hook's subject is `agentturn.ToolDecision.Subject` |
 | offering tools | `Engine.Removes(tool)`, `Engine.Filter(tools)`, `Engine.ToolProvider(base)` for `agentturn.Config.ToolProvider` |
-| grants | `Engine.Grant`, `Engine.GrantOver`; `Engine.GrantSet` → granted and `[]Refusal{Rule, Reason}`, `Engine.Revoke`, `Engine.Grants`; the scope: `ContextWithGrantScope(ctx, scope)`, `GrantScopeFromContext(ctx)`, `Engine.GrantsFor(ctx)`, `Engine.RevokeScope(ctx)`; the kind: `GrantKind`, `KindGrant`, `KindGrantOver`, `KindActivate`, `KindGrantSet`, `KindRevoke`, `KindRevokeScope` |
+| grants | `Engine.Grant`, `Engine.GrantOver`; `Engine.GrantSet` → granted and `[]Refusal{Rule, Reason}`, `Engine.Revoke`, `Engine.Grants`; the scope: `ContextWithGrantScope(ctx, scope)`, `GrantScopeFromContext(ctx)`, `Engine.GrantsFor(ctx)`, `Engine.RevokeScope(ctx)`; the kind: `GrantKind`, `KindGrant`, `KindGrantOver`, `KindActivate`, `KindGrantSet`, `KindRevoke`, `KindRevokeScope`, `KindReplace` |
 | deferred calls | `Engine.Deferred`, `Engine.Runs`, `Engine.Forget` |
 | release | `Engine.Release(ctx, end, answers…)`; `ErrUnanswered`; `Engine.Resumed(ctx, end, answers, next)` with the end the resume returned; `Engine.ForgetAnswers(runID)` |
 | asking in the run | `WithAskInRun()`, through the elicitor on the hook's context (`agentturn.Ask`); the decider is `agenttool.Answer.By` |
@@ -1382,7 +1447,7 @@ The root module of this repository is the reference binding.
 | nested calls | `agentturn.ToolCallInfo.Parent` non-empty: decided and reported, no deferral remembered |
 | denial bound | `DenialBound{Consecutive, Total, Window}`, `DefaultDenialBound`, `WithDenialBound`, `ErrDenialBound`, `Engine.ResetReviews` |
 | decider | `ByPolicy`, `ByAgent`, `ByHuman` |
-| verdict | `Verdict{RunID, Turn, CallID, Tool, Guard, Action, Rule, Reason, By, Held, Subject, Confined, Quarantined, Grant, Source, Scope, Set, Refused, Over}`; `WithObserver(fn)`, which adds an observer |
+| verdict | `Verdict{RunID, Turn, CallID, Tool, Guard, Action, Rule, Reason, By, Held, Subject, Confined, Quarantined, Grant, Source, Scope, Set, Refused, Over, Policy}`; `WithObserver(fn)`, which adds an observer |
 | record | `VerdictNS = "agentpolicy:verdict"`; `Verdict.Record()` → namespace and bytes |
 | presets | `Tools{Read, Edit, Execute}`; `Suggest`, `AutoEdit`, `FullAuto` |
 | guard | `guard.Guard{Name, Check}`, `guard.New`; `guard.Input{Items, Instructions}`, `guard.Message`, `guard.Output{Response, Results, Final}` and `Output.Answer()`; `guard.Verdict{Action, Reason, Items, Instructions, Quarantine}`, the quarantine kept with `agentturn.Quarantine` |
@@ -1443,8 +1508,9 @@ when another of its batch asks, and never runs one beside an ask;
 gives the reason texts this document states; reports every verdict to
 every observer exactly once; names the kind, source and scope of every
 grant and revocation, records each activation's set and each grant
-over's ask rule, and reports rule changes in the order they took
-effect; remembers a deferred call under its own
+over's ask rule, records each replacement of the policy before the
+calls decided under it, and reports rule changes in the order they
+took effect; remembers a deferred call under its own
 run; answers a held call only from the answers to the asked ones; and
 for every case of `testdata/policy/decisions.json` builds, grants,
 decides and offers as the case says.
@@ -1489,11 +1555,12 @@ a splitter. A case has:
 - `name`;
 - `aliases`, an alias table;
 - `policy`: `sources`, merged as [Merge](#merge) says, each `{"name",
-  "rank", "trusted", "allow"?, "deny"?, "ask"?, "notes"?}`, with lists
+  "rank", "trusted", "hash"?, "allow"?, "deny"?, "ask"?, "notes"?}`, with lists
   written in the grammar and `notes` mapping a rule's string form to
   its note; then `allow`, `deny` and `ask`, the host's own rules,
-  appended after the merged lists; and `default`, `"allow"`, `"deny"`,
-  `"ask"` or absent for unset;
+  appended after the merged lists; `default`, `"allow"`, `"deny"`,
+  `"ask"` or absent for unset; and `default_note`, the default's note,
+  absent for none;
 - `build_error`, the kind building MUST refuse with, in which case
   nothing else is checked;
 - `grants`, activated in order as grant sets after building: `source`,
@@ -1506,11 +1573,16 @@ a splitter. A case has:
   `call_2`, … in batch order, and every call is in run `run_1`;
 - `offer`, `{"tools", "want"}`: the tools, in order, that remain when
   the removed ones are taken out;
-- `steps`, grants and revocations made in order after everything
-  above, each with exactly one of `grant`, a rule in the grammar given
-  to a grant; `grant_over`, a rule given to a grant over the verdict of
-  the call of `calls` that `over` numbers from 1; `revoke`, a source
-  name to revoke; or `revoke_scope`, `true`. Beside it: `source`,
+- `steps`, grants, revocations and replacements made in order after
+  everything above, each with exactly one of `grant`, a rule in the
+  grammar given to a grant; `grant_over`, a rule given to a grant over
+  the verdict of the call of `calls` that `over` numbers from 1;
+  `revoke`, a source name to revoke; `revoke_scope`, `true`; or
+  `replace`, a policy in the shape of a case's `policy` that replaces
+  the policy in force, with `reason`, the host's reason, none when
+  absent, and `build_error`, the kind the replacement MUST be refused
+  with; and `calls`, decided after the step as `calls` are, each a
+  batch of its own, in the turns after those before. Beside it: `source`,
   `{"name", "rank", "trusted"}`, the source a grant's rule is stamped
   with; `scope`, the grant scope of the context it is made under,
   unscoped when absent; `removed`, how many rules a revocation
@@ -1565,6 +1637,43 @@ when a rule is added or changed, a reason text included, since the
 model reads it; a rule's removal, or a change that makes a conforming
 engine non-conforming, is a breaking change to the module and is
 listed in the changelog as one.
+
+## Changes since 0.4
+
+- A default MAY carry the host's note, and the reason of a default
+  deny or a default ask ends with `: N` for the note `N` (#93). An
+  allow default's note is refused at build, `default_note`. A deny
+  rule's note is cited by its own reason as before. Draft 0.4 gave the
+  default no note, so a host could tell the model nothing about a
+  refusal by default; a fixed clause such as "do not work around it"
+  was considered and not taken, since a host that denies by default to
+  steer the model to a tool it allows means the opposite. The corpus
+  gains `default_note` on a case's policy ([Building a
+  policy](#building-a-policy), [Deciding a
+  subject](#deciding-a-subject)).
+- A replacement of the policy is recorded (#94): a verdict of the kind
+  `replace`, before any call decided under it, whose action is the new
+  default's, whose reason is `replaced the policy` or `replaced the
+  policy: H` for the host's reason `H`, and whose record carries
+  `policy`, the default, its note and the sources by name and hash,
+  and the rules no hashed source accounts for: every rule when a
+  source has no hash, otherwise the host's own and any other of no
+  named source. A refused replacement records nothing. A replacement
+  ends the grants and grants over that joined the policy, and leaves
+  the grant sets. Draft 0.4 did not record a replacement, so the
+  decisions after one read as made under the rules before it. The
+  host's words are only the reason's tail, since the rest of a reason
+  is stable text. The corpus gains `replace`, `reason`, `build_error`
+  and `calls`, decided after the step, on a step, and `hash` on a
+  source ([Grants](#grants), [The verdict](#the-verdict), [The
+  record](#the-record)).
+- The call that changes the rules returns once its verdicts are
+  reported, and a decision's verdict is reported after those of every
+  change made before it read the rules, unless the call is an
+  observer's, made while it handles a change's verdict ([Grant
+  sets](#grant-sets)). Draft 0.4 let a binding report a change after
+  its call returned, so the next decision could be recorded before
+  the change it was made under.
 
 ## Changes since 0.3
 
@@ -1738,8 +1847,8 @@ listed in the changelog as one.
   is the likely rule for a later draft.
 - **Grants in the corpus.** The corpus covers grant sets and, since
   draft 0.4, a case's `steps`: grants, grants over a call's verdict and
-  revocations made after its calls, with the records they report. A
-  release and the answers without a human are stateful across calls
-  and are held only by the reference's tests; extending `steps` to
-  them, and to calls decided after a step, is the likely shape for a
-  later draft.
+  revocations made after its calls, with the records they report, and
+  since draft 0.5 replacements of the policy and calls decided after a
+  step. A release and the answers without a human are stateful across
+  calls and are held only by the reference's tests; extending `steps`
+  to them is the likely shape for a later draft.

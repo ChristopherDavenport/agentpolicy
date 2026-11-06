@@ -6,9 +6,11 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/ChristopherDavenport/agentturn"
 	"github.com/ChristopherDavenport/openresponses"
@@ -101,6 +103,9 @@ func TestBuildValidates(t *testing.T) {
 		errText  string
 	}{
 		{name: "no default", policy: Policy{Deny: rules(t, "bash")}, err: ErrNoDefault, errText: "agentpolicy: policy default is not set; use Allow(), Deny() or Ask()"},
+		{name: "a note on an allow default", policy: Policy{Deny: rules(t, "bash"), Default: Allow().WithNote("x")}, err: ErrDefaultNote, errText: "agentpolicy: an allow default takes no note"},
+		{name: "a note on a deny default", policy: Policy{Deny: rules(t, "bash"), Default: Deny().WithNote("x")}},
+		{name: "a note on an ask default", policy: Policy{Deny: rules(t, "bash"), Default: Ask().WithNote("x")}},
 		{name: "spec without matcher", policy: Policy{Allow: rules(t, "bash(git:*)"), Default: Ask()}, err: ErrNoMatcher, errText: "agentpolicy: no matcher for the rule's tool: bash(git:*)"},
 		{name: "spec with splitter only", policy: Policy{Deny: rules(t, "bash(rm:*)"), Default: Ask()}, matchers: map[string]ToolMatcher{"bash": {Subjects: shellSplit}}, err: ErrNoMatcher},
 		{name: "carve-out without matcher", policy: Policy{Deny: rules(t, "read(!.env)"), Default: Ask()}, err: ErrNoMatcher},
@@ -907,7 +912,7 @@ func TestSetPolicy(t *testing.T) {
 	}
 	// The product re-derives its rules when its tool list changes. The
 	// hook value the loop holds is the same one.
-	if err := e.SetPolicy(Policy{Allow: rules(t, "read mcp__cocode__lint"), Default: Ask()}); err != nil {
+	if err := e.SetPolicy(ctx, Policy{Allow: rules(t, "read mcp__cocode__lint"), Default: Ask()}, ""); err != nil {
 		t.Fatal(err)
 	}
 	if d, err := e.BeforeToolCall()(ctx, late); err != nil || d.Action != agentturn.Allow || d.Reason != "allowed by mcp__cocode__lint" {
@@ -927,8 +932,9 @@ func TestSetPolicy(t *testing.T) {
 		{"no default", Policy{Allow: rules(t, "read")}, ErrNoDefault},
 		{"no matcher", Policy{Allow: rules(t, "web(x:*)"), Default: Ask()}, ErrNoMatcher},
 		{"a glob in the allow list", Policy{Allow: rules(t, "mcp__*"), Default: Ask()}, ErrToolGlob},
+		{"a note on an allow default", Policy{Allow: rules(t, "read"), Default: Allow().WithNote("x")}, ErrDefaultNote},
 	} {
-		if err := e.SetPolicy(tc.policy); !errors.Is(err, tc.err) {
+		if err := e.SetPolicy(ctx, tc.policy, ""); !errors.Is(err, tc.err) {
 			t.Errorf("%s: err = %v, want %v", tc.name, err, tc.err)
 		}
 	}
@@ -945,6 +951,259 @@ func TestSetPolicy(t *testing.T) {
 	}
 	if d, _ := e.Decide(ctx, call("call_2", "mcp__cocode__lint", `{}`)); d.Action != agentturn.Block || d.Reason != "denied by mcp__*" {
 		t.Errorf("a glob over a late tool: %+v", d)
+	}
+}
+
+// A replacement of the policy is a verdict of its own, reported before
+// any call decided under it, so a reader of the record takes the
+// decisions after it as made under the replacement (#94). Its action is
+// the new default's, its reason the fixed text and the host's reason,
+// and it carries the policy put in force. A refused replacement reports
+// nothing.
+func TestSetPolicyReported(t *testing.T) {
+	ctx := context.Background()
+	var seen []Verdict
+	e, err := Build(Policy{Allow: rules(t, "read"), Default: Ask()}, testMatchers, WithObserver(func(_ context.Context, v Verdict) { seen = append(seen, v) }))
+	if err != nil {
+		t.Fatal(err)
+	}
+	next := Policy{Allow: rules(t, "read"), Deny: rules(t, "bash(rm:*)"), Default: Deny().WithNote("use read to read a file")}
+	if err := e.SetPolicy(ctx, next, "the tool list changed"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.Decide(ctx, call("call_1", "bash", `{"command":"cat a"}`)); err != nil {
+		t.Fatal(err)
+	}
+	if len(seen) != 2 {
+		t.Fatalf("observed %d verdicts, want the replacement and the decision: %+v", len(seen), seen)
+	}
+	r := seen[0]
+	if r.Grant != KindReplace || r.Action != agentturn.Block || r.Reason != "replaced the policy: the tool list changed" || r.By != ByPolicy || r.Rule != nil || r.Tool != "" || r.Source != "" || r.Scope != "" {
+		t.Errorf("the replacement's verdict: %+v", r)
+	}
+	if r.Policy == nil || r.Policy.Default.String() != "deny" || r.Policy.Default.Note() != "use read to read a file" || len(r.Policy.Deny) != 1 || r.Policy.Deny[0].String() != "bash(rm:*)" {
+		t.Errorf("the replacement's policy: %+v", r.Policy)
+	}
+	if d := seen[1]; d.CallID != "call_1" || d.Reason != "no rule allows bash: denied by default: use read to read a file" {
+		t.Errorf("the decision after the replacement: %+v", d)
+	}
+
+	// No reason from the host is the fixed text alone, and the action
+	// is the new default's.
+	for _, tc := range []struct {
+		def    Default
+		action agentturn.ToolAction
+	}{{Allow(), agentturn.Allow}, {Ask(), agentturn.Defer}, {Deny(), agentturn.Block}} {
+		seen = nil
+		if err := e.SetPolicy(ctx, Policy{Allow: rules(t, "read"), Default: tc.def}, ""); err != nil {
+			t.Fatal(err)
+		}
+		if len(seen) != 1 || seen[0].Action != tc.action || seen[0].Reason != "replaced the policy" || seen[0].Grant != KindReplace {
+			t.Errorf("SetPolicy under %s reported %+v", tc.def, seen)
+		}
+	}
+
+	// A refused replacement changes nothing and reports nothing.
+	seen = nil
+	for _, p := range []Policy{
+		{Allow: rules(t, "read")},
+		{Allow: rules(t, "web(x:*)"), Default: Ask()},
+		{Allow: rules(t, "read"), Default: Allow().WithNote("x")},
+	} {
+		if err := e.SetPolicy(ctx, p, "refused"); err == nil {
+			t.Errorf("SetPolicy(%+v) took effect", p)
+		}
+	}
+	if len(seen) != 0 {
+		t.Errorf("a refused replacement reported %+v", seen)
+	}
+}
+
+// A replacement is recorded before any call decided under it, however
+// the reporting of rule changes is interleaved. Another goroutine is
+// reporting a change to a slow observer when the policy is replaced:
+// SetPolicy does not return until its own verdict is reported, and a
+// decision that read the new policy waits for it too, so neither the
+// caller's next decision nor a concurrent one is recorded first.
+func TestReplacementReportedBeforeDecisionsUnderIt(t *testing.T) {
+	ctx := context.Background()
+	var (
+		mu      sync.Mutex
+		reasons []string
+	)
+	seen := func() []string {
+		mu.Lock()
+		defer mu.Unlock()
+		return append([]string(nil), reasons...)
+	}
+	blocked, release := make(chan struct{}), make(chan struct{})
+	e, err := Build(Policy{Allow: rules(t, "read"), Default: Ask()}, testMatchers, WithObserver(func(_ context.Context, v Verdict) {
+		mu.Lock()
+		reasons = append(reasons, v.Reason)
+		mu.Unlock()
+		if v.Grant == KindActivate {
+			close(blocked)
+			<-release
+		}
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// B reports its activation to the slow observer.
+	bDone := make(chan struct{})
+	go func() {
+		defer close(bDone)
+		e.GrantSet(ctx, RuleSet{Source: Source{Name: "skill:slow", Trusted: true}})
+	}()
+	<-blocked
+
+	// C replaces the policy, then decides a call under it.
+	cDone := make(chan []string, 1)
+	go func() {
+		if err := e.SetPolicy(ctx, Policy{Allow: rules(t, "read"), Default: Deny()}, "c"); err != nil {
+			t.Error(err)
+		}
+		// What the observers had when SetPolicy returned.
+		at := seen()
+		if _, err := e.Decide(ctx, call("call_c", "bash", `{"command":"c"}`)); err != nil {
+			t.Error(err)
+		}
+		cDone <- at
+	}()
+	// D decides once the replacement is in force, while its verdict
+	// may still be waiting to be reported.
+	for {
+		if def, _ := e.Policy().Default.Action(); def == agentturn.Block {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	dDone := make(chan struct{})
+	go func() {
+		defer close(dDone)
+		if _, err := e.Decide(ctx, call("call_d", "bash", `{"command":"d"}`)); err != nil {
+			t.Error(err)
+		}
+	}()
+	// Before the fix C and D finish while B is still reporting; after
+	// it they wait for B, and the timeout only lets B go on.
+	select {
+	case <-dDone:
+	case <-time.After(200 * time.Millisecond):
+	}
+	close(release)
+	at := <-cDone
+	<-dDone
+	<-bDone
+
+	replaced := "replaced the policy: c"
+	if !slices.Contains(at, replaced) {
+		t.Errorf("SetPolicy returned before its verdict was reported: %q", at)
+	}
+	got := seen()
+	idx := func(reason string) int { return slices.Index(got, reason) }
+	r := idx(replaced)
+	deny := "no rule allows bash: denied by default"
+	first := idx(deny)
+	if r < 0 || first < 0 || first < r || len(got) != 4 {
+		t.Errorf("verdicts = %q: want the activation, the replacement, then both decisions", got)
+	}
+}
+
+// An observer that holds a lock of its own and changes the rules when
+// it sees a decision, with the context it was handed, does not wait on
+// another goroutine's report, which is blocked on that same lock.
+func TestObserverChangesTheRulesOnADecision(t *testing.T) {
+	ctx := context.Background()
+	var (
+		m        sync.Mutex
+		e        *Engine
+		draining = make(chan struct{})
+		inDecide = make(chan struct{})
+		once     sync.Once
+	)
+	e, err := Build(Policy{Allow: rules(t, "read"), Default: Ask()}, testMatchers, WithObserver(func(octx context.Context, v Verdict) {
+		if v.Grant == KindActivate {
+			once.Do(func() { close(draining) })
+		}
+		m.Lock()
+		defer m.Unlock()
+		if v.CallID == "call_x" {
+			close(inDecide)
+			<-draining
+			if err := e.Grant(octx, Rule{Tool: "edit"}); err != nil {
+				t.Error(err)
+			}
+		}
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	decided := make(chan struct{})
+	go func() {
+		defer close(decided)
+		if _, err := e.Decide(ctx, call("call_x", "bash", `{"command":"x"}`)); err != nil {
+			t.Error(err)
+		}
+	}()
+	<-inDecide
+	granted := make(chan struct{})
+	go func() {
+		defer close(granted)
+		e.GrantSet(ctx, RuleSet{Source: Source{Name: "skill:s", Trusted: true}})
+	}()
+	for _, ch := range []chan struct{}{decided, granted} {
+		select {
+		case <-ch:
+		case <-time.After(5 * time.Second):
+			t.Fatal("an observer that changed the rules on a decision deadlocked")
+		}
+	}
+}
+
+// An observer that changes the rules or decides a call, with the
+// context it was handed, does not wait on the report it is part of.
+func TestObserverMayChangeTheRules(t *testing.T) {
+	ctx := context.Background()
+	var e *Engine
+	var got []string
+	e, err := Build(Policy{Allow: rules(t, "read"), Default: Ask()}, testMatchers, WithObserver(func(octx context.Context, v Verdict) {
+		got = append(got, v.Reason)
+		if v.Grant == KindReplace && v.Reason == "replaced the policy: outer" {
+			if err := e.SetPolicy(octx, Policy{Allow: rules(t, "read"), Default: Deny()}, "inner"); err != nil {
+				t.Error(err)
+			}
+			if _, err := e.Decide(octx, call("call_1", "bash", `{"command":"x"}`)); err != nil {
+				t.Error(err)
+			}
+			if err := e.Grant(octx, Rule{Tool: "edit"}); err != nil {
+				t.Error(err)
+			}
+		}
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		if err := e.SetPolicy(ctx, Policy{Allow: rules(t, "read"), Default: Ask()}, "outer"); err != nil {
+			t.Error(err)
+		}
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("an observer that changed the rules deadlocked")
+	}
+	// Inside the observer the order is not waited for: the inner
+	// decision may be reported before the inner replacement, which the
+	// observer's own change queued behind the verdict it is handling.
+	want := []string{"replaced the policy: outer", "no rule allows bash: denied by default", "replaced the policy: inner", "granted edit"}
+	sorted := slices.Sorted(slices.Values(got))
+	slices.Sort(want)
+	if !slices.Equal(sorted, want) {
+		t.Errorf("verdicts = %q\nwant %q in any order", got, want)
 	}
 }
 

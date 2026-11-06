@@ -52,6 +52,28 @@
       ]
     },
     {
+      "name": "a default deny cites the host's note",
+      "policy": {"allow": "read", "deny": "bash(rm:*)", "default": "deny", "default_note": "use read to read a file", "sources": [{"name": "user", "rank": 1, "trusted": true, "deny": "bash(curl:*)", "notes": {"bash(curl:*)": "no network"}}]},
+      "calls": [
+        {"tool": "bash", "args": {"command": "cat a.txt"}, "want": {"action": "block", "reason": "no rule allows bash: denied by default: use read to read a file"}},
+        {"tool": "bash", "args": {"command": "rm a.txt"}, "want": {"action": "block", "rule": "bash(rm:*)", "reason": "denied by bash(rm:*)"}},
+        {"tool": "bash", "args": {"command": "curl x"}, "want": {"action": "block", "rule": "bash(curl:*)", "source": "user", "reason": "denied by bash(curl:*): no network"}},
+        {"tool": "read", "args": {"path": "a.txt"}, "want": {"action": "allow", "rule": "read", "reason": "allowed by read"}}
+      ]
+    },
+    {
+      "name": "a default ask cites the host's note",
+      "policy": {"allow": "read", "default": "ask", "default_note": "an unattended run waits for an answer"},
+      "calls": [
+        {"tool": "bash", "args": {"command": "npm test"}, "want": {"action": "defer", "reason": "no rule allows bash: approval required by default: an unattended run waits for an answer"}}
+      ]
+    },
+    {
+      "name": "an allow default takes no note",
+      "policy": {"allow": "read", "default": "allow", "default_note": "nothing reads this"},
+      "build_error": "default_note"
+    },
+    {
       "name": "a deny beats a more specific ask",
       "policy": {"allow": "bash", "deny": "bash(rm:*)", "ask": "bash(rm -i:*)", "default": "allow"},
       "calls": [
@@ -689,6 +711,48 @@
          "records": [
            {"tool": "bash", "action": "allow", "rule": "bash(ls:*)", "source": "user", "reason": "granted bash(ls:*)", "by": "policy", "grant": "grant"},
            {"tool": "zsh", "action": "allow", "rule": "zsh(ls:*)", "source": "user", "reason": "granted zsh(ls:*)", "by": "policy", "grant": "grant"}
+         ]}
+      ]
+    },
+    {
+      "name": "a replacement of the policy is recorded",
+      "matchers": {
+        "bash": {"match": "prefix", "field": "command"},
+        "zsh": {"match": "prefix", "field": "command"},
+        "read": {"match": "prefix", "field": "path"}
+      },
+      "aliases": {"shell": ["bash", "zsh"]},
+      "policy": {"allow": "read", "default": "ask"},
+      "calls": [
+        {"tool": "bash", "args": {"command": "ls"}, "want": {"action": "defer", "reason": "no rule allows bash: approval required by default"}}
+      ],
+      "steps": [
+        {"replace": {"sources": [{"name": "managed", "rank": 2, "trusted": true, "hash": "sha256:1a", "deny": "bash(rm:*)"}, {"name": "project", "rank": 1, "trusted": true, "allow": "read"}], "default": "deny"},
+         "reason": "the tool list changed",
+         "records": [
+           {"action": "block", "reason": "replaced the policy: the tool list changed", "by": "policy", "grant": "replace", "policy": {"default": "deny", "sources": [{"name": "managed", "hash": "sha256:1a"}, {"name": "project"}], "allow": ["read"], "deny": ["bash(rm:*)"]}}
+         ],
+         "calls": [
+           {"tool": "bash", "args": {"command": "rm -rf /"}, "want": {"action": "block", "rule": "bash(rm:*)", "source": "managed", "reason": "denied by bash(rm:*)"}},
+           {"tool": "bash", "args": {"command": "make"}, "want": {"action": "block", "reason": "no rule allows bash: denied by default"}}
+         ]},
+        {"replace": {"sources": [{"name": "managed", "rank": 2, "trusted": true, "hash": "sha256:1a", "deny": "bash(rm:*)"}, {"name": "project", "rank": 1, "trusted": true, "hash": "sha256:2b", "allow": "read"}], "ask": "shell(git push:*)", "default": "allow"},
+         "records": [
+           {"action": "allow", "reason": "replaced the policy", "by": "policy", "grant": "replace", "policy": {"default": "allow", "sources": [{"name": "managed", "hash": "sha256:1a"}, {"name": "project", "hash": "sha256:2b"}], "ask": ["bash(git push:*)", "zsh(git push:*)"]}}
+         ],
+         "calls": [
+           {"tool": "zsh", "args": {"command": "git push origin"}, "want": {"action": "defer", "rule": "zsh(git push:*)", "reason": "approval required by zsh(git push:*)"}},
+           {"tool": "bash", "args": {"command": "npm test"}, "want": {"action": "allow", "reason": "allowed by default"}}
+         ]},
+        {"replace": {"allow": "read", "deny": "shell(rm:*)", "default": "ask", "default_note": "a person answers"},
+         "records": [
+           {"action": "defer", "reason": "replaced the policy", "by": "policy", "grant": "replace", "policy": {"default": "ask", "default_note": "a person answers", "allow": ["read"], "deny": ["bash(rm:*)", "zsh(rm:*)"]}}
+         ]},
+        {"replace": {"allow": "read"}, "reason": "no default", "build_error": "no_default"},
+        {"replace": {"allow": "read", "default": "allow", "default_note": "nothing reads this"}, "build_error": "default_note"},
+        {"replace": {"allow": "read", "default": "allow"},
+         "records": [
+           {"action": "allow", "reason": "replaced the policy", "by": "policy", "grant": "replace", "policy": {"default": "allow", "allow": ["read"]}}
          ]}
       ]
     }

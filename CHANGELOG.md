@@ -5,6 +5,61 @@ All user-visible changes to this library. The format follows
 uses [Semantic Versioning](https://semver.org/); before v1.0.0 minor
 versions may break the API.
 
+## Unreleased
+
+- Changed: RFC 0001 is draft 0.5, with a "Changes since 0.4" section.
+- Added: a default carries the host's note, `Deny().WithNote(n)` or
+  `Ask().WithNote(n)`, read back with `Default.Note` (#93). The reason
+  of a default deny becomes `no rule allows T: denied by default: N`,
+  and of a default ask `no rule allows T: approval required by
+  default: N`; a default with no note gives the reasons as before. A
+  deny rule keeps citing its own note. `Build` and `SetPolicy` refuse
+  a note on an allow default with `ErrDefaultNote`, `agentpolicy: an
+  allow default takes no note`, since no reason shows it. The
+  decisions corpus gains `default_note` on a case's policy. RFC 0001
+  draft 0.5, Building a policy and Deciding a subject.
+- Changed, breaking: `Engine.SetPolicy(ctx, p, reason)` takes a
+  context and the host's reason, and a replacement of the policy is
+  recorded (#94). It is journaled through the observer as a rule
+  change, before any call decided under it: a verdict with `Grant`
+  `KindReplace` (`replace`), the new default's action, the reason
+  `replaced the policy`, or `replaced the policy: <reason>` when the
+  host gives one, and `Verdict.Policy`, the policy put in force,
+  expanded through the aliases. Its record carries `policy`,
+  `{default, default_note?, sources?: [{name, hash?}]}`, and, for a
+  policy that names no sources, such as one built by hand, its
+  `allow`, `deny`, `ask` and `notes` as an activation's `set` holds
+  them. A refused replacement reports nothing. A caller adds a context
+  and a reason, `""` for none. The decisions corpus gains `replace`,
+  `reason` and `build_error` on a step, and `hash` on a source. RFC
+  0001 draft 0.5, Grants, The verdict and The record.
+- Changed: the record of a replacement lists the rules no hashed
+  source accounts for: every rule when a source has no hash, and
+  otherwise the host's own rules and any of no source the policy
+  names. A replacement ends the rules `Grant` and `GrantOver` added
+  to the policy; grant sets stay. `Verdict.Policy` is one copy shared
+  by every observer, which must not modify it.
+- Changed: a rule change's call, `SetPolicy`, `Grant`, `GrantOver`,
+  `GrantSet`, `Revoke` and `RevokeScope`, returns once its verdicts
+  have reached the observers, where it could return while another
+  goroutine was still reporting earlier changes, and `Decide` reports
+  its verdict after those of every change made before it read the
+  rules. Before, the next decision could be recorded ahead of the
+  replacement it was made under. An observer handed a change's verdict
+  passes on the context it was given when it changes the rules or
+  decides; with a context of its own it waits on itself. The
+  decisions corpus gains `calls` on a step, decided after it. RFC 0001
+  draft 0.5, Grant sets.
+  Every other verdict, a decision's included, reaches the observers
+  on a context marked the same way, so an observer that holds its own
+  lock and changes the rules on a decision does not wait on another
+  goroutine's report. A decision under way when the rules change may
+  still be recorded after the change; replace the policy between
+  turns.
+- Dependencies: agentturn v0.0.35 to v0.0.38, agenttool v0.0.28 to
+  v0.0.30 and openresponses v0.0.18 to v0.0.19. No API of this module
+  changes with them.
+
 ## v0.0.19 - 2026-11-03
 
 - Changed: RFC 0001 is draft 0.4, with a "Changes since 0.3" section.
