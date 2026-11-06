@@ -100,9 +100,9 @@ type Verdict struct {
 	// record rebuilds the grants in force from it without parsing
 	// Reason: [KindGrant] for [Engine.Grant], [KindGrantOver] for
 	// [Engine.GrantOver], [KindActivate] for an [Engine.GrantSet]
-	// activation, [KindGrantSet] for a rule it granted or refused, [KindRevoke] for [Engine.Revoke] and
-	// [KindRevokeScope] for [Engine.RevokeScope]. It is empty for every
-	// other verdict.
+	// activation, [KindGrantSet] for a rule it granted or refused, [KindRevoke] for [Engine.Revoke],
+	// [KindRevokeScope] for [Engine.RevokeScope] and [KindReplace] for
+	// [Engine.SetPolicy]. It is empty for every other verdict.
 	Grant GrantKind
 	// Source names the source a grant or a revocation names: the
 	// source a grant's rule or a grant set was made under, which is
@@ -133,6 +133,10 @@ type Verdict struct {
 	// rule is bare and appended its carve-out otherwise. The other rules
 	// of the expansion were granted beside it and leave Over nil.
 	Over *Rule
+	// Policy is, on a replacement ([KindReplace]), the policy
+	// [Engine.SetPolicy] put in force, expanded through the aliases;
+	// nil on every other verdict.
+	Policy *Policy
 }
 
 // GrantKind names what a grant or a revocation verdict did, as
@@ -156,6 +160,9 @@ const (
 	// KindRevokeScope is the sets of a scope [Engine.RevokeScope]
 	// removed.
 	KindRevokeScope GrantKind = "revoke_scope"
+	// KindReplace is a policy [Engine.SetPolicy] put in force:
+	// [Verdict.Policy] says what it is.
+	KindReplace GrantKind = "replace"
 )
 
 // Option configures an [Engine].
@@ -773,9 +780,20 @@ func (e *Engine) Policy() Policy {
 // changes can see both, so a product that must not straddle one
 // replaces the policy between turns. The scoped grants
 // [Engine.GrantSet] activated, the deferred calls and the review log
-// are untouched. The replacement is not journalled; a product records
-// it where it derives the policy.
-func (e *Engine) SetPolicy(p Policy) error {
+// are untouched.
+//
+// The replacement is journaled through the observer as a rule change,
+// as [Engine.Grant] journals one, so a reader of the record takes the
+// decisions after it as made under the new policy: a [Verdict] whose
+// Grant is [KindReplace], whose Action is the new default's, whose
+// Reason is "replaced the policy", followed by ": " and reason when the
+// host gives one, and whose Policy is the policy put in force, expanded
+// through the aliases. Its record names the default and the sources by
+// name and hash, and, for a policy that names no sources, such as one
+// built by hand, its lists too. reason is the host's words for why,
+// "the MCP server gh announced tools"; the rest of the text is fixed. A
+// refused replacement changes nothing and reports nothing.
+func (e *Engine) SetPolicy(ctx context.Context, p Policy, reason string) error {
 	if err := checkDefault(p.Default); err != nil {
 		return err
 	}
@@ -783,11 +801,25 @@ func (e *Engine) SetPolicy(p Policy) error {
 	if err := checkPolicy(p, e.matchers); err != nil {
 		return err
 	}
+	kept := clonePolicy(p)
 	e.mu.Lock()
-	defer e.mu.Unlock()
 	e.policy = clonePolicy(p)
 	e.gen++
+	e.enqueue(ctx, replaceVerdict(&kept, reason))
+	e.mu.Unlock()
+	e.report()
 	return nil
+}
+
+// replaceVerdict is the verdict of a replacement of the policy by p,
+// with the host's reason, if any.
+func replaceVerdict(p *Policy, reason string) Verdict {
+	action, _ := p.Default.Action()
+	text := "replaced the policy"
+	if reason != "" {
+		text += ": " + reason
+	}
+	return Verdict{Action: action, Reason: text, By: ByPolicy, Grant: KindReplace, Policy: p}
 }
 
 // PolicyOf returns the rules of one source, as a [RuleSet] carrying

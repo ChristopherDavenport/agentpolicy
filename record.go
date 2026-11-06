@@ -41,6 +41,8 @@ type verdictRecord struct {
 	Over    *overRecord     `json:"over,omitempty"`
 	Set     *setRecord      `json:"set,omitempty"`
 	Refused []refusalRecord `json:"refused,omitempty"`
+	// Policy is the policy a replacement put in force.
+	Policy *policyRecord `json:"policy,omitempty"`
 	// Quarantined names the items an input guard quarantined, each by
 	// reference: its type, id and call ID, never its content.
 	Quarantined []itemRef `json:"quarantined,omitempty"`
@@ -74,7 +76,10 @@ type verdictRecord struct {
 // answered; and an activation adds set, {rank, trusted, allow, deny,
 // ask, notes}, the set it kept, and refused, [{rule, reason}], so a
 // reader rebuilds the grants in force from these members
-// and never parses reason for them. A member the verdict leaves empty
+// and never parses reason for them. A replacement of the policy adds
+// grant "replace" and policy, {default, default_note, sources: [{name,
+// hash}]}, with allow, deny, ask and notes as a set's when the policy
+// names no sources. A member the verdict leaves empty
 // is left out, except action, so a record written before these
 // members existed reads the same. A record is strings,
 // numbers and flags, so encoding it cannot fail; a caller that wants
@@ -116,6 +121,9 @@ func (v Verdict) Record() (ns string, data []byte) {
 	}
 	for _, r := range v.Refused {
 		rec.Refused = append(rec.Refused, refusalRecord{Rule: r.Rule.String(), Reason: r.Reason})
+	}
+	if v.Policy != nil {
+		rec.Policy = policyOf(*v.Policy)
 	}
 	data, err := json.Marshal(rec)
 	if err != nil {
@@ -168,6 +176,41 @@ func setOf(set RuleSet) *setRecord {
 		return out
 	}
 	rec.Allow, rec.Deny, rec.Ask = list("allow", set.Allow), list("deny", set.Deny), list("ask", set.Ask)
+	return rec
+}
+
+// policyRecord is a policy as a replacement put it in force: its
+// default, as "allow", "deny" or "ask", and the default's note; the
+// sources it was merged from, each by name and hash, which is where a
+// reader finds the rules; and, for a policy that names no sources, its
+// lists and notes as a set's record holds them, since nothing else
+// would say what its rules are.
+type policyRecord struct {
+	Default     string                       `json:"default"`
+	DefaultNote string                       `json:"default_note,omitempty"`
+	Sources     []sourceRecord               `json:"sources,omitempty"`
+	Allow       []string                     `json:"allow,omitempty"`
+	Deny        []string                     `json:"deny,omitempty"`
+	Ask         []string                     `json:"ask,omitempty"`
+	Notes       map[string]map[string]string `json:"notes,omitempty"`
+}
+
+// sourceRecord names a source by its name and hash.
+type sourceRecord struct {
+	Name string `json:"name"`
+	Hash string `json:"hash,omitempty"`
+}
+
+// policyOf is the record of a policy a replacement put in force.
+func policyOf(p Policy) *policyRecord {
+	rec := &policyRecord{Default: p.Default.String(), DefaultNote: p.Default.Note()}
+	for _, src := range p.Sources {
+		rec.Sources = append(rec.Sources, sourceRecord{Name: src.Name, Hash: src.Hash})
+	}
+	if len(p.Sources) == 0 {
+		set := setOf(RuleSet{Allow: p.Allow, Deny: p.Deny, Ask: p.Ask})
+		rec.Allow, rec.Deny, rec.Ask, rec.Notes = set.Allow, set.Deny, set.Ask, set.Notes
+	}
 	return rec
 }
 

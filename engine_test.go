@@ -910,7 +910,7 @@ func TestSetPolicy(t *testing.T) {
 	}
 	// The product re-derives its rules when its tool list changes. The
 	// hook value the loop holds is the same one.
-	if err := e.SetPolicy(Policy{Allow: rules(t, "read mcp__cocode__lint"), Default: Ask()}); err != nil {
+	if err := e.SetPolicy(ctx, Policy{Allow: rules(t, "read mcp__cocode__lint"), Default: Ask()}, ""); err != nil {
 		t.Fatal(err)
 	}
 	if d, err := e.BeforeToolCall()(ctx, late); err != nil || d.Action != agentturn.Allow || d.Reason != "allowed by mcp__cocode__lint" {
@@ -932,7 +932,7 @@ func TestSetPolicy(t *testing.T) {
 		{"a glob in the allow list", Policy{Allow: rules(t, "mcp__*"), Default: Ask()}, ErrToolGlob},
 		{"a note on an allow default", Policy{Allow: rules(t, "read"), Default: Allow().WithNote("x")}, ErrDefaultNote},
 	} {
-		if err := e.SetPolicy(tc.policy); !errors.Is(err, tc.err) {
+		if err := e.SetPolicy(ctx, tc.policy, ""); !errors.Is(err, tc.err) {
 			t.Errorf("%s: err = %v, want %v", tc.name, err, tc.err)
 		}
 	}
@@ -949,6 +949,71 @@ func TestSetPolicy(t *testing.T) {
 	}
 	if d, _ := e.Decide(ctx, call("call_2", "mcp__cocode__lint", `{}`)); d.Action != agentturn.Block || d.Reason != "denied by mcp__*" {
 		t.Errorf("a glob over a late tool: %+v", d)
+	}
+}
+
+// A replacement of the policy is a verdict of its own, reported before
+// any call decided under it, so a reader of the record takes the
+// decisions after it as made under the replacement (#94). Its action is
+// the new default's, its reason the fixed text and the host's reason,
+// and it carries the policy put in force. A refused replacement reports
+// nothing.
+func TestSetPolicyReported(t *testing.T) {
+	ctx := context.Background()
+	var seen []Verdict
+	e, err := Build(Policy{Allow: rules(t, "read"), Default: Ask()}, testMatchers, WithObserver(func(_ context.Context, v Verdict) { seen = append(seen, v) }))
+	if err != nil {
+		t.Fatal(err)
+	}
+	next := Policy{Allow: rules(t, "read"), Deny: rules(t, "bash(rm:*)"), Default: Deny().WithNote("use read to read a file")}
+	if err := e.SetPolicy(ctx, next, "the tool list changed"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.Decide(ctx, call("call_1", "bash", `{"command":"cat a"}`)); err != nil {
+		t.Fatal(err)
+	}
+	if len(seen) != 2 {
+		t.Fatalf("observed %d verdicts, want the replacement and the decision: %+v", len(seen), seen)
+	}
+	r := seen[0]
+	if r.Grant != KindReplace || r.Action != agentturn.Block || r.Reason != "replaced the policy: the tool list changed" || r.By != ByPolicy || r.Rule != nil || r.Tool != "" || r.Source != "" || r.Scope != "" {
+		t.Errorf("the replacement's verdict: %+v", r)
+	}
+	if r.Policy == nil || r.Policy.Default.String() != "deny" || r.Policy.Default.Note() != "use read to read a file" || len(r.Policy.Deny) != 1 || r.Policy.Deny[0].String() != "bash(rm:*)" {
+		t.Errorf("the replacement's policy: %+v", r.Policy)
+	}
+	if d := seen[1]; d.CallID != "call_1" || d.Reason != "no rule allows bash: denied by default: use read to read a file" {
+		t.Errorf("the decision after the replacement: %+v", d)
+	}
+
+	// No reason from the host is the fixed text alone, and the action
+	// is the new default's.
+	for _, tc := range []struct {
+		def    Default
+		action agentturn.ToolAction
+	}{{Allow(), agentturn.Allow}, {Ask(), agentturn.Defer}, {Deny(), agentturn.Block}} {
+		seen = nil
+		if err := e.SetPolicy(ctx, Policy{Allow: rules(t, "read"), Default: tc.def}, ""); err != nil {
+			t.Fatal(err)
+		}
+		if len(seen) != 1 || seen[0].Action != tc.action || seen[0].Reason != "replaced the policy" || seen[0].Grant != KindReplace {
+			t.Errorf("SetPolicy under %s reported %+v", tc.def, seen)
+		}
+	}
+
+	// A refused replacement changes nothing and reports nothing.
+	seen = nil
+	for _, p := range []Policy{
+		{Allow: rules(t, "read")},
+		{Allow: rules(t, "web(x:*)"), Default: Ask()},
+		{Allow: rules(t, "read"), Default: Allow().WithNote("x")},
+	} {
+		if err := e.SetPolicy(ctx, p, "refused"); err == nil {
+			t.Errorf("SetPolicy(%+v) took effect", p)
+		}
+	}
+	if len(seen) != 0 {
+		t.Errorf("a refused replacement reported %+v", seen)
 	}
 }
 

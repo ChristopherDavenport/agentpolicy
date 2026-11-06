@@ -18,6 +18,21 @@ versions may break the API.
   allow default takes no note`, since no reason shows it. The
   decisions corpus gains `default_note` on a case's policy. RFC 0001
   draft 0.5, Building a policy and Deciding a subject.
+- Changed, breaking: `Engine.SetPolicy(ctx, p, reason)` takes a
+  context and the host's reason, and a replacement of the policy is
+  recorded (#94). It is journaled through the observer as a rule
+  change, before any call decided under it: a verdict with `Grant`
+  `KindReplace` (`replace`), the new default's action, the reason
+  `replaced the policy`, or `replaced the policy: <reason>` when the
+  host gives one, and `Verdict.Policy`, the policy put in force,
+  expanded through the aliases. Its record carries `policy`,
+  `{default, default_note?, sources?: [{name, hash?}]}`, and, for a
+  policy that names no sources, such as one built by hand, its
+  `allow`, `deny`, `ask` and `notes` as an activation's `set` holds
+  them. A refused replacement reports nothing. A caller adds a context
+  and a reason, `""` for none. The decisions corpus gains `replace`,
+  `reason` and `build_error` on a step, and `hash` on a source. RFC
+  0001 draft 0.5, Grants, The verdict and The record.
 - Dependencies: agentturn v0.0.35 to v0.0.38, agenttool v0.0.28 to
   v0.0.30 and openresponses v0.0.18 to v0.0.19. No API of this module
   changes with them.

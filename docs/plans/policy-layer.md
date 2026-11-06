@@ -197,8 +197,10 @@ func (e *Engine) Sources() []Source
 // SetPolicy replaces the rules without rebuilding the matchers, which
 // are the expensive half and do not change, so a product re-derives
 // its policy when its tool list changes without replacing the config
-// the loop holds. (Round 2, issue 10.)
-func (e *Engine) SetPolicy(p Policy) error
+// the loop holds. (Round 2, issue 10.) The replacement is a verdict
+// of its own, with the host's reason, reported before any call decided
+// under it. (#94.)
+func (e *Engine) SetPolicy(ctx context.Context, p Policy, reason string) error
 
 // PolicyOf returns one source's rules, which is what a product
 // persists into that source's file. (Round 2, issue 7.)

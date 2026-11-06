@@ -713,6 +713,36 @@
            {"tool": "zsh", "action": "allow", "rule": "zsh(ls:*)", "source": "user", "reason": "granted zsh(ls:*)", "by": "policy", "grant": "grant"}
          ]}
       ]
+    },
+    {
+      "name": "a replacement of the policy is recorded",
+      "matchers": {
+        "bash": {"match": "prefix", "field": "command"},
+        "zsh": {"match": "prefix", "field": "command"},
+        "read": {"match": "prefix", "field": "path"}
+      },
+      "aliases": {"shell": ["bash", "zsh"]},
+      "policy": {"allow": "read", "default": "ask"},
+      "calls": [
+        {"tool": "bash", "args": {"command": "ls"}, "want": {"action": "defer", "reason": "no rule allows bash: approval required by default"}}
+      ],
+      "steps": [
+        {"replace": {"sources": [{"name": "managed", "rank": 2, "trusted": true, "hash": "sha256:1a", "deny": "bash(rm:*)"}, {"name": "project", "rank": 1, "trusted": true, "allow": "read"}], "default": "deny"},
+         "reason": "the tool list changed",
+         "records": [
+           {"action": "block", "reason": "replaced the policy: the tool list changed", "by": "policy", "grant": "replace", "policy": {"default": "deny", "sources": [{"name": "managed", "hash": "sha256:1a"}, {"name": "project"}]}}
+         ]},
+        {"replace": {"allow": "read", "deny": "shell(rm:*)", "default": "ask", "default_note": "a person answers"},
+         "records": [
+           {"action": "defer", "reason": "replaced the policy", "by": "policy", "grant": "replace", "policy": {"default": "ask", "default_note": "a person answers", "allow": ["read"], "deny": ["bash(rm:*)", "zsh(rm:*)"]}}
+         ]},
+        {"replace": {"allow": "read"}, "reason": "no default", "build_error": "no_default"},
+        {"replace": {"allow": "read", "default": "allow", "default_note": "nothing reads this"}, "build_error": "default_note"},
+        {"replace": {"allow": "read", "default": "allow"},
+         "records": [
+           {"action": "allow", "reason": "replaced the policy", "by": "policy", "grant": "replace", "policy": {"default": "allow", "allow": ["read"]}}
+         ]}
+      ]
     }
   ]
 }

@@ -155,6 +155,7 @@ func (s corpusRules) parse(t *testing.T, notes map[string]string) []Rule {
 
 type corpusSource struct {
 	Name    string            `json:"name"`
+	Hash    string            `json:"hash"`
 	Rank    int               `json:"rank"`
 	Trusted bool              `json:"trusted"`
 	Allow   corpusRules       `json:"allow"`
@@ -165,7 +166,7 @@ type corpusSource struct {
 
 func (s corpusSource) set(t *testing.T) RuleSet {
 	return RuleSet{
-		Source: Source{Name: s.Name, Rank: s.Rank, Trusted: s.Trusted},
+		Source: Source{Name: s.Name, Hash: s.Hash, Rank: s.Rank, Trusted: s.Trusted},
 		Allow:  s.Allow.parse(t, s.Notes),
 		Deny:   s.Deny.parse(t, s.Notes),
 		Ask:    s.Ask.parse(t, s.Notes),
@@ -233,19 +234,11 @@ type corpusMatcher struct {
 }
 
 type decisionCase struct {
-	Name     string                   `json:"name"`
-	Matchers map[string]corpusMatcher `json:"matchers"`
-	Aliases  map[string][]string      `json:"aliases"`
-	Policy   struct {
-		Sources []corpusSource `json:"sources"`
-		Allow   corpusRules    `json:"allow"`
-		Deny    corpusRules    `json:"deny"`
-		Ask     corpusRules    `json:"ask"`
-		Default string         `json:"default"`
-		// DefaultNote is the host's note on the default.
-		DefaultNote string `json:"default_note"`
-	} `json:"policy"`
-	BuildError string `json:"build_error"`
+	Name       string                   `json:"name"`
+	Matchers   map[string]corpusMatcher `json:"matchers"`
+	Aliases    map[string][]string      `json:"aliases"`
+	Policy     corpusPolicy             `json:"policy"`
+	BuildError string                   `json:"build_error"`
 	Grants     []struct {
 		Source  corpusSource `json:"source"`
 		Allow   corpusRules  `json:"allow"`
@@ -271,8 +264,44 @@ type decisionCase struct {
 	Steps []corpusStep `json:"steps"`
 }
 
-// corpusStep is a grant or a revocation made after the case's calls:
-// exactly one of Grant, GrantOver, Revoke and RevokeScope, under the
+// corpusPolicy is a policy as a case writes it: sources merged, then
+// the host's own rules appended, then the default and its note.
+type corpusPolicy struct {
+	Sources []corpusSource `json:"sources"`
+	Allow   corpusRules    `json:"allow"`
+	Deny    corpusRules    `json:"deny"`
+	Ask     corpusRules    `json:"ask"`
+	Default string         `json:"default"`
+	// DefaultNote is the host's note on the default.
+	DefaultNote string `json:"default_note"`
+}
+
+func (cp corpusPolicy) policy(t *testing.T) Policy {
+	t.Helper()
+	sets := make([]RuleSet, 0, len(cp.Sources))
+	for _, s := range cp.Sources {
+		sets = append(sets, s.set(t))
+	}
+	p, err := Merge(sets...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.Allow = append(p.Allow, cp.Allow.parse(t, nil)...)
+	p.Deny = append(p.Deny, cp.Deny.parse(t, nil)...)
+	p.Ask = append(p.Ask, cp.Ask.parse(t, nil)...)
+	def, ok := corpusDefaults[cp.Default]
+	if !ok {
+		t.Fatalf("unknown default %q", cp.Default)
+	}
+	p.Default = def
+	if cp.DefaultNote != "" {
+		p.Default = def.WithNote(cp.DefaultNote)
+	}
+	return p
+}
+
+// corpusStep is a rule change made after the case's calls: exactly
+// one of Grant, GrantOver, Revoke, RevokeScope and Replace, under the
 // grant scope Scope, with the records of the verdicts it reports, none
 // when absent.
 type corpusStep struct {
@@ -289,6 +318,12 @@ type corpusStep struct {
 	Removed int               `json:"removed"`
 	Refused string            `json:"refused"`
 	Records []json.RawMessage `json:"records"`
+	// Replace is a policy the step puts in force with SetPolicy, with
+	// the host's Reason; BuildError is the kind SetPolicy refuses it
+	// with, when it does.
+	Replace    *corpusPolicy `json:"replace"`
+	Reason     string        `json:"reason"`
+	BuildError string        `json:"build_error"`
 }
 
 // rule is the step's one rule, stamped with its source.
@@ -457,25 +492,7 @@ func runDecisionCase(t *testing.T, defaults map[string]corpusMatcher, tc decisio
 		toolOf(c.Tool)
 	}
 
-	sets := make([]RuleSet, 0, len(tc.Policy.Sources))
-	for _, s := range tc.Policy.Sources {
-		sets = append(sets, s.set(t))
-	}
-	p, err := Merge(sets...)
-	if err != nil {
-		t.Fatal(err)
-	}
-	p.Allow = append(p.Allow, tc.Policy.Allow.parse(t, nil)...)
-	p.Deny = append(p.Deny, tc.Policy.Deny.parse(t, nil)...)
-	p.Ask = append(p.Ask, tc.Policy.Ask.parse(t, nil)...)
-	def, ok := corpusDefaults[tc.Policy.Default]
-	if !ok {
-		t.Fatalf("unknown default %q", tc.Policy.Default)
-	}
-	p.Default = def
-	if tc.Policy.DefaultNote != "" {
-		p.Default = def.WithNote(tc.Policy.DefaultNote)
-	}
+	p := tc.Policy.policy(t)
 
 	var last Verdict
 	var seen []Verdict
@@ -657,8 +674,23 @@ func runDecisionCase(t *testing.T, defaults map[string]corpusMatcher, tc decisio
 			if n := e.RevokeScope(sctx); n != s.Removed {
 				t.Errorf("%s: RevokeScope removed %d rules, want %d", name, n, s.Removed)
 			}
+		case s.Replace != nil:
+			err := e.SetPolicy(sctx, s.Replace.policy(t), s.Reason)
+			if s.BuildError == "" {
+				if err != nil {
+					t.Errorf("%s: SetPolicy: %v", name, err)
+				}
+				break
+			}
+			want, ok := buildErrors[s.BuildError]
+			if !ok {
+				t.Fatalf("%s: unknown build error %q", name, s.BuildError)
+			}
+			if err == nil || (want != nil && !errors.Is(err, want)) {
+				t.Errorf("%s: SetPolicy err = %v, want %s", name, err, s.BuildError)
+			}
 		default:
-			t.Fatalf("%s: no grant, grant_over, revoke or revoke_scope", name)
+			t.Fatalf("%s: no grant, grant_over, revoke, revoke_scope or replace", name)
 		}
 		checkRecords(t, name, seen, s.Records)
 	}
