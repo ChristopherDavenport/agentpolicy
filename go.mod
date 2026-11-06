@@ -3,7 +3,7 @@ module github.com/ChristopherDavenport/agentpolicy
 go 1.25
 
 require (
-	github.com/ChristopherDavenport/agenttool v0.0.28
-	github.com/ChristopherDavenport/agentturn v0.0.35
-	github.com/ChristopherDavenport/openresponses v0.0.18
+	github.com/ChristopherDavenport/agenttool v0.0.30
+	github.com/ChristopherDavenport/agentturn v0.0.38
+	github.com/ChristopherDavenport/openresponses v0.0.19
 )

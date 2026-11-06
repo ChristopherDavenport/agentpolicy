@@ -5,6 +5,12 @@ All user-visible changes to this library. The format follows
 uses [Semantic Versioning](https://semver.org/); before v1.0.0 minor
 versions may break the API.
 
+## Unreleased
+
+- Dependencies: agentturn v0.0.35 to v0.0.38, agenttool v0.0.28 to
+  v0.0.30 and openresponses v0.0.18 to v0.0.19. No API of this module
+  changes with them.
+
 ## v0.0.19 - 2026-11-03
 
 - Changed: RFC 0001 is draft 0.4, with a "Changes since 0.3" section.
