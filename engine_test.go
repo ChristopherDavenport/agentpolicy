@@ -1110,6 +1110,57 @@ func TestReplacementReportedBeforeDecisionsUnderIt(t *testing.T) {
 	}
 }
 
+// An observer that holds a lock of its own and changes the rules when
+// it sees a decision, with the context it was handed, does not wait on
+// another goroutine's report, which is blocked on that same lock.
+func TestObserverChangesTheRulesOnADecision(t *testing.T) {
+	ctx := context.Background()
+	var (
+		m        sync.Mutex
+		e        *Engine
+		draining = make(chan struct{})
+		inDecide = make(chan struct{})
+		once     sync.Once
+	)
+	e, err := Build(Policy{Allow: rules(t, "read"), Default: Ask()}, testMatchers, WithObserver(func(octx context.Context, v Verdict) {
+		if v.Grant == KindActivate {
+			once.Do(func() { close(draining) })
+		}
+		m.Lock()
+		defer m.Unlock()
+		if v.CallID == "call_x" {
+			close(inDecide)
+			<-draining
+			if err := e.Grant(octx, Rule{Tool: "edit"}); err != nil {
+				t.Error(err)
+			}
+		}
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	decided := make(chan struct{})
+	go func() {
+		defer close(decided)
+		if _, err := e.Decide(ctx, call("call_x", "bash", `{"command":"x"}`)); err != nil {
+			t.Error(err)
+		}
+	}()
+	<-inDecide
+	granted := make(chan struct{})
+	go func() {
+		defer close(granted)
+		e.GrantSet(ctx, RuleSet{Source: Source{Name: "skill:s", Trusted: true}})
+	}()
+	for _, ch := range []chan struct{}{decided, granted} {
+		select {
+		case <-ch:
+		case <-time.After(5 * time.Second):
+			t.Fatal("an observer that changed the rules on a decision deadlocked")
+		}
+	}
+}
+
 // An observer that changes the rules or decides a call, with the
 // context it was handed, does not wait on the report it is part of.
 func TestObserverMayChangeTheRules(t *testing.T) {

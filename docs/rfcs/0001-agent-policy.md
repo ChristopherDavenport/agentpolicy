@@ -760,7 +760,10 @@ names has no hash, since its name alone says no version of its rules,
 and otherwise the rules of no source the policy names, the host's own
 among them, which for a policy a host built by hand, naming no
 sources, is every rule. A reader MUST take the decisions after the
-record as made under the replacement. A replacement that is refused
+record as made under the replacement, except that a decision under way
+when the policy was replaced, which read the rules before the
+replacement, may be recorded after it; a host that must not have one
+replaces the policy between turns. A replacement that is refused
 records nothing.
 
 A replacement replaces the policy whole, the rules that grants and
@@ -946,7 +949,15 @@ are reported, unless an observer made it while handling another
 change's verdict, which would otherwise wait on itself. A decision's
 verdict MUST be reported after those of every change made before the
 decision read the rules, with the same exception, so a reader takes a
-decision recorded after a change as made under it. An observer MAY
+decision recorded after a change as made under it. A decision under
+way when the rules change, which read them before the change, may
+still be recorded after it, since holding the order across its hooks
+and its questions in the run would stall every change behind them; a
+host that must not have one changes the rules between turns. A
+binding MAY also hand an observer a decision's verdict with a context
+an observer's own call does not wait under, as it hands a change's,
+so an observer that holds a lock of its own while it changes the
+rules never waits on a report that waits on that lock. An observer MAY
 therefore be called on another thread than the one that made the
 change, and with the caller's context values, the grant scope among
 them, detached from its cancellation and deadline, so a verdict

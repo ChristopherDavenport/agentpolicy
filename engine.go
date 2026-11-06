@@ -189,9 +189,13 @@ type Option func(*Engine)
 // cancellation and deadline, and is marked as this engine's report: an
 // observer that changes the rules or decides a call passes that
 // context on, and its change is then queued behind the verdict it is
-// handling and reported after it returns, without waiting on itself. An
-// observer that makes such a call with a context of its own waits on
-// the report it is part of, forever. An observer that panics on one
+// handling and reported after it returns, without waiting on itself.
+// Every other verdict's context is marked the same way, so an observer
+// that holds a lock of its own and changes the rules on a decision
+// does not wait on another goroutine's report, which may be waiting on
+// that lock; the change may then reach the observers after the call
+// returns. An observer that makes such a call with a context of its
+// own may wait on a report it is part of, forever. An observer that panics on one
 // does not keep the others from any observer; the panic is raised
 // again once the queue is reported.
 //
@@ -1924,7 +1928,13 @@ func (e *Engine) carvedOut(list []Rule, r Rule, args json.RawMessage) bool {
 	return false
 }
 
+// observe hands a verdict that is no rule change's to the observers,
+// with ctx marked as observing this engine, as [Engine.drain] marks a
+// change's: an observer that changes the rules with it while holding a
+// lock of its own does not wait on a report another goroutine is
+// making, which may be waiting on that lock to call the observer.
 func (e *Engine) observe(ctx context.Context, v Verdict) {
+	ctx = context.WithValue(ctx, observingKey{}, e)
 	for _, fn := range e.observers {
 		fn(ctx, v)
 	}

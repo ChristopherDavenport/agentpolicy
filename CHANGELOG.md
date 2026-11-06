@@ -50,6 +50,12 @@ versions may break the API.
   decides; with a context of its own it waits on itself. The
   decisions corpus gains `calls` on a step, decided after it. RFC 0001
   draft 0.5, Grant sets.
+  Every other verdict, a decision's included, reaches the observers
+  on a context marked the same way, so an observer that holds its own
+  lock and changes the rules on a decision does not wait on another
+  goroutine's report. A decision under way when the rules change may
+  still be recorded after the change; replace the policy between
+  turns.
 - Dependencies: agentturn v0.0.35 to v0.0.38, agenttool v0.0.28 to
   v0.0.30 and openresponses v0.0.18 to v0.0.19. No API of this module
   changes with them.
