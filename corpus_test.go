@@ -242,6 +242,8 @@ type decisionCase struct {
 		Deny    corpusRules    `json:"deny"`
 		Ask     corpusRules    `json:"ask"`
 		Default string         `json:"default"`
+		// DefaultNote is the host's note on the default.
+		DefaultNote string `json:"default_note"`
 	} `json:"policy"`
 	BuildError string `json:"build_error"`
 	Grants     []struct {
@@ -326,9 +328,10 @@ func checkRecords(t *testing.T, step string, got []Verdict, want []json.RawMessa
 // buildErrors is the sentinel each build error kind is in the
 // reference.
 var buildErrors = map[string]error{
-	"no_default": ErrNoDefault,
-	"no_matcher": ErrNoMatcher,
-	"tool_glob":  ErrToolGlob,
+	"no_default":   ErrNoDefault,
+	"no_matcher":   ErrNoMatcher,
+	"tool_glob":    ErrToolGlob,
+	"default_note": ErrDefaultNote,
 	// The reference has no sentinel for an invalid rule; any error
 	// that is none of the others is one.
 	"invalid_rule": nil,
@@ -470,6 +473,9 @@ func runDecisionCase(t *testing.T, defaults map[string]corpusMatcher, tc decisio
 		t.Fatalf("unknown default %q", tc.Policy.Default)
 	}
 	p.Default = def
+	if tc.Policy.DefaultNote != "" {
+		p.Default = def.WithNote(tc.Policy.DefaultNote)
+	}
 
 	var last Verdict
 	var seen []Verdict

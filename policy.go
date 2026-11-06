@@ -14,6 +14,7 @@ import (
 type Default struct {
 	action agentturn.ToolAction
 	set    bool
+	note   string
 }
 
 // Allow is the default that runs a call no rule mentions.
@@ -27,6 +28,22 @@ func Ask() Default { return Default{action: agentturn.Defer, set: true} }
 
 // Action returns the action and whether the default was set.
 func (d Default) Action() (agentturn.ToolAction, bool) { return d.action, d.set }
+
+// WithNote returns d with the note n, the host's sentence on why a
+// call no rule allows is denied or asked about. The reason of a
+// default deny or ask ends with it, after ": ", so the model reads it
+// with the refusal: "no rule allows bash: denied by default: use read
+// to read a file". The default is always the host's, never a source's,
+// so the note is trusted text. A deny rule keeps its own note, cited
+// in its own reason. [Build] and [Engine.SetPolicy] refuse a note on
+// an allow default with [ErrDefaultNote], since no reason shows it.
+func (d Default) WithNote(n string) Default {
+	d.note = n
+	return d
+}
+
+// Note returns the note [Default.WithNote] gave the default.
+func (d Default) Note() string { return d.note }
 
 // String returns "allow", "deny", "ask" or "unset".
 func (d Default) String() string {

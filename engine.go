@@ -32,6 +32,10 @@ var (
 	// server glob, "mcp__S__*" ([Rule.ServerGlob]), and one with a
 	// specifier, which names no matcher. The error names the rule.
 	ErrToolGlob = errors.New("agentpolicy: tool-name glob")
+	// ErrDefaultNote is returned for an allow default with a note
+	// ([Default.WithNote]): no reason cites an allow default's note,
+	// so the model would never read it.
+	ErrDefaultNote = errors.New("agentpolicy: an allow default takes no note")
 )
 
 // Verdict is what was decided and why, for recording: the engine's
@@ -542,14 +546,15 @@ const (
 
 // Build validates the policy against the matchers and returns the
 // runtime form. It fails with [ErrNoDefault] when the default is unset,
+// with [ErrDefaultNote] when an allow default has a note,
 // with [ErrNoMatcher] when a rule has a specifier and its tool has no
 // matcher, and with [ErrToolGlob] when a rule's tool name is a glob
 // the engine will not honour, so a rule that could never match is
 // refused here rather than ignored at the first call. The lists are
 // copied; the caller's slices are not retained.
 func Build(p Policy, matchers map[string]ToolMatcher, opts ...Option) (*Engine, error) {
-	if _, ok := p.Default.Action(); !ok {
-		return nil, ErrNoDefault
+	if err := checkDefault(p.Default); err != nil {
+		return nil, err
 	}
 	e := &Engine{
 		matchers: matchers,
@@ -570,6 +575,19 @@ func Build(p Policy, matchers map[string]ToolMatcher, opts ...Option) (*Engine, 
 	}
 	e.policy = clonePolicy(p)
 	return e, nil
+}
+
+// checkDefault refuses a default that is unset, and an allow default
+// with a note, which no reason would show.
+func checkDefault(d Default) error {
+	action, ok := d.Action()
+	switch {
+	case !ok:
+		return ErrNoDefault
+	case action == agentturn.Allow && d.note != "":
+		return ErrDefaultNote
+	}
+	return nil
 }
 
 // checkAliases refuses an alias table that would drop a rule or name a
@@ -758,8 +776,8 @@ func (e *Engine) Policy() Policy {
 // are untouched. The replacement is not journalled; a product records
 // it where it derives the policy.
 func (e *Engine) SetPolicy(p Policy) error {
-	if _, ok := p.Default.Action(); !ok {
-		return ErrNoDefault
+	if err := checkDefault(p.Default); err != nil {
+		return err
 	}
 	p = e.expandPolicy(p)
 	if err := checkPolicy(p, e.matchers); err != nil {
@@ -1745,11 +1763,15 @@ func (e *Engine) decideSubject(a active, tool string, c confinement, args json.R
 		return agentturn.Allow, &r, "allowed by " + r.cite(), true
 	}
 	action, _ := p.Default.Action()
+	note := ""
+	if n := p.Default.Note(); n != "" {
+		note = ": " + n
+	}
 	switch action {
 	case agentturn.Block:
-		return action, nil, "no rule allows " + tool + ": denied by default", true
+		return action, nil, "no rule allows " + tool + ": denied by default" + note, true
 	case agentturn.Defer:
-		return action, nil, "no rule allows " + tool + ": approval required by default", true
+		return action, nil, "no rule allows " + tool + ": approval required by default" + note, true
 	}
 	return agentturn.Allow, nil, "allowed by default", true
 }

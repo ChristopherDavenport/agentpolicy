@@ -7,6 +7,17 @@ versions may break the API.
 
 ## Unreleased
 
+- Changed: RFC 0001 is draft 0.5, with a "Changes since 0.4" section.
+- Added: a default carries the host's note, `Deny().WithNote(n)` or
+  `Ask().WithNote(n)`, read back with `Default.Note` (#93). The reason
+  of a default deny becomes `no rule allows T: denied by default: N`,
+  and of a default ask `no rule allows T: approval required by
+  default: N`; a default with no note gives the reasons as before. A
+  deny rule keeps citing its own note. `Build` and `SetPolicy` refuse
+  a note on an allow default with `ErrDefaultNote`, `agentpolicy: an
+  allow default takes no note`, since no reason shows it. The
+  decisions corpus gains `default_note` on a case's policy. RFC 0001
+  draft 0.5, Building a policy and Deciding a subject.
 - Dependencies: agentturn v0.0.35 to v0.0.38, agenttool v0.0.28 to
   v0.0.30 and openresponses v0.0.18 to v0.0.19. No API of this module
   changes with them.

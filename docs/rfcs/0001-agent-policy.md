@@ -1,6 +1,6 @@
 # RFC 0001: Agent Policy
 
-Status: draft 0.4
+Status: draft 0.5
 Author: Christopher Davenport
 Discussion: to be opened against this repository. The Go module at its
 root is the reference binding. agentturn RFC 0001 is the loop whose
@@ -120,8 +120,9 @@ RFC 2119.
 - **Server glob**: the tool-name glob `mcp__S__*` naming every tool of
   one MCP server `S`, the one glob an allow list honours.
 - **List**: the deny, ask or allow rules of a policy.
-- **Policy**: three lists, a default, the sources the rules came from,
-  and the allow rules withheld from untrusted sources.
+- **Policy**: three lists, a default with the host's note or none, the
+  sources the rules came from, and the allow rules withheld from
+  untrusted sources.
 - **Source**: where a set of rules came from: a name, a path and a hash
   that identify it, whether the user trusts it, and a rank.
 - **Matcher**: a function from a specifier and one subject's arguments
@@ -433,6 +434,7 @@ engine. It MUST refuse, with these error kinds:
 | `tool_glob` | a tool-name glob other than a server glob is in the allow list | `agentpolicy: tool-name glob: R is not honoured in the allow list` |
 | `tool_glob` | a tool-name glob has a specifier | `agentpolicy: tool-name glob: R takes no specifier` |
 | `invalid_rule` | a rule has no tool name, or the alias table is refused | `agentpolicy: rule "R": missing tool name` for the first |
+| `default_note` | an allow default carries a note | `agentpolicy: an allow default takes no note` |
 
 `R` is the rule's string form. The texts matter because a grant's
 refusal reports them, and a front shows them. A binding MAY append a
@@ -444,6 +446,15 @@ with `agentpolicy: cannot grant a carve-out: R`.
 The rules are expanded through the alias table before they are
 checked. The default MUST be set explicitly: a deny list written on its
 own never allows everything else by accident.
+
+A default MAY carry a **note**, which only the host sets: the default
+is always the host's and never a source's, so its note is trusted text,
+as a note on a rule of the host's own source is. It is how a host tells
+the model what a refusal by default means for it: a host that denies
+by default to steer the model to a tool it does allow, `read` rather
+than a shell's `cat`, says so, and a host whose deny default means "do
+not try another way" says that. No clause is fixed for every host. A
+note on an allow default is refused, since no reason shows it.
 
 A tool-name glob is honoured in the deny and ask lists, where the
 reference agents honour one. In the allow list a server glob is
@@ -517,8 +528,14 @@ rule for the record and the front.
 | confined | allow | the ask rule passed over | `confined by X, so R does not ask`, or `confined, so R does not ask` when the tool names nothing |
 | allow | allow | the allow rule | `allowed by C` |
 | default allow | allow | none | `allowed by default` |
-| default deny | block | none | `no rule allows T: denied by default` |
-| default ask | defer | none | `no rule allows T: approval required by default` |
+| default deny | block | none | `no rule allows T: denied by default`, then `: N` when the default has the note `N` |
+| default ask | defer | none | `no rule allows T: approval required by default`, then `: N` when the default has the note `N` |
+
+The reason for a default deny MUST be `no rule allows T: denied by
+default`, followed by `: N` when the default has the note `N`, and a
+default ask's reason gains `: N` in the same way. A deny or ask rule
+carries its own note in `C`, so a rule's reason is unchanged by the
+default's note.
 
 ### Confinement
 
@@ -1358,14 +1375,14 @@ The root module of this repository is the reference binding.
 | rule | `Rule{Tool, Spec, Source, Note}`; `String`, `Bare`, `Glob`, `ServerGlob`, `MatchesTool`, `AllowsTool` (the allow list's reading), `CarveOut` |
 | grammar | `ParseRules(s)`; every error begins `agentpolicy: rule "<token>": ` and ends with the kind's text, `unbalanced parentheses`, `missing tool name`, `empty specifier`, `empty carve-out`, `text after the specifier` |
 | source | `Source{Name, Path, Hash, Trusted, Rank}` |
-| policy | `Policy{Allow, Deny, Ask, Default, Sources, Withheld}`; `Allow()`, `Deny()`, `Ask()`; the zero `Default` is unset; `Policy.WithDefault(d)` |
+| policy | `Policy{Allow, Deny, Ask, Default, Sources, Withheld}`; `Allow()`, `Deny()`, `Ask()`; the zero `Default` is unset; the default's note `Default.WithNote(n)`, `Default.Note()`; `Policy.WithDefault(d)` |
 | merge | `RuleSet{Source, Allow, Deny, Ask}`, `Merge(sets…)` |
 | matcher | `Matcher func(spec, args) bool`; `PrefixMatcher(field)`, `GlobMatcher(field)` |
 | splitter, subject | `Subjects func(ctx, args) ([]Subject, error)`, `Subject{Args, Tool, Text, Constrain}`; `ToolMatcher{Match, Subjects}` per tool |
 | constraint sources | `WithConstraints(fns…)`, each `func(ctx, agentturn.ToolCallInfo) ([]Subject, error)` |
 | claims | read by default through `agenttool.FactsOf` on the call's tool; `WithoutFacts()` turns reading off, `WithFacts()` back on |
 | aliases | `WithAliases(map[string][]string)` |
-| build | `Build(policy, matchers, opts…)`; `ErrNoDefault`, `ErrNoMatcher`, `ErrToolGlob` for the kinds, and a plain error for `invalid_rule` |
+| build | `Build(policy, matchers, opts…)`; `ErrNoDefault`, `ErrNoMatcher`, `ErrToolGlob`, `ErrDefaultNote` for the kinds, and a plain error for `invalid_rule` |
 | engine | `Engine`; `Policy`, `PolicyOf(source)`, `Sources`, `Withheld`, `SetPolicy` |
 | decision | `Engine.Decide`, `Engine.BeforeToolCall()` for `agentturn.Config.BeforeToolCall`; `Engine.Would(ctx, info)`, the verdict Decide would give before the hold, with no deferral remembered and no verdict reported |
 | confinement | `agenttool.ConfinedBy` by default; `WithConfinement(fn)`, `nil` to turn it off |
@@ -1492,8 +1509,9 @@ a splitter. A case has:
   "rank", "trusted", "allow"?, "deny"?, "ask"?, "notes"?}`, with lists
   written in the grammar and `notes` mapping a rule's string form to
   its note; then `allow`, `deny` and `ask`, the host's own rules,
-  appended after the merged lists; and `default`, `"allow"`, `"deny"`,
-  `"ask"` or absent for unset;
+  appended after the merged lists; `default`, `"allow"`, `"deny"`,
+  `"ask"` or absent for unset; and `default_note`, the default's note,
+  absent for none;
 - `build_error`, the kind building MUST refuse with, in which case
   nothing else is checked;
 - `grants`, activated in order as grant sets after building: `source`,
@@ -1565,6 +1583,20 @@ when a rule is added or changed, a reason text included, since the
 model reads it; a rule's removal, or a change that makes a conforming
 engine non-conforming, is a breaking change to the module and is
 listed in the changelog as one.
+
+## Changes since 0.4
+
+- A default MAY carry the host's note, and the reason of a default
+  deny or a default ask ends with `: N` for the note `N` (#93). An
+  allow default's note is refused at build, `default_note`. A deny
+  rule's note is cited by its own reason as before. Draft 0.4 gave the
+  default no note, so a host could tell the model nothing about a
+  refusal by default; a fixed clause such as "do not work around it"
+  was considered and not taken, since a host that denies by default to
+  steer the model to a tool it allows means the opposite. The corpus
+  gains `default_note` on a case's policy ([Building a
+  policy](#building-a-policy), [Deciding a
+  subject](#deciding-a-subject)).
 
 ## Changes since 0.3
 

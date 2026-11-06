@@ -101,6 +101,9 @@ func TestBuildValidates(t *testing.T) {
 		errText  string
 	}{
 		{name: "no default", policy: Policy{Deny: rules(t, "bash")}, err: ErrNoDefault, errText: "agentpolicy: policy default is not set; use Allow(), Deny() or Ask()"},
+		{name: "a note on an allow default", policy: Policy{Deny: rules(t, "bash"), Default: Allow().WithNote("x")}, err: ErrDefaultNote, errText: "agentpolicy: an allow default takes no note"},
+		{name: "a note on a deny default", policy: Policy{Deny: rules(t, "bash"), Default: Deny().WithNote("x")}},
+		{name: "a note on an ask default", policy: Policy{Deny: rules(t, "bash"), Default: Ask().WithNote("x")}},
 		{name: "spec without matcher", policy: Policy{Allow: rules(t, "bash(git:*)"), Default: Ask()}, err: ErrNoMatcher, errText: "agentpolicy: no matcher for the rule's tool: bash(git:*)"},
 		{name: "spec with splitter only", policy: Policy{Deny: rules(t, "bash(rm:*)"), Default: Ask()}, matchers: map[string]ToolMatcher{"bash": {Subjects: shellSplit}}, err: ErrNoMatcher},
 		{name: "carve-out without matcher", policy: Policy{Deny: rules(t, "read(!.env)"), Default: Ask()}, err: ErrNoMatcher},
@@ -927,6 +930,7 @@ func TestSetPolicy(t *testing.T) {
 		{"no default", Policy{Allow: rules(t, "read")}, ErrNoDefault},
 		{"no matcher", Policy{Allow: rules(t, "web(x:*)"), Default: Ask()}, ErrNoMatcher},
 		{"a glob in the allow list", Policy{Allow: rules(t, "mcp__*"), Default: Ask()}, ErrToolGlob},
+		{"a note on an allow default", Policy{Allow: rules(t, "read"), Default: Allow().WithNote("x")}, ErrDefaultNote},
 	} {
 		if err := e.SetPolicy(tc.policy); !errors.Is(err, tc.err) {
 			t.Errorf("%s: err = %v, want %v", tc.name, err, tc.err)
